@@ -1,0 +1,154 @@
+openapi: 3.0.3
+info:
+  title: GRAND-ERP API
+  version: 0.1.0
+  description: >
+    Backend kontrak API untuk GRAND-ERP. Setiap perubahan route, request, atau
+    response di internal/delivery dan internal/model harus tercermin di sini
+    dalam commit yang sama.
+
+servers:
+  - url: http://localhost:3000
+    description: Local development
+
+tags:
+  - name: ruang
+
+paths:
+  /health:
+    get:
+      summary: Liveness probe
+      operationId: health
+      responses:
+        "200":
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /api/v1/ruang:
+    get:
+      tags: [ruang]
+      summary: List ruang
+      operationId: listRuang
+      parameters:
+        - name: page
+          in: query
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: size
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada kode atau nama ruang
+          schema: { type: string, maxLength: 255 }
+        - name: is_aktif
+          in: query
+          description: Kosongkan untuk menampilkan semua ruang
+          schema: { type: boolean }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Ruang" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [ruang]
+      summary: Create ruang
+      operationId: createRuang
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nama_ruang]
+              properties:
+                kode: { type: string, maxLength: 32, nullable: true, example: "GD-UTM" }
+                nama_ruang: { type: string, maxLength: 255, example: "Gudang Utama" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Ruang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/ruang/{id}:
+    get:
+      tags: [ruang]
+      summary: Get ruang by id
+      operationId: getRuang
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Ruang" }
+        "404": { $ref: "#/components/responses/Error" }
+
+components:
+  schemas:
+    Ruang:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        kode: { type: string, nullable: true }
+        nama_ruang: { type: string }
+        is_aktif: { type: boolean }
+
+    PageMetadata:
+      type: object
+      properties:
+        page: { type: integer }
+        size: { type: integer }
+        total_item: { type: integer, format: int64 }
+        total_page: { type: integer, format: int64 }
+
+  responses:
+    Error:
+      description: Request gagal
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              errors: { type: string, example: "ruang not found" }
+
+    ValidationError:
+      description: Payload tidak lolos validasi
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              errors: { type: string, example: "validation failed" }
+              validation_errors:
+                type: object
+                additionalProperties: { type: string }
+                example: { "NamaRuang": "required" }

@@ -1,0 +1,6 @@
+DROP TABLE IF EXISTS pembayaran_alokasi CASCADE;
+DROP TABLE IF EXISTS penerimaan_pembayaran CASCADE;
+DROP TABLE IF EXISTS retur_penjualan_detail CASCADE;
+DROP TABLE IF EXISTS retur_penjualan CASCADE;
+DROP TABLE IF EXISTS penjualan_detail CASCADE;
+DROP TABLE IF EXISTS penjualan CASCADE;

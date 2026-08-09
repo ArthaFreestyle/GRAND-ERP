@@ -1,0 +1,17 @@
+DROP TABLE IF EXISTS periode CASCADE;
+DROP TABLE IF EXISTS ekspedisi CASCADE;
+DROP TABLE IF EXISTS pelanggan CASCADE;
+DROP TABLE IF EXISTS supplier CASCADE;
+DROP TABLE IF EXISTS product_harga_jual CASCADE;
+DROP TABLE IF EXISTS product_satuan CASCADE;
+DROP TABLE IF EXISTS product CASCADE;
+DROP TABLE IF EXISTS ruang CASCADE;
+DROP TABLE IF EXISTS satuan CASCADE;
+DROP TABLE IF EXISTS user_role CASCADE;
+DROP TABLE IF EXISTS role CASCADE;
+DROP TABLE IF EXISTS users CASCADE;
+
+DROP TYPE IF EXISTS jenis_transaksi;
+
+-- btree_gist sengaja dibiarkan terpasang: objek lain di database ini bisa saja
+-- memakainya.

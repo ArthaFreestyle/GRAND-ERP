@@ -1,0 +1,34 @@
+{
+  "app": {
+    "name": "GRAND-ERP"
+  },
+  "web": {
+    "host": "0.0.0.0",
+    "port": 3000
+  },
+  "log": {
+    "level": 6
+  },
+  "database": {
+    "host": "localhost",
+    "port": 5432,
+    "username": "postgres",
+    "password": "",
+    "name": "grand_erp",
+    "sslmode": "disable",
+    "pool": {
+      "idle": 10,
+      "max": 100,
+      "lifetime_seconds": 300
+    }
+  },
+  "redis": {
+    "host": "localhost",
+    "port": 6379,
+    "password": "",
+    "db": 0
+  },
+  "captcha": {
+    "ttl_seconds": 300
+  }
+}

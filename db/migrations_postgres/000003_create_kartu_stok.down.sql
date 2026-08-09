@@ -1,0 +1,1 @@
+DROP TABLE IF EXISTS kartu_stok CASCADE;

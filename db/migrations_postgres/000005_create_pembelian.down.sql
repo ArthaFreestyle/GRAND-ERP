@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS retur_pembelian_detail CASCADE;
+DROP TABLE IF EXISTS retur_pembelian CASCADE;
+DROP TABLE IF EXISTS pembelian_detail CASCADE;
+DROP TABLE IF EXISTS pembelian CASCADE;
