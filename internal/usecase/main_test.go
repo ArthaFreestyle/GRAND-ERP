@@ -67,6 +67,7 @@ type app struct {
 	pelanggan *usecase.PelangganUseCase
 	ruang     *usecase.RuangUseCase
 	role      *usecase.RoleUseCase
+	product   *usecase.ProductUseCase
 	user      *usecase.UserUseCase
 }
 
@@ -102,6 +103,9 @@ func newApp(t *testing.T) *app {
 		role: usecase.NewRoleUseCase(
 			testDB, log, validate, roleRepository,
 		),
+		product: usecase.NewProductUseCase(
+			testDB, log, validate, repository.NewProductRepository(),
+		),
 		user: usecase.NewUserUseCase(
 			testDB, log, validate, repository.NewUserRepository(), roleRepository,
 		),
@@ -128,6 +132,9 @@ func truncateMaster(t *testing.T) {
 	t.Helper()
 
 	for _, table := range []string{
+		// Children before parents. product_harga_jual and product_satuan reference
+		// product; product references satuan and users, so it has to go before both.
+		"product_harga_jual", "product_satuan", "product",
 		"supplier", "pelanggan", "ekspedisi", "satuan", "ruang",
 		"user_role", "users", "role",
 	} {

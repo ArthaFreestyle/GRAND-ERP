@@ -28,6 +28,16 @@ func NewViper() *viper.Viper {
 	// WEB_SWAGGER=false still overrides it.
 	cfg.SetDefault("web.swagger", true)
 
+	// Token lifetime is the only bound on a stateless session: nothing can revoke a
+	// JWT once issued, so a disabled user keeps access until this elapses. Kept to an
+	// hour for that reason, and deliberately not days.
+	//
+	// jwt.secret has no default on purpose. A default signing key would be a key
+	// every deployment shares, and anyone holding it can mint a SUPERADMIN token for
+	// any user id — so NewAuthConfig refuses to start without one instead.
+	cfg.SetDefault("jwt.ttl_minutes", 60)
+	cfg.SetDefault("jwt.issuer", "grand-erp")
+
 	if err := cfg.ReadInConfig(); err != nil {
 		panic(fmt.Errorf("config: cannot read config.json: %w", err))
 	}

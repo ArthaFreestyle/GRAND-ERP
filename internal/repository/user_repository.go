@@ -104,6 +104,37 @@ func (r *UserRepository) FindByID(ctx context.Context, db DBTX, id int64) (*enti
 	return user, nil
 }
 
+// FindByUsernameWithPassword is the only query that reads the password column, and
+// it exists solely for login. Matching is case-insensitive to mirror
+// users_username_lower_uidx: "Budi" and "budi" are one account, so the wrong casing
+// must not look like a wrong username.
+//
+// It returns the row regardless of is_aktif. Deciding what a retired account means
+// is the usecase's job, and answering "no such user" here would make a disabled
+// account indistinguishable from a typo in the logs.
+//
+// The returned User carries a bcrypt hash in Password. Nothing may put it in a
+// response — model.UserResponse has no field for it.
+func (r *UserRepository) FindByUsernameWithPassword(ctx context.Context, db DBTX, username string) (*entity.User, error) {
+	const query = `
+		SELECT id, username, email, password, nama_lengkap, is_aktif,
+		       created_at, created_by, updated_at, updated_by
+		FROM users
+		WHERE lower(username) = lower($1)`
+
+	user := new(entity.User)
+
+	err := db.QueryRowContext(ctx, query, username).Scan(
+		&user.ID, &user.Username, &user.Email, &user.Password, &user.NamaLengkap,
+		&user.IsAktif, &user.CreatedAt, &user.CreatedBy, &user.UpdatedAt, &user.UpdatedBy,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
 // ExistsByUsername matches case-insensitively to mirror users_username_lower_uidx.
 // exceptID skips one row so an update does not collide with itself; pass 0 when
 // creating.

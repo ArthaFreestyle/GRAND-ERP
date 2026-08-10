@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: GRAND-ERP API
-  version: 0.3.0
+  version: 0.4.0
   description: >
     Backend kontrak API untuk GRAND-ERP. Setiap perubahan route, request, atau
     response di internal/delivery dan internal/model harus tercermin di sini
@@ -22,9 +22,19 @@ info:
     dalam satu transaksi.
 
 
-    Endpoint `/api/v1/user` belum punya autentikasi maupun otorisasi. Selama
-    middleware belum ada, siapa pun yang bisa menjangkau server bisa membuat user
-    dan memberinya `SUPERADMIN`. Jangan paparkan ke jaringan yang tidak dipercaya.
+    Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`. Ambil
+    tokennya dari endpoint itu lalu kirim sebagai `Authorization: Bearer <token>`.
+
+
+    Otorisasi memakai nama role. Membaca terbuka untuk siapa pun yang sudah login;
+    menulis dibagi menurut pemilik datanya — `INVENTARIS` untuk barang, satuan,
+    ruang, ekspedisi, dan supplier, `CASHIER` untuk pelanggan. `SUPERADMIN` boleh
+    apa saja. `role` dan `user` khusus `SUPERADMIN`, termasuk untuk membaca.
+
+
+    Token bersifat stateless: **tidak ada cara mencabutnya.** Menonaktifkan user
+    atau mencabut rolenya tidak menyentuh token yang sudah keluar, dan aksesnya
+    baru hilang saat token kedaluwarsa (`jwt.ttl_minutes`, default 60 menit).
 
 
     Semantik PATCH: hanya field yang benar-benar ada di body JSON yang diubah.
@@ -42,7 +52,14 @@ servers:
   - url: http://localhost:3000
     description: Local development
 
+# Berlaku untuk seluruh operasi kecuali yang menimpanya dengan `security: []` —
+# yaitu halaman dokumentasi, /health, dan login.
+security:
+  - bearerAuth: []
+
 tags:
+  - name: auth
+  - name: product
   - name: docs
   - name: ruang
   - name: satuan
@@ -58,6 +75,7 @@ paths:
       tags: [docs]
       summary: Swagger UI
       operationId: docsUI
+      security: []
       description: >
         Halaman dokumentasi ini sendiri. Dimatikan dengan `web.swagger: false`
         (atau `WEB_SWAGGER=false`), dan saat dimatikan rutenya tidak terdaftar
@@ -76,6 +94,7 @@ paths:
       tags: [docs]
       summary: Kontrak OpenAPI ini
       operationId: docsSpec
+      security: []
       description: >
         Berkas ini, ditanam ke dalam biner dengan `go:embed` lewat `docs/docs.go`,
         disajikan apa adanya. Ikut mati bersama `web.swagger: false`.
@@ -94,10 +113,77 @@ paths:
         "404":
           description: Dokumentasi dimatikan lewat konfigurasi
 
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Tukar kredensial dengan bearer token
+      operationId: login
+      security: []
+      description: >
+        Satu-satunya endpoint `/api/v1` yang tidak butuh token.
+
+
+        Semua kegagalan menjawab pesan yang sama, `username or password is wrong`,
+        baik usernamenya tidak ada, passwordnya salah, maupun akunnya
+        `is_aktif: false`. Membedakannya memberi jalan untuk menebak username yang
+        valid, dan operator tidak mendapat apa pun dari perbedaan itu.
+
+
+        Username dicocokkan tanpa memperhatikan huruf besar-kecil, mengikuti
+        `users_username_lower_uidx`.
+
+
+        Token berisi role yang dipegang user **saat token dibuat**, dan hanya role
+        yang `is_aktif`. Role yang diberikan atau dicabut setelahnya baru berlaku
+        pada login berikutnya.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: { type: string, maxLength: 64, example: admin }
+                password: { type: string, format: password, maxLength: 72 }
+      responses:
+        "200":
+          description: Berhasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/LoginResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: Siapa yang server anggap sedang memanggil
+      operationId: me
+      description: >
+        Membaca isi token, bukan tabel `users`. Itu memang yang dipakai server untuk
+        memutuskan izin, jadi itulah yang berguna diperiksa — dan dengan token
+        stateless keduanya bisa berbeda. Role yang dicabut setelah token dibuat masih
+        muncul di sini sampai tokennya kedaluwarsa.
+      responses:
+        "200":
+          description: Sesi yang sedang berlaku
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Error" }
+
   /health:
     get:
       summary: Liveness probe
       operationId: health
+      security: []
       responses:
         "200":
           description: Service is up
@@ -109,6 +195,237 @@ paths:
                   status:
                     type: string
                     example: ok
+
+  /api/v1/product:
+    get:
+      tags: [product]
+      summary: List product
+      operationId: listProduct
+      description: >
+        Tidak menyertakan `satuan` maupun `harga_jual` — mengambilnya berarti satu query
+        per baris. Kuncinya hilang sama sekali, bukan array kosong. Pakai endpoint detail
+        untuk keduanya.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada nama atau kode barang.
+          schema: { type: string, maxLength: 255 }
+        - $ref: "#/components/parameters/IsAktif"
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Product" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [product]
+      summary: Buat produk beserta satuan konversinya
+      operationId: createProduct
+      description: >
+        Produk dan seluruh baris `product_satuan` ditulis dalam satu transaksi.
+
+
+        **Satuan dasar didaftarkan otomatis dengan `faktor = 1`** dari `id_satuan_dasar`,
+        jadi `satuan` boleh dikosongkan dan produk tidak pernah berakhir tanpa satuan
+        dasar. Menyebut satuan dasar sekali lagi di dalam `satuan` diperbolehkan dan
+        melebur ke baris otomatis itu; menyebutnya dengan `faktor` selain 1 ditolak 400.
+
+
+        `created_by` diambil dari token, tidak pernah dari body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kode_barang, nama, id_satuan_dasar]
+              properties:
+                kode_barang:
+                  type: string
+                  maxLength: 64
+                  description: Unik. Duplikat menjawab 409.
+                  example: BRG-001
+                nama: { type: string, maxLength: 255, example: Kertas A4 }
+                id_satuan_dasar:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: >
+                    Harus ada di tabel `satuan`; id yang tidak dikenal menjawab 400, bukan
+                    500.
+                stok_minimum: { type: integer, format: int64, minimum: 0, default: 0 }
+                satuan:
+                  type: array
+                  maxItems: 32
+                  items: { $ref: "#/components/schemas/ProductSatuanInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/{id}:
+    get:
+      tags: [product]
+      summary: Detail produk, dengan satuan dan riwayat harga jual
+      operationId: getProduct
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [product]
+      summary: Update product
+      operationId: updateProduct
+      description: >
+        Hanya `nama`, `stok_minimum`, dan `is_aktif`. Ketiganya NOT NULL, jadi `null`
+        ditolak 400.
+
+
+        **`kode_barang` dan `id_satuan_dasar` tidak bisa diubah** dan tidak ada di body.
+        `kode_barang` mengidentifikasi barang di setiap dokumen yang merujuknya, jadi
+        menggantinya menulis ulang makna dokumen lama. `id_satuan_dasar` lebih parah:
+        mengubahnya membatalkan seluruh `faktor` di `product_satuan` dan setiap kuantitas
+        yang sudah diposting ke `kartu_stok` dalam satuan dasar lama. Pensiunkan dengan
+        `is_aktif: false` lalu buat produk baru.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                nama: { type: string, maxLength: 255 }
+                stok_minimum: { type: integer, format: int64, minimum: 0 }
+                is_aktif: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/{id}/satuan:
+    post:
+      tags: [product]
+      summary: Tambah satuan konversi
+      operationId: addProductSatuan
+      description: >
+        Mengirim satuan yang sudah terdaftar memperbarui `faktor`-nya, bukan menolak —
+        supaya respons sukses tidak pernah berarti konversi tersimpan berbeda dari yang
+        diminta.
+
+
+        `is_default_input: true` **memindahkan** penanda default: yang lama dibersihkan
+        lebih dulu di transaksi yang sama, karena `product_satuan_default_uidx` hanya
+        mengizinkan satu baris bertanda per produk.
+
+
+        Satuan dasar hanya boleh `faktor = 1`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProductSatuanInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/{id}/harga-jual:
+    post:
+      tags: [product]
+      summary: Buka versi harga jual baru
+      operationId: addProductHargaJual
+      description: >
+        Versi yang masih terbuka untuk produk dan satuan yang sama ditutup pada
+        `berlaku_dari`, di transaksi yang sama. Rentangnya setengah terbuka, jadi menutup
+        pada tanggal itu tidak meninggalkan celah maupun tumpang tindih — harga lama
+        berlaku sampai tanggal itu, harga baru mulai dari tanggal itu.
+
+
+        Periode yang tumpang tindih menjawab **409**, ditegakkan exclusion constraint
+        `product_harga_jual_no_overlap`. Itu satu-satunya penjaga yang nyata: pemeriksaan
+        tumpang tindih melintasi baris, jadi pengecekan di aplikasi tidak bisa
+        menggantikannya.
+
+
+        `id_satuan` harus sudah terdaftar di `product_satuan` — harga untuk satuan yang
+        tidak dijual tidak akan pernah muncul di layar input. Tidak ada foreign key yang
+        menjaga itu, jadi ditolak 400 di usecase.
+
+
+        `product_harga_jual` hanya sumber pengisian harga otomatis. Harga yang
+        benar-benar ditagih disalin sebagai snapshot ke `penjualan_detail`, jadi mengubah
+        harga master tidak pernah menyentuh transaksi lama.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id_satuan, harga, berlaku_dari]
+              properties:
+                id_satuan: { type: integer, format: int64, minimum: 1 }
+                harga: { $ref: "#/components/schemas/Harga" }
+                berlaku_dari: { type: string, format: date, example: "2026-01-01" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/ruang:
     get:
@@ -915,6 +1232,20 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
 
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        Token dari `POST /api/v1/auth/login`, dikirim sebagai
+        `Authorization: Bearer <token>`.
+
+
+        Token bersifat stateless dan **tidak bisa dicabut**. Menonaktifkan user atau
+        mencabut rolenya tidak mempengaruhi token yang sudah keluar; aksesnya baru
+        hilang saat token kedaluwarsa, sesuai `jwt.ttl_minutes` (default 60 menit).
+
   parameters:
     ID:
       name: id
@@ -1023,6 +1354,123 @@ components:
 
         `null` berarti **tanpa batas**, bukan nol. Nilai negatif ditolak 400.
       example: "15000000.00"
+
+    LoginResult:
+      type: object
+      properties:
+        token:
+          type: string
+          description: 'Kirim sebagai header: Authorization: Bearer <token>'
+        token_type: { type: string, example: Bearer }
+        expires_at:
+          type: string
+          format: date-time
+          description: >
+            Waktu absolut, bukan durasi, supaya klien tidak perlu menebak kapan
+            responsnya diterima. Ini juga batas satu-satunya sesi ini bisa dicabut.
+        user: { $ref: "#/components/schemas/User" }
+
+    Session:
+      type: object
+      description: Isi token, yaitu yang dipakai server untuk memutuskan izin.
+      properties:
+        user_id: { type: integer, format: int64 }
+        username: { type: string }
+        roles:
+          type: array
+          description: >
+            Nama role yang dipegang saat token dibuat, hanya yang aktif. Selalu array,
+            tidak pernah null.
+          items: { type: string, example: SUPERADMIN }
+
+    Product:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        kode_barang: { type: string, example: BRG-001 }
+        nama: { type: string, example: Kertas A4 }
+        id_satuan_dasar: { type: integer, format: int64 }
+        nama_satuan_dasar:
+          type: string
+          description: Ikut lewat JOIN ke satuan, bukan query terpisah per baris.
+        stok_minimum: { type: integer, format: int64 }
+        is_aktif: { type: boolean }
+        satuan:
+          type: array
+          description: >
+            Hanya pada endpoint detail; tidak ada di list. Diurutkan berdasarkan faktor,
+            jadi satuan dasar selalu pertama.
+          items: { $ref: "#/components/schemas/ProductSatuan" }
+        harga_jual:
+          type: array
+          description: Hanya pada endpoint detail. Terbaru lebih dulu.
+          items: { $ref: "#/components/schemas/ProductHargaJual" }
+        created_at: { type: string, format: date-time }
+        created_by:
+          type: integer
+          format: int64
+          description: >
+            NOT NULL, diambil dari token. Ini modul pertama yang benar-benar mengisi
+            kolom pelaku.
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
+
+    ProductSatuan:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        id_satuan: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        faktor:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Berapa satuan dasar yang dimuat satu satuan ini. Bilangan bulat, karena
+            kolomnya BIGINT — satuan yang memuat 2,5 satuan dasar tidak bisa diwakili.
+        is_default_input: { type: boolean }
+
+    ProductSatuanInput:
+      type: object
+      required: [id_satuan, faktor]
+      properties:
+        id_satuan: { type: integer, format: int64, minimum: 1 }
+        faktor: { type: integer, format: int64, minimum: 1 }
+        is_default_input:
+          type: boolean
+          default: false
+          description: >
+            Maksimal satu per produk, ditegakkan partial unique index
+            `product_satuan_default_uidx` dari migrasi 000011. Mengirim dua yang bertanda
+            dalam satu request buat menjawab 400.
+
+    ProductHargaJual:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        id_satuan: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        harga: { $ref: "#/components/schemas/Harga" }
+        berlaku_dari: { type: string, format: date }
+        berlaku_sampai:
+          type: string
+          format: date
+          nullable: true
+          description: >
+            **Eksklusif**, dan `null` berarti tanpa batas akhir. Versi yang berlaku pada
+            suatu tanggal adalah yang `berlaku_dari <= tanggal` dan `berlaku_sampai` null
+            atau lebih besar dari tanggal itu.
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64 }
+
+    Harga:
+      type: string
+      maxLength: 21
+      pattern: "^[0-9]+([.][0-9]+)?$"
+      description: >
+        String desimal, bukan angka floating point, supaya NUMERIC(20,2) yang disimpan
+        PostgreSQL sampai ke klien tanpa pembulatan biner.
+      example: "50000.00"
 
     Role:
       type: object

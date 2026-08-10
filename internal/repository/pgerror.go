@@ -14,6 +14,11 @@ const uniqueViolation = "23505"
 // there.
 const foreignKeyViolation = "23503"
 
+// exclusionViolation is PostgreSQL's SQLSTATE for an EXCLUDE constraint. The only one
+// in this schema is product_harga_jual_no_overlap, which stops two price versions
+// from being valid at once for the same product and unit.
+const exclusionViolation = "23P01"
+
 // UniqueViolation reports whether err is a unique-constraint violation and, if
 // so, which constraint or index rejected the row.
 //
@@ -39,6 +44,18 @@ func IsUniqueViolation(err error) bool {
 	_, ok := UniqueViolation(err)
 
 	return ok
+}
+
+// IsExclusionViolation reports whether err is an EXCLUDE constraint violation.
+//
+// A GiST exclusion constraint is the only thing that can catch two overlapping price
+// ranges: the check happens across rows, so no per-row CHECK and no application
+// pre-check can be trusted with it. Without this mapping an overlapping price version
+// surfaces as a 500 instead of a 409.
+func IsExclusionViolation(err error) bool {
+	var pgErr *pgconn.PgError
+
+	return errors.As(err, &pgErr) && pgErr.Code == exclusionViolation
 }
 
 // IsForeignKeyViolation reports whether err is a foreign-key violation.

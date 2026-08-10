@@ -130,6 +130,8 @@ services:
       - "/seeders/002_satuan.sql"
       - "-f"
       - "/seeders/003_role.sql"
+      - "-f"
+      - "/seeders/004_superadmin.sql"
 
   web:
     build:
@@ -154,6 +156,12 @@ services:
       WEB_HOST: 0.0.0.0
       WEB_PORT: 3000
       LOG_LEVEL: ${LOG_LEVEL:-4}
+      # Wajib: NewAuthConfig menghentikan proses saat boot kalau kosong atau kurang
+      # dari 32 karakter. Default di bawah hanya supaya `docker compose up` langsung
+      # jalan di mesin sendiri — ganti lewat .env sebelum dipakai di tempat lain,
+      # karena siapa pun yang tahu kunci ini bisa membuat token SUPERADMIN.
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-ganti-sebelum-dipakai-di-luar}
+      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-60}
       DATABASE_HOST: postgres
       DATABASE_PORT: 5432
       DATABASE_USERNAME: ${POSTGRES_USER:-postgres}

@@ -6,14 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Early stage. Master data is implemented; nothing transactional is. Copy an existing slice when adding a module — don't invent a new shape.
 
-- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch) and **`ruang`** (create / get / list, no patch)
+- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`ruang`** (create / get / list, no patch), and **`product`** with `product_satuan` + `product_harga_jual`
 - Use **`supplier`** as the template for a plain master slice: it is the one with every ordinary concern at once — nullable unique `kode`, PATCH presence semantics, and a `LEFT JOIN` in the list query
 - Use **`user`** as the template when a slice writes more than one table — it is the only one that does: a user and its `user_role` grants are written in one transaction, and it is where `Optional[[]int64]`, bcrypt hashing, and the `Touch` pattern live. See "Users and roles" below
 - Module path: `Arthafreestyle/ERP` (no domain prefix); internal imports are `Arthafreestyle/ERP/internal/...`
 - Go 1.25.0 — required by Fiber v3.4.0, which refuses to build on 1.24
 - The full inventory/sales/purchasing schema exists as migrations `000002`–`000008`, but has **no Go layers yet** — see "Inventory data model" below
-- Not built yet: auth/session — `users` exists and holds bcrypt hashes, but nothing verifies one, so there is still no actor and every `created_by`/`updated_by` is written as `NULL`; captcha (Redis is wired but unused), authorization middleware, any worker job, `product`, `periode`
-- **`/api/v1/user` is unauthenticated.** Until middleware exists, anyone who can reach the server can create a user and grant it `SUPERADMIN`. Don't expose the server to an untrusted network
+- Auth is implemented: bearer JWT login, role guards per route — see "Authentication and authorization" below
+- Not built yet: captcha (Redis is wired but unused), logout/refresh, session revocation (stateless tokens cannot be revoked), any worker job, `periode`
+- `product` is the only module that fills `created_by`/`updated_by`, taken from the token via `middleware.SessionFrom`. Every other slice still writes `NULL` — the plumbing exists, they just don't use it yet
 
 ## Stack
 
@@ -77,6 +78,8 @@ Config comes from `config.json` in the working directory, and **any key can be o
 
 A new config key therefore has three homes, not one: `config.example.json`, and — if a container needs a non-default value — the `web` and `worker` `environment:` blocks in `docker-compose.yml`.
 
+`jwt.secret` is the exception to "add it to the example": it is present there but **empty**, because a shipped signing key is worse than a missing one. `docker-compose.yml` supplies a clearly-labelled dev value so `up` works out of the box.
+
 Migrations (golang-migrate CLI; `$DSN` like `postgres://user:pass@host:5432/dbname?sslmode=disable`). The CLI **must be built with the postgres driver tag**, otherwise it fails with `unknown driver postgres`:
 
 ```bash
@@ -91,7 +94,7 @@ migrate -path db/migrations_postgres -database "$DSN" force <version>   # clear 
 migrate create -ext sql -dir db/migrations_postgres -seq <name>         # new up/down pair
 ```
 
-Seed data lives in `db/seeder_postgres/` (`001_ruang.sql`, `002_satuan.sql`, `003_role.sql`) and is applied separately from migrations. Seeders are written to be idempotent (`ON CONFLICT DO NOTHING`), and their conflict target must name the index expression — `ON CONFLICT (lower(kode))`, not `(kode)` — since migration `000009` moved master uniqueness onto `lower(...)`.
+Seed data lives in `db/seeder_postgres/` (`001_ruang.sql`, `002_satuan.sql`, `003_role.sql`, `004_superadmin.sql`) and is applied separately from migrations. Seeders are written to be idempotent (`ON CONFLICT DO NOTHING`), and their conflict target must name the index expression — `ON CONFLICT (lower(kode))`, not `(kode)` — since migration `000009` moved master uniqueness onto `lower(...)`.
 
 Migration `000001` creates only the shared `set_updated_at()` trigger function — every table with an `updated_at` column reuses it.
 
@@ -133,6 +136,37 @@ There is one response envelope, `model.WebResponse[T]`, and one error path:
 - Handlers just `return err`. The Fiber `ErrorHandler` formats it, unwraps `validator.ValidationErrors` into `validation_errors`, and logs only 5xx.
 - A bare `error` (a wrapped SQL failure, say) becomes a 500 with a generic message — internal details never reach the client.
 
+### Authentication and authorization
+
+Bearer JWT, stateless by decision. Every `/api/v1` route needs a token except `POST /api/v1/auth/login`.
+
+- **Route guards must be the FIRST handler argument.** Fiber v3 registers as `Get(path, handler, handlers...)` and runs the chain in the order given, so `Get(path, controller, guard)` puts the guard *after* the controller — which means never, because a controller does not call `Next()`. The route table looks protected and protects nothing. Write `Get(path, guard, controller)`. `TestRouteGuardsRunBeforeHandler` pins both halves of this, including a subtest that fails if Fiber's ordering ever changes.
+- **Tokens cannot be revoked.** Nothing is stored server-side and no lookup happens per request, so there is nothing to invalidate. `is_aktif = false` on a user, or a revoked role, does not reach a token already issued — access ends only at expiry. `jwt.ttl_minutes` (default 60) is the entire bound on that window. Do not "fix" this with a Redis blacklist without revisiting the decision: the blacklist reinstates the per-request lookup that JWT was chosen to avoid.
+- **Roles live in the token claims**, so authorization touches no database. The cost is that a role granted or revoked takes effect at next login. Only `is_aktif` roles are embedded, which is where retired-role-does-not-authorize is enforced — `FindRolesByUserIDs` itself returns retired grants on purpose, for the user-management view.
+- **`jwt.secret` has no default and the process refuses to start without one** (`config.NewAuthConfig`, minimum 32 characters). A baked-in default is a key every deployment shares, and holding it means minting a `SUPERADMIN` token for any user id. A random per-process key was also rejected: it invalidates every token on restart and breaks outright across more than one instance, both silently.
+- **Login answers one message for every failure** — unknown username, wrong password, disabled account. Distinguishing them enumerates valid usernames. The unknown-username path runs a dummy bcrypt compare so it does not return measurably faster than a wrong password, which would leak what the identical message hides.
+- `Authenticate` pins the accepted signing method. Without `jwt.WithValidMethods`, the parser trusts the token's own `alg` header and accepts `alg=none`. `TestAlgNoneTokenIsRejected` covers it.
+- **The whole authorization policy is one function**, `setupAuthRoute` in `internal/delivery/http/route/route.go`, so it can be read as a whole. Reads are open to any authenticated user; writes split by data owner (`INVENTARIS` for goods/units/rooms/carriers/suppliers, `CASHIER` for customers); `role` and `user` are `SUPERADMIN`-only including reads. **That split is a starting assumption from the three role names, not a spec** — adjust it as the real division of work emerges.
+- **`db/seeder_postgres/004_superadmin.sql` is load-bearing.** `POST /api/v1/user` is `SUPERADMIN`-only, so without a seeded first user the API is locked out of itself. It ships `admin` / `admin12345`, a password committed to this repository — treat it as single-use.
+- `middleware.SessionFrom(ctx)` is how a handler gets the caller. This is the seam where `created_by`/`updated_by` should start being filled: the id comes from the token, never from the request body. Nothing uses it for that yet, so those columns are still written `NULL`.
+- Layering holds: the middleware calls `AuthUseCase.Authenticate` and receives a `*model.Session`. The usecase imports `jwt` but never Fiber.
+
+### Product, units, and versioned prices (migration 000011)
+
+Three tables, one slice: `product`, `product_satuan`, `product_harga_jual`.
+
+- **The base unit is inserted by the usecase, not the caller** — `faktor = 1`, from `id_satuan_dasar`, in the same transaction as the product. Nothing in the schema enforces it, so a product that slipped through without one would break every conversion built on it. A caller who lists the base unit again collapses into that row; listing it with any other factor is a 400.
+- **`product_satuan.faktor` is `BIGINT`.** Conversions must be whole numbers. A unit holding 2.5 base units cannot be represented, and silently rounding it would corrupt stock arithmetic.
+- **`berlaku_sampai` is exclusive and `NULL` means open-ended**, because `product_harga_jual_no_overlap` ranges over `daterange(berlaku_dari, berlaku_sampai, '[)')`. Closing a version means setting it to the **next version's start date**, not the day before — that leaves neither gap nor overlap.
+- `CloseOpenHargaJual` guards with `berlaku_dari < $3`. Without it, a version starting on or after the new date would be closed to a date at or before its own start, violating `product_harga_jual_periode_check`. A pre-existing future price is a real case, not hypothetical.
+- **Overlap is caught only by the GiST exclusion constraint** (`23P01` → `repository.IsExclusionViolation` → 409). The check spans rows, so no pre-check in Go can replace it: two concurrent requests can both find no overlap and both insert.
+- **`is_default_input` is capped at one per product** by a partial unique index from `000011`. Setting a new default therefore *moves* the flag — `ClearDefaultSatuan` runs first, in the same transaction. Two flagged units in one create request are rejected in Go first, so the message names the field rather than an index.
+- A price may only be set for a unit already in `product_satuan`. **No foreign key ties `product_harga_jual.id_satuan` to `product_satuan`**, so the usecase has to check it.
+- `kode_barang` and `id_satuan_dasar` are **absent from the update DTO** and must stay that way. `kode_barang` identifies the item across every document referencing it; `id_satuan_dasar` would invalidate every `faktor` and every quantity already posted to `kartu_stok`.
+- `InsertSatuan` uses `ON CONFLICT ... DO UPDATE`, not `DO NOTHING`: a success response must never mean the stored factor disagrees with the request.
+- `harga` is scanned as `harga::TEXT`. `NUMERIC(20,2)` into a `float64` rounds money on the way out.
+- Detail is three queries (product, units, prices); list is two and carries **no** children, with the keys omitted rather than empty.
+
 ### Users and roles (migration 000010)
 
 One user holds many roles. `user_role` is the only record of that, and permissions are the **union of every role a user holds** — there is no "currently active role".
@@ -173,7 +207,7 @@ Enforced by CHECK constraints (so don't re-validate in Go, just surface the erro
 
 Still **application-side only** (section E of the design notes) — the database will not catch these:
 
-- `product_satuan` must include the base unit with `faktor = 1`
+- ~~`product_satuan` must include the base unit with `faktor = 1`~~ — done, enforced in `ProductUseCase.Create`
 - cumulative return qty must not exceed the source document's qty
 - `jumlah_koli` across details must equal the header's `total_koli` before a purchase may post; offer a "bagi rata" button that splits `total_koli` proportionally to `qty_dasar`
 - `alokasi_biaya` must sum exactly to `biaya_angkut`; push the rounding remainder onto the line with the largest `jumlah_koli`

@@ -39,6 +39,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pelangganRepository := repository.NewPelangganRepository()
 	roleRepository := repository.NewRoleRepository()
 	userRepository := repository.NewUserRepository()
+	productRepository := repository.NewProductRepository()
 
 	ruangUseCase := usecase.NewRuangUseCase(
 		config.DB, config.Log, config.Validate, ruangRepository,
@@ -58,6 +59,16 @@ func Bootstrap(config *BootstrapConfig) {
 	roleUseCase := usecase.NewRoleUseCase(
 		config.DB, config.Log, config.Validate, roleRepository,
 	)
+	productUseCase := usecase.NewProductUseCase(
+		config.DB, config.Log, config.Validate, productRepository,
+	)
+	// Fails the process at boot when jwt.secret is missing or too short, rather than
+	// at the first login attempt.
+	authConfig := NewAuthConfig(config.Config, config.Log)
+	authUseCase := usecase.NewAuthUseCase(
+		config.DB, config.Log, config.Validate, userRepository,
+		authConfig.Secret, authConfig.TTL, authConfig.Issuer,
+	)
 	// UserUseCase takes both repositories: granting a role has to verify the role
 	// exists and is active, and that SQL belongs to role's repository.
 	userUseCase := usecase.NewUserUseCase(
@@ -69,6 +80,8 @@ func Bootstrap(config *BootstrapConfig) {
 	ekspedisiController := deliveryhttp.NewEkspedisiController(config.Log, ekspedisiUseCase)
 	supplierController := deliveryhttp.NewSupplierController(config.Log, supplierUseCase)
 	pelangganController := deliveryhttp.NewPelangganController(config.Log, pelangganUseCase)
+	authController := deliveryhttp.NewAuthController(config.Log, authUseCase)
+	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
 
@@ -82,7 +95,10 @@ func Bootstrap(config *BootstrapConfig) {
 
 	routeConfig := route.RouteConfig{
 		App:                 config.App,
+		AuthUseCase:         authUseCase,
 		DocsController:      docsController,
+		AuthController:      authController,
+		ProductController:   productController,
 		RuangController:     ruangController,
 		SatuanController:    satuanController,
 		EkspedisiController: ekspedisiController,

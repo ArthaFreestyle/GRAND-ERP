@@ -22,6 +22,7 @@ func NewValidator() *validator.Validate {
 		model.Optional[string]{},
 		model.Optional[bool]{},
 		model.Optional[[]int64]{},
+		model.Optional[int64]{},
 	)
 
 	return validate

@@ -2,10 +2,10 @@
 
 Backend ERP dengan fokus pada persediaan, pembelian, dan penjualan. Ditulis dengan Go + Fiber v3 di atas PostgreSQL, tanpa ORM.
 
-> **Status: master data dan pengguna berjalan, transaksi belum.** Tujuh modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, dan `user`. Skema persediaan/pembelian/penjualan sudah termigrasi tetapi belum punya satu pun lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
+> **Status: master data, pengguna, dan produk berjalan; transaksi belum.** Delapan modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, `user`, dan `product` (beserta `product_satuan` dan `product_harga_jual`). Skema persediaan/pembelian/penjualan sudah termigrasi tetapi belum punya satu pun lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
 
 > [!WARNING]
-> **`/api/v1/user` belum punya autentikasi maupun otorisasi.** Selama middleware belum ada, siapa pun yang bisa menjangkau server bisa membuat user dan memberinya `SUPERADMIN`. Jangan paparkan ke jaringan yang tidak dipercaya.
+> Seeder memasang superadmin bawaan **`admin` / `admin12345`**, password yang tercatat di repositori ini. Itu kredensial untuk mesin sendiri. Ganti atau nonaktifkan sebelum server bisa dijangkau orang lain — lihat [Autentikasi](#autentikasi).
 
 ## Stack
 
@@ -111,7 +111,13 @@ Tanpa tag itu, `migrate` gagal dengan `unknown driver postgres`.
 cp config.example.json config.json
 ```
 
-Isi `database.password` di `config.json`. File ini masuk `.gitignore` dan tidak pernah ikut ter-commit — karena itu **setiap kunci config baru wajib ditambahkan juga ke `config.example.json`**, kalau tidak clone baru kehilangan kunci itu tanpa suara.
+Isi `database.password` **dan `jwt.secret`** di `config.json`. File ini masuk `.gitignore` dan tidak pernah ikut ter-commit — karena itu **setiap kunci config baru wajib ditambahkan juga ke `config.example.json`**, kalau tidak clone baru kehilangan kunci itu tanpa suara.
+
+`jwt.secret` kosong di contohnya dan **tidak punya default**, jadi server berhenti saat boot sampai diisi, minimal 32 karakter:
+
+```bash
+openssl rand -base64 48
+```
 
 Semua kunci bisa ditimpa environment variable dengan mengganti `.` jadi `_`:
 
@@ -132,9 +138,10 @@ migrate -path db/migrations_postgres -database "$DSN" up
 psql "$DSN" -f db/seeder_postgres/001_ruang.sql
 psql "$DSN" -f db/seeder_postgres/002_satuan.sql
 psql "$DSN" -f db/seeder_postgres/003_role.sql
+psql "$DSN" -f db/seeder_postgres/004_superadmin.sql
 ```
 
-`003_role.sql` memasang tiga role yang berlaku sekarang — `SUPERADMIN`, `CASHIER`, `INVENTARIS`. Tanpa itu `user_role` tidak bisa diisi dan setiap user berakhir tanpa role.
+`003_role.sql` memasang tiga role yang berlaku sekarang — `SUPERADMIN`, `CASHIER`, `INVENTARIS`. Tanpa itu `user_role` tidak bisa diisi dan setiap user berakhir tanpa role. `004_superadmin.sql` memasang user pertama; tanpa itu tidak ada yang bisa login sehingga tidak ada yang bisa membuat user — lihat [Autentikasi](#autentikasi).
 
 Seeder ditulis idempoten (`ON CONFLICT DO NOTHING`), aman dijalankan ulang. Target konflik harus menyebut ekspresi indeks — `ON CONFLICT (lower(kode))`, bukan `(kode)` — karena migrasi `000009` memindahkan keunikan master ke `lower(...)`.
 
@@ -260,6 +267,91 @@ Tanpa ORM, hal-hal ini ditulis tangan setiap kali:
 - Keunikan kode master **tidak peka huruf**, lewat `CREATE UNIQUE INDEX ... (lower(kode))` di migrasi `000009`. Pemeriksaan keberadaan memakai `lower(...) = lower($1)`.
 - Check-then-insert tidak menjamin keunikan — dua request bisa lolos berdua. `repository.UniqueViolation` memetakan SQLSTATE `23505` supaya yang kalah balapan dapat 409, bukan 500. Pre-check tetap ada hanya demi pesan yang lebih ramah.
 
+## Produk, satuan konversi, dan harga jual
+
+Tiga tabel yang saling terikat: `product`, `product_satuan`, dan `product_harga_jual`.
+
+**Satuan dasar didaftarkan otomatis dengan `faktor = 1`.** Tidak ada constraint database untuk itu, jadi kalau bergantung pada pengirim request, satu produk yang lolos tanpa satuan dasar akan merusak setiap konversi yang dibangun di atasnya. `POST /api/v1/product` menyisipkannya sendiri dari `id_satuan_dasar`, di transaksi yang sama dengan produknya.
+
+`faktor` bertipe `BIGINT`, jadi konversinya **wajib bilangan bulat** — satuan yang memuat 2,5 satuan dasar tidak bisa diwakili.
+
+**Harga jual berversi, dan versinya tidak boleh tumpang tindih.** `POST /api/v1/product/{id}/harga-jual` menutup versi yang masih terbuka pada `berlaku_dari` lalu membuka yang baru, dalam satu transaksi. Rentangnya setengah terbuka `[)`, jadi menutup pada tanggal itu tidak meninggalkan celah maupun tumpang tindih:
+
+| Versi | `berlaku_dari` | `berlaku_sampai` | Berlaku |
+|---|---|---|---|
+| lama | 2026-01-01 | 2026-03-01 | 1 Jan – 28 Feb |
+| baru | 2026-03-01 | `null` | 1 Mar – seterusnya |
+
+Tumpang tindih menjawab **409**, ditegakkan exclusion constraint GiST `product_harga_jual_no_overlap`. Itu satu-satunya penjaga yang nyata — pemeriksaannya melintasi baris, jadi pengecekan di Go tidak bisa menggantikannya: dua request bersamaan bisa sama-sama tidak menemukan tumpang tindih lalu sama-sama menulis.
+
+Beberapa hal lain yang tidak terlihat dari daftar endpoint:
+
+- **`kode_barang` dan `id_satuan_dasar` tidak bisa diubah** dan tidak ada di DTO update. `kode_barang` mengidentifikasi barang di setiap dokumen yang merujuknya; menggantinya menulis ulang makna dokumen lama. Mengubah `id_satuan_dasar` lebih parah — membatalkan seluruh `faktor` di `product_satuan` dan setiap kuantitas yang sudah diposting ke `kartu_stok` dalam satuan dasar lama. Pensiunkan dengan `is_aktif: false` lalu buat produk baru.
+- **Maksimal satu `is_default_input` per produk**, ditegakkan partial unique index dari migrasi `000011`. `POST .../satuan` dengan `is_default_input: true` **memindahkan** penandanya: yang lama dibersihkan lebih dulu di transaksi yang sama.
+- Harga hanya boleh dibuat untuk satuan yang **sudah terdaftar** di `product_satuan`. Tidak ada foreign key yang menjaga itu, jadi ditolak 400 di usecase — harga untuk satuan yang tidak dijual tidak akan pernah muncul di layar input.
+- `product_harga_jual` hanya **sumber pengisian harga otomatis**. Harga yang benar-benar ditagih disalin sebagai snapshot ke `penjualan_detail`, jadi mengubah harga master tidak pernah menyentuh transaksi lama. Bedanya keduanya berarti ada override manual yang bisa dilaporkan.
+- Endpoint list **tidak** membawa `satuan` maupun `harga_jual`; mengambilnya berarti satu query per baris. Kuncinya hilang sama sekali, bukan array kosong, supaya bedanya dengan "produk ini memang tidak punya satuan" tetap jelas.
+- Tidak ada kolom stok di sini. `kartu_stok` satu-satunya sumber kebenaran stok, dan modul ini tidak menyentuhnya.
+- **Ini modul pertama yang benar-benar mengisi `created_by`/`updated_by`**, diambil dari token lewat `middleware.SessionFrom` — `product.created_by` `NOT NULL`, dan itulah yang membuat modul ini harus menunggu autentikasi.
+
+## Autentikasi
+
+Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`.
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin12345"}' | jq -r .data.token)
+
+curl -s http://localhost:3000/api/v1/auth/me -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:3000/api/v1/supplier -H "Authorization: Bearer $TOKEN"
+```
+
+**`JWT_SECRET` wajib diisi, minimal 32 karakter.** Server berhenti saat boot tanpa itu, dan `config.example.json` sengaja mengisinya dengan string kosong. Tidak ada default karena kunci default berarti kunci yang sama dipakai setiap deployment, dan siapa pun yang memegangnya bisa membuat token `SUPERADMIN` untuk user id mana pun. `docker compose` sudah memberi nilai dev supaya `up` langsung jalan; ganti lewat `.env`. Bangkitkan dengan `openssl rand -base64 48`.
+
+> [!IMPORTANT]
+> **Token tidak bisa dicabut.** Ini konsekuensi dari JWT stateless: tidak ada yang disimpan di server dan tidak ada lookup per request, jadi tidak ada apa pun yang bisa dibatalkan. Menonaktifkan user (`is_aktif: false`) atau mencabut rolenya **tidak** menyentuh token yang sudah keluar — aksesnya baru hilang saat token kedaluwarsa.
+>
+> Umur token karena itu adalah satu-satunya batas jendela tersebut. Defaultnya 60 menit (`JWT_TTL_MINUTES`), dan memperpanjangnya berarti memperpanjang jendela itu. Kalau pencabutan seketika dibutuhkan, sesi harus pindah ke Redis — Redis sudah terhubung tapi belum dipakai.
+
+Role ikut di dalam token, jadi otorisasi tidak menyentuh database. Efek sampingnya: **role yang diberikan atau dicabut baru berlaku pada login berikutnya.** Hanya role `is_aktif` yang masuk token, jadi mempensiunkan sebuah role menghentikannya memberi izin pada login berikutnya meski penugasannya masih tercatat.
+
+### Superadmin pertama
+
+Karena `POST /api/v1/user` hanya untuk `SUPERADMIN`, tanpa user awal API terkunci dari dirinya sendiri. `db/seeder_postgres/004_superadmin.sql` memasangnya:
+
+| Username | Password | Role |
+|---|---|---|
+| `admin` | `admin12345` | `SUPERADMIN` |
+
+Passwordnya ada di repositori, jadi perlakukan sebagai kredensial sekali pakai. Setelah login pertama:
+
+```bash
+# ganti passwordnya
+curl -X PATCH http://localhost:3000/api/v1/user/1 \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"password":"password-yang-panjang-dan-acak"}'
+```
+
+Atau buat superadmin sungguhan lalu nonaktifkan yang bawaan dengan `{"is_aktif": false}`.
+
+### Otorisasi
+
+Membaca terbuka untuk siapa pun yang sudah login — operator yang tidak bisa melihat supplier tidak bisa bekerja, apa pun rolenya. Menulis dibagi menurut pemilik datanya. `SUPERADMIN` boleh apa saja.
+
+| Resource | Baca | Tulis |
+|---|---|---|
+| `product`, `satuan`, `ruang`, `ekspedisi`, `supplier` | semua yang login | `SUPERADMIN`, `INVENTARIS` |
+| `pelanggan` | semua yang login | `SUPERADMIN`, `CASHIER` |
+| `role`, `user` | `SUPERADMIN` | `SUPERADMIN` |
+
+`role` dan `user` tertutup termasuk untuk membaca: daftar akun beserta hak aksesnya sensitif, dan bisa menulis di sana adalah jalan eskalasi hak — beri diri sendiri `SUPERADMIN`, sisanya menyusul.
+
+> [!NOTE]
+> Pembagian di atas adalah **asumsi awal** yang ditarik dari tiga nama role, bukan hasil dari spesifikasi. Sesuaikan `setupAuthRoute` di `internal/delivery/http/route/route.go` begitu pembagian kerja sebenarnya jelas — seluruh kebijakannya ada di satu fungsi itu supaya bisa dibaca sekaligus.
+
+Izin dihitung dari **gabungan** seluruh role: memegang salah satu role yang disyaratkan sudah cukup. Nama role dibandingkan tanpa memperhatikan huruf besar-kecil, karena `role.nama` unik tanpa memperhatikannya juga.
+
 ## Pengguna dan role
 
 Satu user boleh punya banyak role, dan izinnya adalah **gabungan seluruh role** yang dipegang — tidak ada konsep "role yang sedang aktif". Role yang berlaku sekarang: `SUPERADMIN`, `CASHIER`, `INVENTARIS`.
@@ -326,6 +418,14 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `GET` | `/` | Swagger UI (kalau `web.swagger` menyala) |
 | `GET` | `/openapi.yaml` | Kontrak OpenAPI, ditanam di biner |
 | `GET` | `/health` | Liveness probe |
+| `POST` | `/api/v1/auth/login` | Tukar kredensial dengan token — satu-satunya `/api/v1` tanpa token |
+| `GET` | `/api/v1/auth/me` | Sesi yang sedang berlaku menurut token |
+| `GET` | `/api/v1/product` | List — `page`, `size`, `search`, `is_aktif` |
+| `POST` | `/api/v1/product` | Create, sekalian satuan konversinya |
+| `GET` | `/api/v1/product/{id}` | Detail, dengan satuan dan riwayat harga jual |
+| `PATCH` | `/api/v1/product/{id}` | Update `nama`, `stok_minimum`, `is_aktif` |
+| `POST` | `/api/v1/product/{id}/satuan` | Tambah satuan konversi |
+| `POST` | `/api/v1/product/{id}/harga-jual` | Buka versi harga jual baru |
 | `GET` | `/api/v1/satuan` | List — `page`, `size`, `search`, `is_aktif` |
 | `POST` | `/api/v1/satuan` | Create |
 | `GET` | `/api/v1/satuan/{id}` | Get by id |
@@ -377,15 +477,18 @@ Sudah ada:
 - Tujuh modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `role`, `user` (create/get/list/patch) dan `ruang` (create/get/list)
 - User dengan banyak role, `role_ids` yang mengganti seluruh himpunan dalam satu transaksi, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
+- Autentikasi bearer JWT, otorisasi berbasis role per route, dan superadmin bawaan dari seeder
+- Modul `product` beserta satuan konversi dan harga jual berversi, dengan satuan dasar otomatis dan periode harga yang tidak boleh tumpang tindih
 - Wiring aplikasi penuh, graceful shutdown, penanganan error terpusat
 - Test: unit test untuk `Optional`, validator, `EscapeLike`, dan amplop response; test usecase melawan PostgreSQL sungguhan
 
 Belum ada:
 
-- **Autentikasi dan sesi.** `users` sudah ada dan menyimpan hash bcrypt, tapi belum ada yang memverifikasinya — jadi belum ada pelaku, dan setiap `created_by`/`updated_by` masih ditulis `NULL`
-- **Middleware otorisasi.** Nama role sudah ada, tapi belum ada yang memeriksanya; seluruh endpoint terbuka
+- **Pengisian `created_by`/`updated_by`.** Sesi sudah membawa user id dan `middleware.SessionFrom` sudah mengeksposnya, tapi belum ada usecase yang memakainya — seluruh kolom pelaku masih ditulis `NULL`
+- **Pencabutan sesi.** Token stateless tidak bisa dicabut sebelum kedaluwarsa
+- **Logout dan refresh token**
 - Captcha (Redis sudah terhubung tapi belum dipakai)
-- Modul `product` dan `periode`
+- Modul `periode`
 - Lapisan Go untuk seluruh tabel persediaan dan transaksi (migrasi `000002`–`000008`)
 - Validasi tingkat aplikasi yang tidak bisa ditegakkan database: satuan dasar `faktor = 1` di `product_satuan`, kuota retur kumulatif, `jumlah_koli` yang harus sama dengan `total_koli`, penjumlahan `alokasi_biaya`, penolakan edit dokumen POSTED, baris pembalik saat pembatalan, batas alokasi pembayaran, plafon kredit — didaftar lengkap di CLAUDE.md
 - Job rekonsiliasi harian rantai saldo kartu stok

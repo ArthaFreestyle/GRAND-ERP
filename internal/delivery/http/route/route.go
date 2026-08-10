@@ -2,20 +2,37 @@ package route
 
 import (
 	deliveryhttp "Arthafreestyle/ERP/internal/delivery/http"
+	"Arthafreestyle/ERP/internal/delivery/http/middleware"
+	"Arthafreestyle/ERP/internal/usecase"
 
 	"github.com/gofiber/fiber/v3"
 )
 
-// RouteConfig lists every controller the HTTP surface exposes. Add a field per
-// new module and register its routes in Setup.
+// Role names, matching db/seeder_postgres/003_role.sql. Constants rather than string
+// literals at each call site: role.nama can be renamed through
+// PATCH /api/v1/role/{id}, and when that happens the compiler cannot help — but at
+// least the names to change are all in one place.
+const (
+	RoleSuperadmin = "SUPERADMIN"
+	RoleCashier    = "CASHIER"
+	RoleInventaris = "INVENTARIS"
+)
+
+// RouteConfig lists every controller the HTTP surface exposes. Add a field per new
+// module and register its routes in Setup.
 type RouteConfig struct {
 	App *fiber.App
+
+	// AuthUseCase backs the authentication middleware. Required.
+	AuthUseCase *usecase.AuthUseCase
 
 	// DocsController is nil when web.swagger is false, and the docs routes are then
 	// not registered at all. Nil rather than a boolean flag so there is no way to
 	// enable the routes without also having something to serve them.
 	DocsController *deliveryhttp.DocsController
 
+	AuthController      *deliveryhttp.AuthController
+	ProductController   *deliveryhttp.ProductController
 	RuangController     *deliveryhttp.RuangController
 	SatuanController    *deliveryhttp.SatuanController
 	EkspedisiController *deliveryhttp.EkspedisiController
@@ -30,8 +47,11 @@ func (c *RouteConfig) Setup() {
 	c.setupAuthRoute()
 }
 
-// setupGuestRoute holds endpoints reachable without a session (health, docs,
-// login, captcha).
+// setupGuestRoute holds endpoints reachable without a token: health, the docs, and
+// login itself.
+//
+// Login cannot sit behind the auth middleware, for the obvious reason. Health stays
+// open so a container healthcheck does not need a credential.
 func (c *RouteConfig) setupGuestRoute() {
 	c.App.Get("/health", func(ctx fiber.Ctx) error {
 		return ctx.JSON(fiber.Map{"status": "ok"})
@@ -39,63 +59,98 @@ func (c *RouteConfig) setupGuestRoute() {
 
 	// Swagger UI at the root, reading the contract served next to it. Both are
 	// skipped entirely when web.swagger is false — publishing a full API map of a
-	// service that has no authentication yet is a deployment-time decision, not
-	// something to discover in production.
+	// service is a deployment-time decision, not something to discover in
+	// production.
 	if c.DocsController != nil {
 		c.App.Get("/", c.DocsController.UI)
 		c.App.Get("/openapi.yaml", c.DocsController.Spec)
 	}
+
+	c.App.Post("/api/v1/auth/login", c.AuthController.Login)
 }
 
-// setupAuthRoute holds endpoints that will sit behind auth middleware once it
-// exists.
+// setupAuthRoute holds everything behind a bearer token.
 //
 // Master data has no DELETE by design. Every one of these tables is referenced by
-// transaction tables, so deleting a row that has been used either fails on a
-// foreign key or, worse, breaks the audit trail. Rows are retired with
-// is_aktif = false instead.
+// transaction tables, so deleting a row that has been used either fails on a foreign
+// key or, worse, breaks the audit trail. Rows are retired with is_aktif = false
+// instead.
+//
+// Authorization policy, in one place so it can be read as a whole:
+//
+//   - Reads are open to any authenticated user. An operator who cannot see a
+//     supplier cannot do their job, whatever their role.
+//   - Writes are split by who owns the data: INVENTARIS keeps goods, units, rooms,
+//     carriers, and suppliers; CASHIER keeps customers.
+//   - SUPERADMIN may do anything, so it appears in every write guard.
+//   - user and role are SUPERADMIN-only, reads included. Listing accounts and their
+//     privileges is itself sensitive, and being able to write there is a privilege
+//     escalation path: grant yourself SUPERADMIN and the rest follows.
+//
+// This split is a starting assumption drawn from the three role names, not something
+// derived from a spec. Adjust the guards as the real division of work becomes clear.
 func (c *RouteConfig) setupAuthRoute() {
-	api := c.App.Group("/api/v1")
+	api := c.App.Group("/api/v1", middleware.NewAuth(c.AuthUseCase))
 
-	api.Post("/ruang", c.RuangController.Create)
+	// Any authenticated caller may ask who the server thinks they are.
+	api.Get("/auth/me", c.AuthController.Me)
+
+	// Guard first, controller last. Fiber v3's signature is
+	// Get(path, handler, handlers...) and the chain runs in the order given, so the
+	// role check has to be the FIRST argument. Putting it last registers a guard that
+	// runs after the controller has already written its response — which is to say,
+	// never, since a controller does not call Next(). TestRouteGuardsRunBeforeHandler
+	// pins this ordering.
+	inventaris := middleware.RequireRole(RoleSuperadmin, RoleInventaris)
+	cashier := middleware.RequireRole(RoleSuperadmin, RoleCashier)
+	superadmin := middleware.RequireRole(RoleSuperadmin)
+
 	api.Get("/ruang", c.RuangController.List)
 	api.Get("/ruang/:id", c.RuangController.Get)
+	api.Post("/ruang", inventaris, c.RuangController.Create)
 
-	api.Post("/satuan", c.SatuanController.Create)
+	// product writes sit with INVENTARIS: it is goods master data. Selling prices are
+	// grouped here too rather than with CASHIER, because product_harga_jual only feeds
+	// the default price on an input screen — the price actually charged is a snapshot
+	// on penjualan_detail, which is a different module's decision.
+	api.Get("/product", c.ProductController.List)
+	api.Get("/product/:id", c.ProductController.Get)
+	api.Post("/product", inventaris, c.ProductController.Create)
+	api.Patch("/product/:id", inventaris, c.ProductController.Update)
+	api.Post("/product/:id/satuan", inventaris, c.ProductController.AddSatuan)
+	api.Post("/product/:id/harga-jual", inventaris, c.ProductController.AddHargaJual)
+
 	api.Get("/satuan", c.SatuanController.List)
 	api.Get("/satuan/:id", c.SatuanController.Get)
-	api.Patch("/satuan/:id", c.SatuanController.Update)
+	api.Post("/satuan", inventaris, c.SatuanController.Create)
+	api.Patch("/satuan/:id", inventaris, c.SatuanController.Update)
 
-	api.Post("/ekspedisi", c.EkspedisiController.Create)
 	api.Get("/ekspedisi", c.EkspedisiController.List)
 	api.Get("/ekspedisi/:id", c.EkspedisiController.Get)
-	api.Patch("/ekspedisi/:id", c.EkspedisiController.Update)
+	api.Post("/ekspedisi", inventaris, c.EkspedisiController.Create)
+	api.Patch("/ekspedisi/:id", inventaris, c.EkspedisiController.Update)
 
-	api.Post("/supplier", c.SupplierController.Create)
 	api.Get("/supplier", c.SupplierController.List)
 	api.Get("/supplier/:id", c.SupplierController.Get)
-	api.Patch("/supplier/:id", c.SupplierController.Update)
+	api.Post("/supplier", inventaris, c.SupplierController.Create)
+	api.Patch("/supplier/:id", inventaris, c.SupplierController.Update)
 
-	api.Post("/pelanggan", c.PelangganController.Create)
 	api.Get("/pelanggan", c.PelangganController.List)
 	api.Get("/pelanggan/:id", c.PelangganController.Get)
-	api.Patch("/pelanggan/:id", c.PelangganController.Update)
+	api.Post("/pelanggan", cashier, c.PelangganController.Create)
+	api.Patch("/pelanggan/:id", cashier, c.PelangganController.Update)
 
-	api.Post("/role", c.RoleController.Create)
-	api.Get("/role", c.RoleController.List)
-	api.Get("/role/:id", c.RoleController.Get)
-	api.Patch("/role/:id", c.RoleController.Update)
+	api.Get("/role", superadmin, c.RoleController.List)
+	api.Get("/role/:id", superadmin, c.RoleController.Get)
+	api.Post("/role", superadmin, c.RoleController.Create)
+	api.Patch("/role/:id", superadmin, c.RoleController.Update)
 
-	// A user's roles are granted and revoked through PATCH /user/:id with a
-	// role_ids array, not through a nested sub-resource: role_ids replaces the
-	// whole set, and doing it in the same request as the rest of the patch keeps
-	// the user row and its grants inside one transaction.
-	//
-	// These routes will need the tightest authorization in the system once the
-	// middleware exists — creating a user and granting it SUPERADMIN is a
-	// privilege escalation path.
-	api.Post("/user", c.UserController.Create)
-	api.Get("/user", c.UserController.List)
-	api.Get("/user/:id", c.UserController.Get)
-	api.Patch("/user/:id", c.UserController.Update)
+	// A user's roles are granted and revoked through PATCH /user/:id with a role_ids
+	// array, not through a nested sub-resource: role_ids replaces the whole set, and
+	// doing it in the same request as the rest of the patch keeps the user row and
+	// its grants inside one transaction.
+	api.Get("/user", superadmin, c.UserController.List)
+	api.Get("/user/:id", superadmin, c.UserController.Get)
+	api.Post("/user", superadmin, c.UserController.Create)
+	api.Patch("/user/:id", superadmin, c.UserController.Update)
 }

@@ -31,5 +31,10 @@
   },
   "captcha": {
     "ttl_seconds": 300
+  },
+  "jwt": {
+    "secret": "",
+    "ttl_minutes": 60,
+    "issuer": "grand-erp"
   }
 }

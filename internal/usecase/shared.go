@@ -48,6 +48,19 @@ func invalidOnForeignKey(err error, message string) error {
 	return err
 }
 
+// conflictOnExclusion maps an EXCLUDE constraint violation to a 409.
+//
+// This is the only guard against two price versions being valid at the same time.
+// Checking for an overlap in Go first cannot replace it — the check spans rows, so two
+// concurrent requests can both find no overlap and then both insert.
+func conflictOnExclusion(err error, message string) error {
+	if repository.IsExclusionViolation(err) {
+		return model.Conflict(message)
+	}
+
+	return err
+}
+
 // pageMetadata builds the paging block. Call it only after
 // PageRequest.Normalize, or Size may still be 0 and total_page divides by zero.
 func pageMetadata(request *model.PageRequest, total int64) *model.PageMetadata {
