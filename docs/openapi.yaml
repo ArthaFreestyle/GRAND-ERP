@@ -49,7 +49,10 @@ info:
     mengembalikan `"data": null` berdampingan dengan `errors`.
 
 servers:
-  - url: http://localhost:3000
+  # 127.0.0.1, bukan localhost: port dipublikasikan compose ke 0.0.0.0 yang hanya
+  # IPv4, sedangkan localhost sering diselesaikan ke ::1 lebih dulu sehingga
+  # "Try it out" gagal dengan koneksi reset padahal servernya sehat.
+  - url: http://127.0.0.1:3000
     description: Local development
 
 # Berlaku untuk seluruh operasi kecuali yang menimpanya dengan `security: []` —
@@ -101,7 +104,7 @@ paths:
 
 
         Tombol "Try it out" mengarah ke `servers:` di atas, yaitu
-        `http://localhost:3000`. Membuka dokumentasi dari host atau port lain
+        `http://127.0.0.1:3000`. Membuka dokumentasi dari host atau port lain
         berarti daftar itu perlu disesuaikan — tidak ada yang menulis ulang spec
         saat disajikan.
       responses:

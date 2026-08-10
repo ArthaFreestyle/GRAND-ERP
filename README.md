@@ -30,10 +30,13 @@ Cara tercepat, dan tidak butuh Go, PostgreSQL, Redis, maupun CLI `migrate` terpa
 cp .env.example .env          # opsional, semua nilai punya default
 docker compose up -d --build
 
-curl http://localhost:3000/health
+curl http://127.0.0.1:3000/health
 ```
 
-Lalu buka **<http://localhost:3000>** — root menyajikan Swagger UI untuk seluruh API.
+Lalu buka **<http://127.0.0.1:3000>** — root menyajikan Swagger UI untuk seluruh API.
+
+> [!IMPORTANT]
+> Pakai **`127.0.0.1`, bukan `localhost`.** Compose mempublikasikan port ke `0.0.0.0`, yang hanya IPv4, sedangkan `localhost` di banyak mesin Windows dan macOS diselesaikan ke `::1` (IPv6) lebih dulu. Akibatnya `http://localhost:3000` bisa langsung reset koneksi padahal containernya sehat — sudah terjadi dan bukan dugaan. `curl http://127.0.0.1:3000/health` membedakan keduanya dengan cepat.
 
 Itu menaikkan PostgreSQL 17, Redis 7, menjalankan migrasi, memasang seeder, lalu menjalankan server HTTP dan worker. Urutannya **ditegakkan**, bukan diharapkan — `postgres` harus lolos healthcheck sebelum `migrate` jalan, `migrate` harus selesai sebelum `seed`, dan `web` baru mulai setelah keduanya beres. Tanpa itu aplikasi bisa naik lebih dulu daripada skemanya lalu langsung mati, karena `NewDatabase` melakukan ping saat boot dan `Fatal` kalau gagal.
 
@@ -155,7 +158,7 @@ go run ./cmd/web      # HTTP server, default :3000
 go run ./cmd/worker   # background worker (belum ada job)
 ```
 
-Cek: `curl http://localhost:3000/health`, lalu buka <http://localhost:3000> untuk Swagger UI.
+Cek: `curl http://127.0.0.1:3000/health`, lalu buka <http://127.0.0.1:3000> untuk Swagger UI.
 
 ## Perintah
 
@@ -299,12 +302,12 @@ Beberapa hal lain yang tidak terlihat dari daftar endpoint:
 Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`.
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:3000/api/v1/auth/login \
+TOKEN=$(curl -s -X POST http://127.0.0.1:3000/api/v1/auth/login \
   -H 'Content-Type: application/json' \
   -d '{"username":"admin","password":"admin12345"}' | jq -r .data.token)
 
-curl -s http://localhost:3000/api/v1/auth/me -H "Authorization: Bearer $TOKEN"
-curl -s http://localhost:3000/api/v1/supplier -H "Authorization: Bearer $TOKEN"
+curl -s http://127.0.0.1:3000/api/v1/auth/me -H "Authorization: Bearer $TOKEN"
+curl -s http://127.0.0.1:3000/api/v1/supplier -H "Authorization: Bearer $TOKEN"
 ```
 
 **`JWT_SECRET` wajib diisi, minimal 32 karakter.** Server berhenti saat boot tanpa itu, dan `config.example.json` sengaja mengisinya dengan string kosong. Tidak ada default karena kunci default berarti kunci yang sama dipakai setiap deployment, dan siapa pun yang memegangnya bisa membuat token `SUPERADMIN` untuk user id mana pun. `docker compose` sudah memberi nilai dev supaya `up` langsung jalan; ganti lewat `.env`. Bangkitkan dengan `openssl rand -base64 48`.
@@ -328,7 +331,7 @@ Passwordnya ada di repositori, jadi perlakukan sebagai kredensial sekali pakai. 
 
 ```bash
 # ganti passwordnya
-curl -X PATCH http://localhost:3000/api/v1/user/1 \
+curl -X PATCH http://127.0.0.1:3000/api/v1/user/1 \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"password":"password-yang-panjang-dan-acak"}'
 ```
@@ -404,12 +407,12 @@ Penjelasan lengkap, termasuk aturan yang masih harus divalidasi di aplikasi, ada
 
 Kontrak di [`docs/openapi.yaml`](docs/openapi.yaml). Setiap perubahan route, request, atau response wajib tercermin di sana pada commit yang sama.
 
-**Swagger UI ada di root**, <http://localhost:3000>, membaca kontrak yang disajikan di `/openapi.yaml`. Spec-nya ditanam ke dalam biner lewat `go:embed` di [`docs/docs.go`](docs/docs.go), jadi server tidak perlu berkas `openapi.yaml` di sebelahnya — tapi berarti `docs/` ikut jadi input build, dan menghapusnya dari konteks build Docker menggagalkan kompilasi, bukan sekadar menghilangkan halaman dokumentasi.
+**Swagger UI ada di root**, <http://127.0.0.1:3000>, membaca kontrak yang disajikan di `/openapi.yaml`. Spec-nya ditanam ke dalam biner lewat `go:embed` di [`docs/docs.go`](docs/docs.go), jadi server tidak perlu berkas `openapi.yaml` di sebelahnya — tapi berarti `docs/` ikut jadi input build, dan menghapusnya dari konteks build Docker menggagalkan kompilasi, bukan sekadar menghilangkan halaman dokumentasi.
 
 Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. Saat dimatikan kedua rute tidak terdaftar sama sekali dan menjawab 404 — bukan halaman kosong, dan bukan `/openapi.yaml` yang tetap terbuka. Defaultnya menyala, termasuk untuk `config.json` yang ditulis sebelum kunci ini ada.
 
 > [!NOTE]
-> Tombol **Try it out** memanggil `servers:` di dalam kontrak, yaitu `http://localhost:3000`. Kalau dokumentasi dibuka dari host atau port lain, sesuaikan daftar itu — spec disajikan apa adanya dan tidak ada yang menulis ulangnya saat dikirim.
+> Tombol **Try it out** memanggil `servers:` di dalam kontrak, yaitu `http://127.0.0.1:3000`. Kalau dokumentasi dibuka dari host atau port lain, sesuaikan daftar itu — spec disajikan apa adanya dan tidak ada yang menulis ulangnya saat dikirim.
 >
 > Halaman Swagger UI-nya sendiri memuat aset dari CDN unpkg, jadi butuh koneksi internet untuk tampil. API di belakangnya tidak.
 
