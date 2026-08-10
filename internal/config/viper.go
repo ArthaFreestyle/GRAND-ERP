@@ -22,6 +22,12 @@ func NewViper() *viper.Viper {
 	cfg.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	cfg.AutomaticEnv()
 
+	// GetBool answers false for a key that is absent, so without this default a
+	// config.json written before web.swagger existed would silently lose the docs
+	// page. Defaulting to true keeps "docs are on unless turned off", and
+	// WEB_SWAGGER=false still overrides it.
+	cfg.SetDefault("web.swagger", true)
+
 	if err := cfg.ReadInConfig(); err != nil {
 		panic(fmt.Errorf("config: cannot read config.json: %w", err))
 	}

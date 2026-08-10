@@ -1,0 +1,36 @@
+# Keeps the build context small and, more importantly, keeps local credentials
+# out of the image.
+#
+# config.json is excluded on purpose: it holds a real database password, and the
+# Dockerfile ships config.example.json as the image's config.json instead. Without
+# this line a local config.json would be baked into every layer of the image.
+config.json
+config.local.json
+.env
+.env.*
+
+.git
+.gitignore
+.gitattributes
+.claude
+
+# Compiled output — the image builds its own.
+/bin
+*.exe
+*.test
+*.out
+
+# Not needed to compile the binaries. db/ is mounted from the host by the migrate
+# and seed services in docker-compose.yml rather than copied into the image, so
+# changing a migration does not invalidate the build cache.
+#
+# docs/ is deliberately NOT excluded: docs/docs.go embeds openapi.yaml with
+# go:embed, so the directory is a build input. Excluding it fails the build with
+# "pattern openapi.yaml: no matching files found" rather than just dropping the
+# Swagger page.
+db
+*.md
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.*.yml

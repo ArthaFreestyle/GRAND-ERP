@@ -2,8 +2,13 @@ package model
 
 // WebResponse is the single envelope every HTTP response uses. Exactly one of
 // Data or Errors is populated.
+//
+// Data deliberately has no omitempty: an empty list is "empty" to encoding/json,
+// so omitempty would drop the key altogether and a client reading
+// response.data.length would break on exactly the page that has no rows. It is
+// always present, which costs a `"data": null` on error responses.
 type WebResponse[T any] struct {
-	Data             T                 `json:"data,omitempty"`
+	Data             T                 `json:"data"`
 	Paging           *PageMetadata     `json:"paging,omitempty"`
 	Errors           string            `json:"errors,omitempty"`
 	ValidationErrors map[string]string `json:"validation_errors,omitempty"`
