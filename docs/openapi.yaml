@@ -1,20 +1,99 @@
 openapi: 3.0.3
 info:
   title: GRAND-ERP API
-  version: 0.1.0
+  version: 0.3.0
   description: >
     Backend kontrak API untuk GRAND-ERP. Setiap perubahan route, request, atau
     response di internal/delivery dan internal/model harus tercermin di sini
     dalam commit yang sama.
+
+
+    Data master tidak punya endpoint DELETE. Keempat tabel (satuan, supplier,
+    pelanggan, ekspedisi) dirujuk tabel transaksi, jadi menghapus baris yang
+    sudah dipakai akan gagal karena foreign key atau memutus jejak audit.
+    Penonaktifan dilakukan lewat `PATCH` dengan `is_aktif: false`. Hal yang sama
+    berlaku untuk `role` dan `user`.
+
+
+    Satu user boleh punya banyak role, dan izinnya adalah gabungan seluruh role
+    yang dipegang — tidak ada konsep "role yang sedang aktif". Pemberian dan
+    pencabutan role dilakukan lewat `role_ids` di `POST`/`PATCH /api/v1/user`,
+    bukan sub-resource tersendiri, supaya baris user dan pemberian rolenya berada
+    dalam satu transaksi.
+
+
+    Endpoint `/api/v1/user` belum punya autentikasi maupun otorisasi. Selama
+    middleware belum ada, siapa pun yang bisa menjangkau server bisa membuat user
+    dan memberinya `SUPERADMIN`. Jangan paparkan ke jaringan yang tidak dipercaya.
+
+
+    Semantik PATCH: hanya field yang benar-benar ada di body JSON yang diubah.
+    Mengirim `null` pada kolom nullable **mengosongkan** kolom itu, sedangkan
+    tidak mengirim field sama sekali membiarkannya apa adanya. Untuk kolom NOT
+    NULL (`nama`, `is_aktif`) `null` ditolak dengan 400. Body kosong `{}` juga
+    ditolak, supaya `updated_at` tidak mencatat perubahan yang tidak terjadi.
+
+
+    Kunci `data` selalu ada di setiap respons. Endpoint list mengembalikan `[]`
+    saat tidak ada baris, bukan `null` dan bukan kunci yang hilang; respons gagal
+    mengembalikan `"data": null` berdampingan dengan `errors`.
 
 servers:
   - url: http://localhost:3000
     description: Local development
 
 tags:
+  - name: docs
   - name: ruang
+  - name: satuan
+  - name: ekspedisi
+  - name: supplier
+  - name: pelanggan
+  - name: role
+  - name: user
 
 paths:
+  /:
+    get:
+      tags: [docs]
+      summary: Swagger UI
+      operationId: docsUI
+      description: >
+        Halaman dokumentasi ini sendiri. Dimatikan dengan `web.swagger: false`
+        (atau `WEB_SWAGGER=false`), dan saat dimatikan rutenya tidak terdaftar
+        sama sekali sehingga menjawab 404, bukan halaman kosong.
+      responses:
+        "200":
+          description: Halaman HTML Swagger UI
+          content:
+            text/html:
+              schema: { type: string }
+        "404":
+          description: Dokumentasi dimatikan lewat konfigurasi
+
+  /openapi.yaml:
+    get:
+      tags: [docs]
+      summary: Kontrak OpenAPI ini
+      operationId: docsSpec
+      description: >
+        Berkas ini, ditanam ke dalam biner dengan `go:embed` lewat `docs/docs.go`,
+        disajikan apa adanya. Ikut mati bersama `web.swagger: false`.
+
+
+        Tombol "Try it out" mengarah ke `servers:` di atas, yaitu
+        `http://localhost:3000`. Membuka dokumentasi dari host atau port lain
+        berarti daftar itu perlu disesuaikan — tidak ada yang menulis ulang spec
+        saat disajikan.
+      responses:
+        "200":
+          description: Kontrak dalam YAML
+          content:
+            application/yaml:
+              schema: { type: string }
+        "404":
+          description: Dokumentasi dimatikan lewat konfigurasi
+
   /health:
     get:
       summary: Liveness probe
@@ -37,20 +116,15 @@ paths:
       summary: List ruang
       operationId: listRuang
       parameters:
-        - name: page
-          in: query
-          schema: { type: integer, minimum: 1, default: 1 }
-        - name: size
-          in: query
-          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
         - name: search
           in: query
-          description: Cocokkan sebagian pada kode atau nama ruang
+          description: >
+            Cocokkan sebagian pada kode atau nama ruang. `%` dan `_` diperlakukan
+            sebagai teks biasa, bukan wildcard.
           schema: { type: string, maxLength: 255 }
-        - name: is_aktif
-          in: query
-          description: Kosongkan untuk menampilkan semua ruang
-          schema: { type: boolean }
+        - $ref: "#/components/parameters/IsAktif"
       responses:
         "200":
           description: Halaman hasil
@@ -77,7 +151,14 @@ paths:
               type: object
               required: [nama_ruang]
               properties:
-                kode: { type: string, maxLength: 32, nullable: true, example: "GD-UTM" }
+                kode:
+                  type: string
+                  maxLength: 32
+                  nullable: true
+                  description: >
+                    Opsional. Unik tanpa memperhatikan huruf besar-kecil, tapi
+                    beberapa ruang boleh sama-sama tidak punya kode.
+                  example: "GD-UTM"
                 nama_ruang: { type: string, maxLength: 255, example: "Gudang Utama" }
       responses:
         "201":
@@ -97,10 +178,7 @@ paths:
       summary: Get ruang by id
       operationId: getRuang
       parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: integer, format: int64 }
+        - $ref: "#/components/parameters/ID"
       responses:
         "200":
           description: Found
@@ -112,7 +190,754 @@ paths:
                   data: { $ref: "#/components/schemas/Ruang" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /api/v1/satuan:
+    get:
+      tags: [satuan]
+      summary: List satuan
+      operationId: listSatuan
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada nama satuan.
+          schema: { type: string, maxLength: 255 }
+        - $ref: "#/components/parameters/IsAktif"
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Satuan" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [satuan]
+      summary: Create satuan
+      operationId: createSatuan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nama]
+              properties:
+                nama:
+                  type: string
+                  maxLength: 64
+                  description: Unik tanpa memperhatikan huruf besar-kecil.
+                  example: PCS
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Satuan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/satuan/{id}:
+    get:
+      tags: [satuan]
+      summary: Get satuan by id
+      operationId: getSatuan
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Satuan" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [satuan]
+      summary: Update satuan
+      operationId: updateSatuan
+      description: Field yang tidak dikirim tidak diubah.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                nama: { type: string, maxLength: 64, example: PCS }
+                is_aktif:
+                  type: boolean
+                  description: Pensiunkan satuan yang salah ketik dengan `false`.
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Satuan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/ekspedisi:
+    get:
+      tags: [ekspedisi]
+      summary: List ekspedisi
+      operationId: listEkspedisi
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada nama atau telepon.
+          schema: { type: string, maxLength: 255 }
+        - $ref: "#/components/parameters/IsAktif"
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Ekspedisi" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [ekspedisi]
+      summary: Create ekspedisi
+      operationId: createEkspedisi
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nama]
+              properties:
+                nama:
+                  type: string
+                  maxLength: 255
+                  description: Unik tanpa memperhatikan huruf besar-kecil.
+                  example: JNE
+                telepon: { type: string, maxLength: 32, nullable: true, example: "021-1234567" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Ekspedisi" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/ekspedisi/{id}:
+    get:
+      tags: [ekspedisi]
+      summary: Get ekspedisi by id
+      operationId: getEkspedisi
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Ekspedisi" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [ekspedisi]
+      summary: Update ekspedisi
+      operationId: updateEkspedisi
+      description: >
+        Field yang tidak dikirim tidak diubah. `"telepon": null` mengosongkan
+        nomor telepon.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                nama: { type: string, maxLength: 255 }
+                telepon: { type: string, maxLength: 32, nullable: true }
+                is_aktif: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Ekspedisi" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/supplier:
+    get:
+      tags: [supplier]
+      summary: List supplier
+      operationId: listSupplier
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada kode atau nama supplier.
+          schema: { type: string, maxLength: 255 }
+        - $ref: "#/components/parameters/IsAktif"
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Supplier" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [supplier]
+      summary: Create supplier
+      operationId: createSupplier
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nama]
+              properties:
+                kode:
+                  type: string
+                  maxLength: 32
+                  nullable: true
+                  description: >
+                    Opsional. Unik tanpa memperhatikan huruf besar-kecil, tapi
+                    beberapa supplier boleh sama-sama tidak punya kode.
+                  example: SUP-01
+                nama: { type: string, maxLength: 255, example: "PT Sumber Makmur" }
+                telepon: { type: string, maxLength: 32, nullable: true }
+                alamat: { type: string, maxLength: 1000, nullable: true }
+                npwp: { type: string, maxLength: 32, nullable: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Supplier" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/supplier/{id}:
+    get:
+      tags: [supplier]
+      summary: Get supplier by id
+      operationId: getSupplier
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Supplier" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [supplier]
+      summary: Update supplier
+      operationId: updateSupplier
+      description: >
+        Field yang tidak dikirim tidak diubah. Mengirim `null` pada kode, telepon,
+        alamat, atau npwp mengosongkan kolom itu. `id`, `created_at`, dan
+        `created_by` tidak pernah diambil dari body.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                kode: { type: string, maxLength: 32, nullable: true }
+                nama: { type: string, maxLength: 255 }
+                telepon: { type: string, maxLength: 32, nullable: true }
+                alamat: { type: string, maxLength: 1000, nullable: true }
+                npwp: { type: string, maxLength: 32, nullable: true }
+                is_aktif: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Supplier" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/role:
+    get:
+      tags: [role]
+      summary: List role
+      operationId: listRole
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada nama role.
+          schema: { type: string, maxLength: 255 }
+        - $ref: "#/components/parameters/IsAktif"
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Role" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [role]
+      summary: Create role
+      operationId: createRole
+      description: >
+        Tiga role bawaan (`SUPERADMIN`, `CASHIER`, `INVENTARIS`) dipasang lewat
+        `db/seeder_postgres/003_role.sql`, bukan endpoint ini. Endpoint ini untuk
+        role tambahan.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nama]
+              properties:
+                nama:
+                  type: string
+                  maxLength: 64
+                  description: >
+                    Unik tanpa memperhatikan huruf besar-kecil, jadi `CASHIER` dan
+                    `cashier` bertabrakan.
+                  example: AUDITOR
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Role" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/role/{id}:
+    get:
+      tags: [role]
+      summary: Get role by id
+      operationId: getRole
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Role" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [role]
+      summary: Update role
+      operationId: updateRole
+      description: >
+        Field yang tidak dikirim tidak diubah. Kedua kolom NOT NULL, jadi `null`
+        ditolak 400 untuk keduanya.
+
+
+        **Hati-hati mengganti `nama`.** Nama role akan dipakai pengecekan izin
+        begitu middleware otorisasi dibangun, dan mengganti nama role yang sudah
+        dipakai memutus pengecekan yang mengacu nama lama. Tidak ada constraint
+        database yang bisa mencegahnya. Pensiunkan dengan `is_aktif: false` lalu
+        buat role baru.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                nama: { type: string, maxLength: 64 }
+                is_aktif: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Role" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/user:
+    get:
+      tags: [user]
+      summary: List user
+      operationId: listUser
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada username, nama lengkap, atau email.
+          schema: { type: string, maxLength: 255 }
+        - $ref: "#/components/parameters/IsAktif"
+        - name: role_id
+          in: query
+          description: >
+            Batasi ke pemegang satu role — "tampilkan semua kasir". Seorang user
+            yang punya beberapa role tetap muncul satu kali; filter ini `EXISTS`,
+            bukan join, supaya baris tidak berlipat sebanyak rolenya.
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/User" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [user]
+      summary: Create user
+      operationId: createUser
+      description: >
+        User dan seluruh role-nya ditulis dalam satu transaksi: kalau pemberian
+        role gagal, usernya juga tidak jadi dibuat. `role_ids` boleh dikosongkan —
+        user tanpa role bisa dibuat lalu diberi role lewat PATCH.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  maxLength: 64
+                  description: >
+                    Unik tanpa memperhatikan huruf besar-kecil, jadi `Budi` dan
+                    `budi` bertabrakan.
+                  example: kasir_pagi
+                email:
+                  type: string
+                  format: email
+                  maxLength: 255
+                  nullable: true
+                  description: >
+                    Opsional dan unik tanpa memperhatikan huruf besar-kecil.
+                    Beberapa user boleh sama-sama tidak punya email — indeks unik
+                    PostgreSQL tidak mengikat NULL.
+                password: { $ref: "#/components/schemas/Password" }
+                nama_lengkap: { type: string, maxLength: 255, nullable: true }
+                role_ids: { $ref: "#/components/schemas/RoleIDs" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/user/{id}:
+    get:
+      tags: [user]
+      summary: Get user by id
+      operationId: getUser
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [user]
+      summary: Update user, termasuk mengatur ulang role-nya
+      operationId: updateUser
+      description: >
+        Field yang tidak dikirim tidak diubah. Mengirim `null` pada `email` atau
+        `nama_lengkap` mengosongkan kolom itu; `username`, `password`, dan
+        `is_aktif` NOT NULL sehingga `null` ditolak 400.
+
+
+        `role_ids` **mengganti seluruh himpunan**, bukan menambah: tidak dikirim
+        berarti role dibiarkan apa adanya, `[]` mencabut semuanya, dan `[1, 3]`
+        membuat user berakhir dengan tepat role 1 dan 3. `null` ditolak, karena
+        `[]` sudah berarti "tanpa role".
+
+
+        Role yang tetap dipegang tidak dicabut lalu diberikan ulang, jadi
+        `user_role.created_at` tetap mencatat kapan pemberian itu benar-benar
+        dimulai.
+
+
+        Body yang hanya berisi `role_ids` tetap menggerakkan `updated_at` user —
+        itu tetap perubahan pada user tersebut.
+
+
+        Perubahan user dan role-nya berada dalam satu transaksi.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                username: { type: string, maxLength: 64 }
+                email: { type: string, format: email, maxLength: 255, nullable: true }
+                password: { $ref: "#/components/schemas/Password" }
+                nama_lengkap: { type: string, maxLength: 255, nullable: true }
+                is_aktif: { type: boolean }
+                role_ids: { $ref: "#/components/schemas/RoleIDs" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pelanggan:
+    get:
+      tags: [pelanggan]
+      summary: List pelanggan
+      operationId: listPelanggan
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada kode atau nama pelanggan.
+          schema: { type: string, maxLength: 255 }
+        - $ref: "#/components/parameters/IsAktif"
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Pelanggan" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [pelanggan]
+      summary: Create pelanggan
+      operationId: createPelanggan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nama]
+              properties:
+                kode:
+                  type: string
+                  maxLength: 32
+                  nullable: true
+                  description: >
+                    Opsional. Unik tanpa memperhatikan huruf besar-kecil, tapi
+                    beberapa pelanggan boleh sama-sama tidak punya kode.
+                  example: PLG-01
+                nama: { type: string, maxLength: 255, example: "Toko Sejahtera" }
+                telepon: { type: string, maxLength: 32, nullable: true }
+                alamat: { type: string, maxLength: 1000, nullable: true }
+                npwp: { type: string, maxLength: 32, nullable: true }
+                plafon_kredit: { $ref: "#/components/schemas/PlafonKredit" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pelanggan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pelanggan/{id}:
+    get:
+      tags: [pelanggan]
+      summary: Get pelanggan by id
+      operationId: getPelanggan
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pelanggan" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [pelanggan]
+      summary: Update pelanggan
+      operationId: updatePelanggan
+      description: >
+        Field yang tidak dikirim tidak diubah. `"plafon_kredit": null` mencabut
+        batas kredit sepenuhnya — itu bukan sama dengan menyetelnya ke 0.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                kode: { type: string, maxLength: 32, nullable: true }
+                nama: { type: string, maxLength: 255 }
+                telepon: { type: string, maxLength: 32, nullable: true }
+                alamat: { type: string, maxLength: 1000, nullable: true }
+                npwp: { type: string, maxLength: 32, nullable: true }
+                plafon_kredit: { $ref: "#/components/schemas/PlafonKredit" }
+                is_aktif: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pelanggan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
 components:
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+
+    Size:
+      name: size
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+
+    IsAktif:
+      name: is_aktif
+      in: query
+      description: Kosongkan untuk menampilkan baris aktif maupun tidak aktif.
+      schema: { type: boolean }
+
   schemas:
     Ruang:
       type: object
@@ -121,6 +946,158 @@ components:
         kode: { type: string, nullable: true }
         nama_ruang: { type: string }
         is_aktif: { type: boolean }
+
+    Satuan:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        nama: { type: string }
+        is_aktif: { type: boolean }
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64, nullable: true }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
+
+    Ekspedisi:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        nama: { type: string }
+        telepon: { type: string, nullable: true }
+        is_aktif: { type: boolean }
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64, nullable: true }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
+
+    Supplier:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        kode: { type: string, nullable: true }
+        nama: { type: string }
+        telepon: { type: string, nullable: true }
+        alamat: { type: string, nullable: true }
+        npwp: { type: string, nullable: true }
+        is_aktif: { type: boolean }
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64, nullable: true }
+        nama_pembuat:
+          type: string
+          nullable: true
+          description: >
+            Diambil sekalian lewat LEFT JOIN ke users, bukan query terpisah per
+            baris. Null selama modul autentikasi belum ada.
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
+
+    Pelanggan:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        kode: { type: string, nullable: true }
+        nama: { type: string }
+        telepon: { type: string, nullable: true }
+        alamat: { type: string, nullable: true }
+        npwp: { type: string, nullable: true }
+        plafon_kredit: { $ref: "#/components/schemas/PlafonKredit" }
+        is_aktif: { type: boolean }
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64, nullable: true }
+        nama_pembuat:
+          type: string
+          nullable: true
+          description: Diambil lewat LEFT JOIN ke users, bukan query per baris.
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
+
+    PlafonKredit:
+      type: string
+      nullable: true
+      maxLength: 21
+      pattern: '^[0-9]+(\.[0-9]+)?$'
+      description: >
+        Batas kredit sebagai string desimal, bukan angka floating point, supaya
+        nilai yang disimpan PostgreSQL sampai ke klien tanpa pembulatan biner.
+
+
+        `null` berarti **tanpa batas**, bukan nol. Nilai negatif ditolak 400.
+      example: "15000000.00"
+
+    Role:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        nama: { type: string, example: CASHIER }
+        is_aktif: { type: boolean }
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64, nullable: true }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
+
+    User:
+      type: object
+      description: >
+        Tidak punya field password, bahkan hash-nya. Satu-satunya jalan hash
+        sampai ke klien adalah kalau seseorang menambahkan fieldnya di sini.
+      properties:
+        id: { type: integer, format: int64 }
+        username: { type: string, example: kasir_pagi }
+        email: { type: string, format: email, nullable: true }
+        nama_lengkap: { type: string, nullable: true }
+        is_aktif: { type: boolean }
+        roles:
+          type: array
+          description: >
+            Seluruh role yang dipegang user; satu user boleh punya banyak. Selalu
+            array, tidak pernah `null`, jadi `roles.length` aman dibaca di setiap
+            baris. Diurutkan berdasarkan nama role.
+
+
+            Termasuk role yang dipensiunkan setelah diberikan — pemberiannya masih
+            nyata dan masih perlu dicabut. Bedakan lewat `is_aktif` di dalamnya.
+          items: { $ref: "#/components/schemas/RoleRef" }
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64, nullable: true }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
+
+    RoleRef:
+      type: object
+      description: >
+        Bentuk ringkas role di dalam user. Kolom audit role tidak diulang di setiap
+        baris daftar user.
+      properties:
+        id: { type: integer, format: int64 }
+        nama: { type: string, example: CASHIER }
+        is_aktif: { type: boolean }
+
+    RoleIDs:
+      type: array
+      maxItems: 32
+      items: { type: integer, format: int64, minimum: 1 }
+      description: >
+        Id role yang dipegang user. Id yang berulang dianggap satu — `[2, 2]` jelas
+        berarti "beri role 2".
+
+
+        Id yang tidak ada atau rolenya sudah `is_aktif: false` ditolak 400, bukan
+        diabaikan diam-diam.
+      example: [2, 3]
+
+    Password:
+      type: string
+      format: password
+      minLength: 8
+      maxLength: 72
+      description: >
+        Hanya dikirim masuk, sekali. Di-hash dengan bcrypt di lapisan usecase dan
+        tidak pernah disimpan, dicatat di log, atau dikembalikan.
+
+
+        Batas 72 adalah batas masukan bcrypt. Validator menghitung rune sedangkan
+        bcrypt menghitung byte, jadi password 72 karakter yang mengandung rune
+        multibyte tetap ditolak 400, hanya pesannya yang berbeda.
 
     PageMetadata:
       type: object
@@ -138,7 +1115,8 @@ components:
           schema:
             type: object
             properties:
-              errors: { type: string, example: "ruang not found" }
+              data: { nullable: true, example: null }
+              errors: { type: string, example: "supplier not found" }
 
     ValidationError:
       description: Payload tidak lolos validasi
@@ -147,8 +1125,9 @@ components:
           schema:
             type: object
             properties:
+              data: { nullable: true, example: null }
               errors: { type: string, example: "validation failed" }
               validation_errors:
                 type: object
                 additionalProperties: { type: string }
-                example: { "NamaRuang": "required" }
+                example: { "Nama": "required" }

@@ -49,8 +49,11 @@ func (r *RuangRepository) FindByID(ctx context.Context, db DBTX, id int64) (*ent
 	return ruang, nil
 }
 
+// ExistsByKode matches case-insensitively, mirroring the ruang_kode_lower_uidx
+// index installed in migration 000009 — comparing with = here would report
+// "available" for a kode the index then rejects.
 func (r *RuangRepository) ExistsByKode(ctx context.Context, db DBTX, kode string) (bool, error) {
-	const query = `SELECT EXISTS (SELECT 1 FROM ruang WHERE kode = $1)`
+	const query = `SELECT EXISTS (SELECT 1 FROM ruang WHERE lower(kode) = lower($1))`
 
 	var exists bool
 	if err := db.QueryRowContext(ctx, query, kode).Scan(&exists); err != nil {
@@ -67,13 +70,23 @@ func (r *RuangRepository) Search(ctx context.Context, db DBTX, search string, is
 		WHERE ($1 = '' OR nama_ruang ILIKE '%' || $1 || '%' OR kode ILIKE '%' || $1 || '%')
 		  AND ($2::BOOLEAN IS NULL OR is_aktif = $2)`
 
+	search = EscapeLike(search)
+
 	var total int64
 	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM ruang`+filter, search, isAktif).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count ruang: %w", err)
 	}
 
+	if total == 0 {
+		return []entity.Ruang{}, 0, nil
+	}
+
+	// nama_ruang is not unique, so it cannot order a page on its own: PostgreSQL
+	// is free to return tied rows in a different order per query, which makes a
+	// row show up on both page 1 and page 2 while another disappears. Every
+	// ORDER BY paired with LIMIT/OFFSET ends in a unique column.
 	query := `SELECT id, kode, nama_ruang, is_aktif FROM ruang` + filter + `
-		ORDER BY nama_ruang
+		ORDER BY nama_ruang, id
 		LIMIT $3 OFFSET $4`
 
 	rows, err := db.QueryContext(ctx, query, search, isAktif, limit, offset)

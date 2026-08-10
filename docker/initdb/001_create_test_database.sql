@@ -1,0 +1,17 @@
+-- Membuat database bekas untuk test di samping database aplikasi.
+--
+-- Test di internal/usecase berjalan melawan PostgreSQL sungguhan dan melewatkan
+-- dirinya sendiri kalau TEST_DATABASE_URL tidak diset. Membuat databasenya di sini
+-- berarti `docker compose up` sekaligus menyiapkan tempat test berjalan, tanpa
+-- langkah manual.
+--
+-- Skemanya TIDAK dipasang di sini — service migrate-test di docker-compose.yml yang
+-- menjalankan migrasi ke database ini. Seeder juga tidak dijalankan: test
+-- mengosongkan tabel master sendiri dan membuat role yang dibutuhkannya.
+--
+-- Berkas di /docker-entrypoint-initdb.d HANYA dijalankan saat direktori data masih
+-- kosong. Kalau volume postgres-data sudah ada, menambah berkas di sini tidak
+-- berpengaruh sampai volumenya dibuang:
+--
+--   docker compose down -v
+CREATE DATABASE grand_erp_test;

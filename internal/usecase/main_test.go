@@ -1,0 +1,142 @@
+package usecase_test
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"os"
+	"testing"
+
+	"Arthafreestyle/ERP/internal/config"
+	"Arthafreestyle/ERP/internal/repository"
+	"Arthafreestyle/ERP/internal/usecase"
+
+	// Registers the "pgx" driver with database/sql.
+	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/sirupsen/logrus"
+)
+
+// These tests exercise the usecase layer against a real PostgreSQL, because most
+// of what the issue asks to prove lives in the database rather than in Go:
+// pagination stability under duplicate names, ILIKE wildcard escaping, several
+// rows sharing kode = NULL under a unique index, and NUMERIC surviving a
+// round-trip. A mock would happily agree with a wrong query.
+//
+// Point them at a scratch database:
+//
+//	TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/grand_erp_test?sslmode=disable' go test ./internal/usecase/...
+//
+// Without that variable the whole package skips, so `go test ./...` stays green
+// on a machine with no database.
+const dsnEnv = "TEST_DATABASE_URL"
+
+var testDB *sql.DB
+
+func TestMain(m *testing.M) {
+	dsn := os.Getenv(dsnEnv)
+	if dsn == "" {
+		// Nothing to connect to; every test skips itself via requireDB.
+		os.Exit(m.Run())
+	}
+
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "open %s: %v\n", dsnEnv, err)
+		os.Exit(1)
+	}
+
+	if err := db.Ping(); err != nil {
+		fmt.Fprintf(os.Stderr, "ping %s: %v\n", dsnEnv, err)
+		os.Exit(1)
+	}
+
+	testDB = db
+
+	code := m.Run()
+
+	_ = db.Close()
+
+	os.Exit(code)
+}
+
+// app carries the usecases under test.
+type app struct {
+	satuan    *usecase.SatuanUseCase
+	ekspedisi *usecase.EkspedisiUseCase
+	supplier  *usecase.SupplierUseCase
+	pelanggan *usecase.PelangganUseCase
+	ruang     *usecase.RuangUseCase
+	role      *usecase.RoleUseCase
+	user      *usecase.UserUseCase
+}
+
+// newApp wires the same graph config.Bootstrap does, minus Fiber, and empties the
+// master tables so each test starts from a known state.
+func newApp(t *testing.T) *app {
+	t.Helper()
+	requireDB(t)
+	truncateMaster(t)
+
+	log := logrus.New()
+	log.SetLevel(logrus.PanicLevel) // keep expected-error tests quiet
+	validate := config.NewValidator()
+
+	roleRepository := repository.NewRoleRepository()
+
+	return &app{
+		satuan: usecase.NewSatuanUseCase(
+			testDB, log, validate, repository.NewSatuanRepository(),
+		),
+		ekspedisi: usecase.NewEkspedisiUseCase(
+			testDB, log, validate, repository.NewEkspedisiRepository(),
+		),
+		supplier: usecase.NewSupplierUseCase(
+			testDB, log, validate, repository.NewSupplierRepository(),
+		),
+		pelanggan: usecase.NewPelangganUseCase(
+			testDB, log, validate, repository.NewPelangganRepository(),
+		),
+		ruang: usecase.NewRuangUseCase(
+			testDB, log, validate, repository.NewRuangRepository(),
+		),
+		role: usecase.NewRoleUseCase(
+			testDB, log, validate, roleRepository,
+		),
+		user: usecase.NewUserUseCase(
+			testDB, log, validate, repository.NewUserRepository(), roleRepository,
+		),
+	}
+}
+
+func requireDB(t *testing.T) {
+	t.Helper()
+
+	if testDB == nil {
+		t.Skipf("%s is not set; skipping database-backed test", dsnEnv)
+	}
+}
+
+// truncateMaster clears the master tables with DELETE rather than TRUNCATE:
+// TRUNCATE would have to cascade into kartu_stok, whose guard trigger raises on
+// TRUNCATE by design.
+//
+// Order matters. user_role comes before users and role because it references both;
+// users comes after the master tables because every one of them has a created_by
+// pointing at it. The tests write created_by as NULL, so nothing actually blocks —
+// but the order is what keeps that true once auth starts filling the column in.
+func truncateMaster(t *testing.T) {
+	t.Helper()
+
+	for _, table := range []string{
+		"supplier", "pelanggan", "ekspedisi", "satuan", "ruang",
+		"user_role", "users", "role",
+	} {
+		if _, err := testDB.Exec("DELETE FROM " + table); err != nil {
+			t.Fatalf("clear %s: %v", table, err)
+		}
+	}
+}
+
+func ctx() context.Context { return context.Background() }
+
+func ptr[T any](v T) *T { return &v }

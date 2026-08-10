@@ -1,0 +1,196 @@
+# Lingkungan pengembangan lengkap: PostgreSQL, Redis, migrasi, seeder, server HTTP,
+# dan worker.
+#
+#   docker compose up -d --build
+#   curl http://localhost:3000/health
+#
+# Urutan startup ditegakkan, bukan diharapkan: postgres harus sehat sebelum migrate
+# jalan, migrate harus selesai sebelum seed, dan web/worker baru mulai setelah
+# keduanya beres. Tanpa itu aplikasi bisa naik lebih dulu daripada skemanya, lalu
+# mati karena NewDatabase melakukan ping saat boot dan Fatal kalau gagal.
+
+name: grand-erp
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-grand_erp}
+    ports:
+      # Default host 5433 karena PostgreSQL lokal biasanya sudah memegang 5432.
+      # Di dalam jaringan compose alamatnya tetap postgres:5432.
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Hanya dijalankan saat direktori data masih kosong. Membuat grand_erp_test.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -d menyebut databasenya: tanpa itu pg_isready menjawab "siap" pada fase
+      # awal initdb, sebelum database aplikasi benar-benar ada, dan migrate jalan
+      # terlalu cepat.
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-grand_erp}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Captcha adalah state ber-TTL, tidak ada yang awet di sini, jadi persistence
+    # dimatikan: tidak ada gunanya menulis RDB untuk data yang memang boleh hilang.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${REDIS_HOST_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # Sekali jalan lalu keluar. Image resmi golang-migrate sudah dibangun dengan
+  # driver postgres, jadi tidak kena galat "unknown driver postgres" yang menjerat
+  # pemasangan `go install` tanpa -tags 'postgres'.
+  migrate:
+    image: migrate/migrate:latest
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations_postgres:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-grand_erp}?sslmode=disable"
+      - "up"
+
+  # Skema untuk database test, supaya `go test ./...` bisa langsung jalan setelah
+  # compose naik. Databasenya sendiri dibuat docker/initdb/001_create_test_database.sql.
+  #
+  # Seeder tidak dijalankan di sini: test mengosongkan tabel master sendiri dan
+  # membuat role yang dibutuhkannya.
+  migrate-test:
+    image: migrate/migrate:latest
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations_postgres:/migrations:ro
+    command:
+      - "-path=/migrations"
+      - "-database=postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/grand_erp_test?sslmode=disable"
+      - "up"
+
+  # Seeder dijalankan setelah migrasi, bukan lewat /docker-entrypoint-initdb.d:
+  # isinya bergantung pada skema hasil migrasi, dan berkas initdb jalan sebelum
+  # skema itu ada.
+  #
+  # Seluruh seeder idempoten (ON CONFLICT DO NOTHING), jadi aman ikut jalan setiap
+  # `docker compose up`.
+  seed:
+    image: postgres:17-alpine
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      # Dibaca psql langsung, jadi password tidak muncul di daftar argumen.
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes:
+      - ./db/seeder_postgres:/seeders:ro
+    entrypoint: ["psql"]
+    # Setiap seeder disebut satu per satu, bukan lewat loop shell atas glob. psql
+    # menerima -f berulang dan menjalankannya berurutan, jadi urutannya tertulis
+    # jelas di sini dan tidak ada variabel shell yang bisa bertabrakan dengan
+    # interpolasi compose.
+    #
+    # TAMBAHKAN SEEDER BARU DI SINI. Berkas di db/seeder_postgres/ yang tidak
+    # terdaftar tidak akan pernah dijalankan.
+    #
+    # --single-transaction: semua seeder masuk atau tidak ada yang masuk.
+    # ON_ERROR_STOP=1: berhenti di galat pertama, bukan lanjut lalu keluar 0.
+    command:
+      - "-h"
+      - "postgres"
+      - "-U"
+      - "${POSTGRES_USER:-postgres}"
+      - "-d"
+      - "${POSTGRES_DB:-grand_erp}"
+      - "-v"
+      - "ON_ERROR_STOP=1"
+      - "--single-transaction"
+      - "-f"
+      - "/seeders/001_ruang.sql"
+      - "-f"
+      - "/seeders/002_satuan.sql"
+      - "-f"
+      - "/seeders/003_role.sql"
+
+  web:
+    build:
+      context: .
+      target: web
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      # Menunggu skema dan data awal siap. NewDatabase melakukan ping saat boot dan
+      # Fatal kalau gagal, dan endpoint apa pun akan 500 di atas skema kosong.
+      migrate:
+        condition: service_completed_successfully
+      seed:
+        condition: service_completed_successfully
+    environment:
+      # Setiap kunci config.json bisa ditimpa dengan `.` diganti `_`. Yang ada di
+      # image adalah config.example.json; nilai di bawah inilah yang benar-benar
+      # dipakai.
+      WEB_HOST: 0.0.0.0
+      WEB_PORT: 3000
+      LOG_LEVEL: ${LOG_LEVEL:-4}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USERNAME: ${POSTGRES_USER:-postgres}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DATABASE_NAME: ${POSTGRES_DB:-grand_erp}
+      DATABASE_SSLMODE: disable
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+    ports:
+      - "${WEB_HOST_PORT:-3000}:3000"
+
+  worker:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-4}
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_USERNAME: ${POSTGRES_USER:-postgres}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      DATABASE_NAME: ${POSTGRES_DB:-grand_erp}
+      DATABASE_SSLMODE: disable
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+      REDIS_DB: 0
+
+volumes:
+  postgres-data:
