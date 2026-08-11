@@ -63,8 +63,11 @@ func Bootstrap(config *BootstrapConfig) {
 	roleUseCase := usecase.NewRoleUseCase(
 		config.DB, config.Log, config.Validate, roleRepository,
 	)
+	// ProductUseCase borrows PembelianRepository for GET /product/{id}/riwayat-beli.
+	// The purchase-history query is SQL over pembelian tables, so it stays in that
+	// module's repository; only the resource it answers for belongs to product.
 	productUseCase := usecase.NewProductUseCase(
-		config.DB, config.Log, config.Validate, productRepository,
+		config.DB, config.Log, config.Validate, productRepository, pembelianRepository,
 	)
 	// PembelianUseCase takes four repositories: posting a purchase writes the
 	// header, its lines, a reserved document number, and one kartu_stok row per

@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: GRAND-ERP API
-  version: 0.6.0
+  version: 0.7.0
   description: >
     Backend kontrak API untuk GRAND-ERP. Setiap perubahan route, request, atau
     response di internal/delivery dan internal/model harus tercermin di sini
@@ -451,6 +451,59 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/{id}/riwayat-beli:
+    get:
+      tags: [product]
+      summary: Harga beli terakhir per supplier
+      operationId: listRiwayatBeliProduct
+      description: >
+        Pengganti purchase order. Yang sebenarnya dibutuhkan sebelum memesan bukan
+        dokumen pesanan melainkan perbandingan harga, dan datanya sudah terkumpul
+        sendiri: setiap `pembelian` yang diposting adalah harga yang **benar-benar
+        dibayar**, bukan yang dijanjikan di chat. Tidak ada yang perlu diinput dan tidak
+        ada yang bisa jadi tidak sinkron.
+
+
+        Satu baris per supplier — pembelian **terakhir** supplier itu atas produk ini,
+        bukan satu baris per dokumen. Diurutkan dari yang terbaru.
+
+
+        Hanya dokumen **POSTED** yang dihitung. Draft cuma kertas yang sudah diketik dan
+        dokumen BATAL adalah pembelian yang ditarik kembali; keduanya bukan harga yang
+        pernah dibayar siapa pun.
+
+
+        Produk yang tidak dikenal menjawab **404**, produk yang belum pernah dibeli
+        menjawab halaman kosong. Keduanya fakta yang berbeda.
+
+
+        Dua harga, dan keduanya tidak saling menggantikan — lihat skema `RiwayatBeli`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: id_supplier
+          in: query
+          description: >
+            Persempit ke satu supplier. Itu yang dipakai layar input pembelian: header-nya
+            sudah menyebut supplier, jadi pertanyaan yang berguna di sana adalah "terakhir
+            saya bayar berapa ke supplier ini", bukan "semua orang menjual berapa".
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/RiwayatBeli" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /api/v1/pembelian:
     get:
@@ -2510,6 +2563,58 @@ components:
         diskon_baris: { type: string, example: "0" }
         jumlah_koli: { type: string, example: "0" }
         keterangan_selisih: { type: string, nullable: true, maxLength: 500 }
+
+    RiwayatBeli:
+      type: object
+      description: >
+        Pembelian POSTED terakhir satu supplier atas satu produk.
+
+
+        **Dua harga, dua pertanyaan berbeda.** `harga_satuan_dasar` adalah harga faktur
+        per satuan dasar setelah diskon baris — itu yang dibandingkan dengan penawaran
+        supplier berikutnya. `harga_pokok_satuan_dasar` adalah harga setelah diskon nota,
+        bagian PPN, dan ongkir — itu yang dipakai menilai margin. Melaporkan salah satu
+        saja membuat satu dari dua pertanyaan itu tidak terjawab.
+
+
+        `harga_satuan_input` sengaja bukan angka pembanding: satuannya mengikuti apa yang
+        diketik, jadi 12.000/DUS dan 1.000/PCS terlihat jauh berbeda padahal sama. Tetap
+        dilaporkan karena itu angka yang tercetak di kertas.
+      properties:
+        id_supplier: { type: integer, format: int64 }
+        nama_supplier: { type: string }
+        id_pembelian: { type: integer, format: int64 }
+        nomor: { type: string, example: BL/2026/08/0001 }
+        tanggal: { type: string, format: date-time }
+        no_faktur_supplier: { type: string, nullable: true }
+        id_pembelian_detail: { type: integer, format: int64 }
+        qty_faktur: { type: string, example: "10.0000" }
+        id_satuan_input: { type: integer, format: int64 }
+        nama_satuan: { type: string, example: DUS }
+        faktor_konversi: { type: integer, format: int64, example: 12 }
+        qty_dasar: { type: integer, format: int64, example: 120 }
+        nama_satuan_dasar: { type: string, example: PCS }
+        harga_satuan_input:
+          type: string
+          description: Per satuan input, seperti tertulis di nota.
+          example: "120000.00"
+        diskon_baris: { type: string, example: "0.00" }
+        subtotal: { type: string, example: "1200000.00" }
+        alokasi_biaya: { type: string, example: "60000.00" }
+        harga_satuan_dasar:
+          type: string
+          description: >
+            `subtotal / qty_dasar`. Harga faktur per satuan dasar, jadi bisa dibandingkan
+            antar supplier yang memakai kemasan berbeda.
+          example: "10000.0000"
+        harga_pokok_satuan_dasar:
+          type: string
+          nullable: true
+          description: >
+            Harga pokok setelah ongkir, disalin dari baris pembeliannya. Tidak pernah
+            null pada endpoint ini — hanya dokumen POSTED yang dibaca, dan posting yang
+            mengisinya.
+          example: "10500.0000"
 
     SisaPembelian:
       type: object

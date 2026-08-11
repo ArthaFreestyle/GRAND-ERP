@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Master data is implemented, and **`pembelian` is the first transaction document** — the first thing that writes `kartu_stok`. Copy an existing slice when adding a module — don't invent a new shape.
 
-- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`ruang`** (create / get / list, no patch), **`product`** with `product_satuan` + `product_harga_jual`, **`pembelian`** with `pembelian_detail`, `kartu_stok` posting, and `document_counter`, and **`penerimaan_susulan`** with `penerimaan_susulan_detail`
+- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`ruang`** (create / get / list, no patch), **`product`** with `product_satuan` + `product_harga_jual`, **`pembelian`** with `pembelian_detail`, `kartu_stok` posting, and `document_counter`, **`penerimaan_susulan`** with `penerimaan_susulan_detail`, and **`riwayat_beli`** — a query, not a module
 - Use **`supplier`** as the template for a plain master slice: it is the one with every ordinary concern at once — nullable unique `kode`, PATCH presence semantics, and a `LEFT JOIN` in the list query
 - Use **`user`** as the template when a slice writes two tables: a user and its `user_role` grants in one transaction, and it is where `Optional[[]int64]`, bcrypt hashing, and the `Touch` pattern live. See "Users and roles" below
 - Use **`pembelian`** as the template for a **transaction document** — a state machine, a generated number, exact decimal arithmetic, and stock movements, all in one transaction. See "Pembelian and the posting engine" below. Do not model a transaction document on a master slice; the concerns barely overlap
+- Use **`riwayat_beli`** as the template for a **read that is not a module** — no table, no migration, one query in another module's repository, borrowed by the usecase that owns the resource. See "Riwayat harga beli" below
 - Use **`penerimaan_susulan`** as the template for a **document that derives from another** — one that points at a parent's detail rows, draws down a quota held there, copies a cost snapshot from it, and rewrites a cache on it. `retur_pembelian` is the same shape with the goods moving the other way. See "Penerimaan susulan" below
 - Module path: `Arthafreestyle/ERP` (no domain prefix); internal imports are `Arthafreestyle/ERP/internal/...`
 - Go 1.25.0 — required by Fiber v3.4.0, which refuses to build on 1.24
@@ -210,6 +211,19 @@ The second shipment for goods that did not arrive with the first. It adds stock 
 - No freight columns. Value entering stock is the remaining share of the original invoice value, so one invoice contributes exactly its own value however many times the goods turn up. If a follow-up shipment ever needs its own carrier bill, that is a schema change and a deliberate one — it makes the second batch cost more per unit than the first.
 - `id_supplier` and `id_ruang` are copied from the purchase, not chosen. Goods that need to move rooms after arrival are a `mutasi`.
 
+### Riwayat harga beli (no migration)
+
+`GET /api/v1/product/{id}/riwayat-beli` — isu #4 fase 4, and the replacement for the purchase order this system deliberately does not have. It is the worked example of a **read that is not a module**: no table, no migration, no DTO to fill in, nothing that can fall out of step. Copy this shape rather than a slice when a request is answerable from documents that already exist.
+
+- **Nothing new is stored.** Every POSTED `pembelian_detail` row is already a price that was actually paid, which is worth more than a quotation because a quotation is only what was promised in a chat. Adding a table for this would create a second source of truth for a fact the first one already carries.
+- **The SQL lives in `pembelian_repository.go`, the endpoint hangs off product.** `ProductUseCase` borrows `PembelianRepository` the way `UserUseCase` borrows `RoleRepository` — the query is over another module's tables, so it stays in that module's repository. A usecase of its own would be a module for one query.
+- **Two prices, and collapsing them into one is the mistake to avoid.** `harga_satuan_dasar` (= `subtotal / qty_dasar`) is the invoice per base unit and is what a supplier's next quote is compared against; `harga_pokok_satuan_dasar` is after the nota discount, PPN share, and freight, and is what margin is judged against. Negotiating with the second holds the supplier responsible for the carrier's bill; costing with the first drops freight entirely.
+- `harga_satuan_input` is reported but is **not comparable**: it is per input unit, so 120.000/DUS and 10.000/PCS look nothing alike while being the same price.
+- **The product is looked up first**, so an unknown id answers 404 and a product nobody has bought answers an empty page. Those are different facts and a client that cannot tell them apart shows the wrong message.
+- **Only POSTED.** A DRAFT is a typed page and a BATAL is a purchase that was withdrawn; neither is a price anyone paid. One condition covers both, rather than a second clause excluding BATAL.
+- `DISTINCT ON (p.id_supplier)` is what makes it one row per supplier, and it forces the inner `ORDER BY` to lead with `id_supplier` — which is not a useful reading order, hence the wrapping query that re-sorts by date. The outer `ORDER BY` ends in `id_supplier`, unique across the subquery *because* `DISTINCT ON` made it so. The inner tiebreaker `d.id DESC` matters: one document may carry the same product twice.
+- The division is safe because `pembelian_detail_qty_dasar_check` makes `qty_dasar > 0`. Casting to `NUMERIC(20,4)` rounds halves away from zero, matching `formatNumeric` — a figure computed in SQL and one recomputed in Go have to agree.
+
 ### Product, units, and versioned prices (migration 000011)
 
 Three tables, one slice: `product`, `product_satuan`, `product_harga_jual`.
@@ -287,6 +301,8 @@ Follow the `supplier` slice, in this order: migration in `db/migrations_postgres
 If the slice writes more than one table, follow `user` instead — it is the worked example of a usecase holding two repositories and committing both tables in one transaction.
 
 If the slice is a **transaction document** — one with a status, a generated number, and stock movements — follow `pembelian`. It is the only one of its kind so far, and copying a master slice for it will leave out the row lock on every transition, the exact-decimal arithmetic, and the reuse of `DocumentCounterRepository` and `KartuStokRepository`.
+
+If the request is answerable from rows that already exist — a report, a history, a comparison — do **not** add a slice at all. Follow `riwayat_beli`: an entity for the projection, a query in the repository that already owns those tables, and a method on whichever usecase owns the resource the endpoint hangs off. No migration, no DTO to fill in, nothing to keep in step.
 
 Master data gets no `DELETE`: every master table is referenced by transaction tables, so deleting a used row either fails on a foreign key or destroys the audit trail. Retire rows with `is_aktif = false` instead. The single exception is `user_role`, for the reasons in "Users and roles".
 

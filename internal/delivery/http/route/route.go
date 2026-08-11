@@ -124,6 +124,12 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/product/:id/satuan", inventaris, c.ProductController.AddSatuan)
 	api.Post("/product/:id/harga-jual", inventaris, c.ProductController.AddHargaJual)
 
+	// riwayat-beli is a read, so it follows the read rule and is open to any
+	// authenticated caller. It is the replacement for a purchase order: what an
+	// operator needs before ordering is the price last paid, and it reads only
+	// documents that were posted anyway.
+	api.Get("/product/:id/riwayat-beli", c.ProductController.RiwayatBeli)
+
 	// pembelian is the first module whose writes are split by workflow stage rather
 	// than by which data they touch, because posting one is not an edit — it appends
 	// to kartu_stok, which is append-only. A wrong posting cannot be corrected, only

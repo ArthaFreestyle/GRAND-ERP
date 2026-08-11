@@ -2,7 +2,7 @@
 
 Backend ERP dengan fokus pada persediaan, pembelian, dan penjualan. Ditulis dengan Go + Fiber v3 di atas PostgreSQL, tanpa ORM.
 
-> **Status: master data, pengguna, produk, dan siklus penerimaan barang berjalan.** Sepuluh modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, `user`, `product` (beserta `product_satuan` dan `product_harga_jual`), `pembelian`, dan `penerimaan_susulan`. **`pembelian` adalah dokumen transaksi pertama, dan yang pertama menulis ke `kartu_stok`** — mesin posting dan generator nomor dokumennya dipakai ulang seluruh modul transaksi berikutnya. Penjualan, retur, mutasi, pemakaian, dan pembayaran skemanya sudah termigrasi tetapi belum punya lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
+> **Status: master data, pengguna, produk, dan siklus penerimaan barang berjalan.** Sepuluh modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, `user`, `product` (beserta `product_satuan` dan `product_harga_jual`), `pembelian`, dan `penerimaan_susulan`. **`pembelian` adalah dokumen transaksi pertama, dan yang pertama menulis ke `kartu_stok`** — mesin posting dan generator nomor dokumennya dipakai ulang seluruh modul transaksi berikutnya. **Purchase order sengaja tidak ada**; penggantinya adalah [riwayat harga beli](#riwayat-harga-beli-pengganti-purchase-order), yang terkumpul sendiri dari pembelian yang sudah diposting. Penjualan, retur, mutasi, pemakaian, dan pembayaran skemanya sudah termigrasi tetapi belum punya lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
 
 > [!WARNING]
 > Seeder memasang superadmin bawaan **`admin` / `admin12345`**, password yang tercatat di repositori ini. Itu kredensial untuk mesin sendiri. Ganti atau nonaktifkan sebelum server bisa dijangkau orang lain — lihat [Autentikasi](#autentikasi).
@@ -422,6 +422,39 @@ sisa_dasar        = selisih_dasar − qty_susulan_dasar yang masih ditagih hari 
 - **Membatalkan pembelian yang punya susulan POSTED ditolak 409** — batalkan susulannya lebih dulu. Pembatalan pembelian hanya membalik baris yang ditulis pembelian itu sendiri, jadi stok susulannya akan tertinggal tanpa dokumen yang menjelaskannya, dan setelah itu tidak bisa dibalik lagi karena jalur pembatalannya menuntut pembelian yang masih POSTED.
 - Nomornya seri sendiri, `PS/2026/08/0001`, dari generator yang sama.
 
+## Riwayat harga beli: pengganti purchase order
+
+`GET /api/v1/product/{id}/riwayat-beli`
+
+Sistem ini sengaja **tidak punya purchase order** — pemesanan terjadi lewat WhatsApp, dan mengetik ulang PO setelah kesepakatan sudah tercapai di chat adalah input ganda tanpa imbalan. Yang sebenarnya dibutuhkan sebelum memesan bukan dokumen pesanan, melainkan kebiasaan "cek harga ke beberapa toko dulu":
+
+> produk X terakhir dibeli dari supplier mana, harga berapa, tanggal berapa
+
+Dan itu sudah terkumpul sendiri. Setiap `pembelian` yang diposting mencatat harga yang **benar-benar dibayar** — lebih berguna daripada penawaran, karena penawaran hanya yang dijanjikan di chat. Tidak ada yang perlu diinput dan tidak ada yang bisa jadi tidak sinkron: ini query, bukan modul.
+
+**Satu baris per supplier**, yaitu pembelian terakhir supplier itu atas produk tersebut — bukan satu baris per dokumen. Diurutkan dari yang terbaru. `id_supplier` mempersempit ke satu supplier, dan itu bentuk yang dipakai layar input pembelian: headernya sudah menyebut supplier, jadi pertanyaan yang berguna di sana adalah "terakhir saya bayar berapa ke supplier ini".
+
+**Hanya dokumen `POSTED`.** Draft cuma kertas yang sudah diketik, dan dokumen `BATAL` adalah pembelian yang ditarik kembali; keduanya bukan harga yang pernah dibayar siapa pun.
+
+### Dua harga, dua pertanyaan yang berbeda
+
+Ini yang paling mudah disederhanakan jadi satu angka, dan tidak boleh:
+
+| Kolom | Isi | Dipakai untuk |
+|---|---|---|
+| `harga_satuan_dasar` | `subtotal / qty_dasar` — faktur setelah diskon baris | membandingkan dengan penawaran supplier berikutnya |
+| `harga_pokok_satuan_dasar` | setelah diskon nota, bagian PPN, dan ongkir | menilai margin |
+
+10 DUS isi 12 seharga 120.000/DUS adalah 1.200.000 untuk 120 pcs — **10.000/pcs di kertas**. Ditambah tagihan ekspedisi 60.000, barangnya jadi **10.500/pcs di rak**. Menawar pakai angka kedua berarti menuntut supplier bertanggung jawab atas ongkos yang bukan tagihannya; menilai margin pakai angka pertama berarti melewatkan ongkir sama sekali.
+
+`harga_satuan_input` juga dilaporkan karena itu angka yang tercetak di nota, tapi **bukan angka pembanding**: satuannya mengikuti apa yang diketik, jadi 120.000/DUS dan 10.000/PCS terlihat jauh berbeda padahal harga yang sama.
+
+### Hal lain yang perlu diketahui
+
+- **Produk yang tidak dikenal menjawab 404; produk yang belum pernah dibeli menjawab halaman kosong.** Dua fakta yang berbeda, dan klien yang tidak bisa membedakannya akan menampilkan pesan yang salah.
+- **Tidak ada migrasi baru.** Fase ini tidak menambah satu kolom pun — seluruh jawabannya sudah ada di `pembelian` dan `pembelian_detail` yang diposting fase 2.
+- Kalau satu dokumen memuat produk yang sama di dua baris, yang diambil adalah baris yang diketik terakhir. Ditegakkan pemecah seri di `ORDER BY`, bukan diserahkan ke planner.
+
 ## Autentikasi
 
 Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`.
@@ -558,6 +591,7 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `PATCH` | `/api/v1/product/{id}` | Update `nama`, `stok_minimum`, `is_aktif` |
 | `POST` | `/api/v1/product/{id}/satuan` | Tambah satuan konversi |
 | `POST` | `/api/v1/product/{id}/harga-jual` | Buka versi harga jual baru |
+| `GET` | `/api/v1/product/{id}/riwayat-beli` | Harga beli terakhir per supplier — `page`, `size`, `id_supplier` |
 | `GET` | `/api/v1/pembelian` | List — `page`, `size`, `search`, `status`, `status_penerimaan`, `id_supplier`, `tanggal_dari`, `tanggal_sampai` |
 | `POST` | `/api/v1/pembelian` | Buat draft beserta barisnya; nomor digenerate server |
 | `GET` | `/api/v1/pembelian/{id}` | Detail beserta baris, selisih, dan alokasi ongkir |
@@ -629,6 +663,7 @@ Sudah ada:
 - **Mesin posting `kartu_stok`** dan **generator nomor dokumen lintas modul**, keduanya dibangun untuk dipakai ulang penjualan, mutasi, pemakaian, dan stok opname
 - **Modul `pembelian` penuh**: draft, edit, ganti baris, bagi rata koli, ajukan, tolak, posting, batal, dan daftar sisa — dengan dua kolom kuantitas, alokasi ongkir per koli yang berjumlah persis, dan nilai masuk yang proporsional terhadap yang benar-benar datang
 - **Modul `penerimaan_susulan`** untuk kiriman yang menyusul: menambah stok tanpa menambah utang, harga pokok disalin dari baris pembelian sehingga satu faktur menyumbang persis nilainya sendiri ke persediaan, dan sisa per baris yang diperiksa ulang di bawah row lock saat posting
+- **Riwayat harga beli per produk per supplier** — pengganti purchase order, tanpa dokumen tambahan yang harus diinput
 - Tujuh modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `role`, `user` (create/get/list/patch) dan `ruang` (create/get/list)
 - User dengan banyak role, `role_ids` yang mengganti seluruh himpunan dalam satu transaksi, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
@@ -644,7 +679,7 @@ Belum ada:
 - **Logout dan refresh token**
 - Captcha (Redis sudah terhubung tapi belum dipakai)
 - Modul `periode`. Trigger `kartu_stok` sudah menolak posting ke periode `TUTUP`, tapi tanpa lapisan Go tidak ada tutup buku — dan bulan tanpa baris `periode` dihitung terbuka
-- **Lanjutan modul pengadaan** (isu #4): riwayat harga beli per produk per supplier (fase 4), `retur_pembelian` (fase 5), dan `pembayaran_utang` beserta alokasinya (fase 6)
+- **Lanjutan modul pengadaan** (isu #4): `retur_pembelian` (fase 5) dan `pembayaran_utang` beserta alokasinya (fase 6). Keduanya bisa dikerjakan paralel — fase 6 tidak menyentuh stok
 - Lapisan Go untuk penjualan, piutang, pemakaian, mutasi, dan stok opname
 - Lampiran foto faktur (isu #5) — job pertama untuk `cmd/worker`
 - Validasi tingkat aplikasi yang tersisa: kuota retur kumulatif, batas alokasi pembayaran, plafon kredit, dan penghitungan ulang `status_pembayaran` — didaftar lengkap di CLAUDE.md

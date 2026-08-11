@@ -589,6 +589,145 @@ func (r *PembelianRepository) HasPostedSusulan(ctx context.Context, db DBTX, idP
 	return exists, nil
 }
 
+// riwayatBeliFilter is shared by the COUNT and the row query, so total_item cannot
+// start disagreeing with the rows it counts.
+//
+// Only POSTED documents. A draft is a typed page, not a purchase, and a cancelled one
+// is a purchase that was withdrawn — neither is a price anybody paid. BATAL is
+// excluded by the same condition rather than by a second clause.
+//
+// Placeholder discipline: the filter owns $1..$2 and pagination follows after it.
+const riwayatBeliFilter = `
+	WHERE d.id_product = $1
+	  AND p.status = 'POSTED'
+	  AND ($2 = 0 OR p.id_supplier = $2)`
+
+// riwayatBeliFrom reaches satuan twice, once for the unit that was typed on the
+// invoice and once for the product's base unit, because the two prices are quoted per
+// different unit and a screen showing them has to say which is which.
+const riwayatBeliFrom = `
+	FROM pembelian_detail d
+	JOIN pembelian p ON p.id = d.id_pembelian
+	JOIN supplier s ON s.id = p.id_supplier
+	JOIN satuan si ON si.id = d.id_satuan_input
+	JOIN product pr ON pr.id = d.id_product
+	JOIN satuan sd ON sd.id = pr.id_satuan_dasar`
+
+// riwayatBeliColumns names every projected column, and the aliases are what the outer
+// query in FindRiwayatBeli selects by. Three tables contribute a column called `nama`
+// and two contribute one called `id`, so without the aliases the subquery would not
+// even parse.
+//
+// The division is safe: pembelian_detail_qty_dasar_check makes qty_dasar > 0, so there
+// is no row where this divides by zero. Casting to NUMERIC(20,4) rounds halves away
+// from zero, the same rule formatNumeric applies in Go — a figure computed here and one
+// recomputed there have to agree or they differ by a cent nobody can see.
+const riwayatBeliColumns = `
+		p.id_supplier,
+		s.nama                                          AS nama_supplier,
+		p.id                                            AS id_pembelian,
+		p.nomor,
+		p.tanggal,
+		p.no_faktur_supplier,
+		d.id                                            AS id_pembelian_detail,
+		d.qty_faktur::TEXT                              AS qty_faktur,
+		d.id_satuan_input,
+		si.nama                                         AS nama_satuan,
+		d.faktor_konversi,
+		d.qty_dasar,
+		sd.nama                                         AS nama_satuan_dasar,
+		d.harga_satuan_input::TEXT                      AS harga_satuan_input,
+		d.diskon_baris::TEXT                            AS diskon_baris,
+		d.subtotal::TEXT                                AS subtotal,
+		d.alokasi_biaya::TEXT                           AS alokasi_biaya,
+		(d.subtotal / d.qty_dasar)::NUMERIC(20, 4)::TEXT AS harga_satuan_dasar,
+		d.harga_pokok_satuan_dasar::TEXT                AS harga_pokok_satuan_dasar`
+
+// riwayatBeliOuterColumns repeats the aliases for the outer query. Never SELECT *,
+// even over a subquery whose shape is right here: the scan order would then follow
+// whatever the inner list happens to be, and a column inserted in the middle of it
+// would shift every field by one without a compiler error.
+const riwayatBeliOuterColumns = `id_supplier, nama_supplier, id_pembelian, nomor, tanggal,
+	no_faktur_supplier, id_pembelian_detail, qty_faktur, id_satuan_input, nama_satuan,
+	faktor_konversi, qty_dasar, nama_satuan_dasar, harga_satuan_input, diskon_baris,
+	subtotal, alokasi_biaya, harga_satuan_dasar, harga_pokok_satuan_dasar`
+
+// FindRiwayatBeli returns the last posted purchase of a product from each supplier,
+// newest first, plus how many suppliers matched.
+//
+// This is isu #4 fase 4: the replacement for a purchase order. There is no document to
+// enter and nothing to keep in step — the answer falls out of documents that were
+// posted anyway, and it is the price actually paid rather than one promised in a chat.
+//
+// DISTINCT ON is what makes it one row per supplier, and it forces the inner ORDER BY
+// to lead with id_supplier — which is not the order anyone wants to read, hence the
+// wrapping query that re-sorts by date. The inner tiebreakers matter: one document may
+// carry the same product on two lines, and without `d.id DESC` which of them
+// represents that supplier would be left to the planner.
+//
+// The outer ORDER BY ends in id_supplier, which is unique across the subquery's rows
+// precisely because DISTINCT ON made it so. Ordering on tanggal alone would let one
+// supplier appear on two pages while another is never returned.
+func (r *PembelianRepository) FindRiwayatBeli(ctx context.Context, db DBTX, idProduct, idSupplier int64, limit, offset int) ([]entity.RiwayatBeli, int64, error) {
+	// COUNT skips four of the six joins: nothing in the filter needs the names, and
+	// counting distinct suppliers is the same question as counting the rows the
+	// subquery would produce.
+	const countQuery = `
+		SELECT COUNT(DISTINCT p.id_supplier)
+		FROM pembelian_detail d
+		JOIN pembelian p ON p.id = d.id_pembelian` + riwayatBeliFilter
+
+	var total int64
+	if err := db.QueryRowContext(ctx, countQuery, idProduct, idSupplier).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count riwayat beli: %w", err)
+	}
+
+	if total == 0 {
+		return []entity.RiwayatBeli{}, 0, nil
+	}
+
+	const query = `SELECT ` + riwayatBeliOuterColumns + `
+		FROM (
+			SELECT DISTINCT ON (p.id_supplier)` + riwayatBeliColumns +
+		riwayatBeliFrom + riwayatBeliFilter + `
+			ORDER BY p.id_supplier, p.tanggal DESC, p.id DESC, d.id DESC
+		) riwayat
+		ORDER BY tanggal DESC, id_supplier
+		LIMIT $3 OFFSET $4`
+
+	rows, err := db.QueryContext(ctx, query, idProduct, idSupplier, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("select riwayat beli: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.RiwayatBeli, 0, limit)
+
+	for rows.Next() {
+		var riwayat entity.RiwayatBeli
+
+		if err := rows.Scan(
+			&riwayat.IDSupplier, &riwayat.NamaSupplier, &riwayat.IDPembelian,
+			&riwayat.Nomor, &riwayat.Tanggal, &riwayat.NoFakturSupplier,
+			&riwayat.IDPembelianDetail, &riwayat.QtyFaktur, &riwayat.IDSatuanInput,
+			&riwayat.NamaSatuan, &riwayat.FaktorKonversi, &riwayat.QtyDasar,
+			&riwayat.NamaSatuanDasar, &riwayat.HargaSatuanInput, &riwayat.DiskonBaris,
+			&riwayat.Subtotal, &riwayat.AlokasiBiaya, &riwayat.HargaSatuanDasar,
+			&riwayat.HargaPokokSatuanDasar,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan riwayat beli: %w", err)
+		}
+
+		list = append(list, riwayat)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate riwayat beli: %w", err)
+	}
+
+	return list, total, nil
+}
+
 // UpdateDetailPosting writes back what posting computed for one line.
 func (r *PembelianRepository) UpdateDetailPosting(ctx context.Context, db DBTX, id int64, alokasiBiaya, hargaPokokSatuanDasar string) error {
 	const query = `

@@ -110,7 +110,7 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate, roleRepository,
 		),
 		product: usecase.NewProductUseCase(
-			testDB, log, validate, productRepository,
+			testDB, log, validate, productRepository, pembelianRepository,
 		),
 		user: usecase.NewUserUseCase(
 			testDB, log, validate, repository.NewUserRepository(), roleRepository,
