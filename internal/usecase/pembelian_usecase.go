@@ -93,7 +93,7 @@ func (c *PembelianUseCase) Create(ctx context.Context, request *model.CreatePemb
 		}
 	}
 
-	nomor, err := c.nomorBaru(ctx, tx, repository.PrefixPembelian, tanggal)
+	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixPembelian, tanggal)
 	if err != nil {
 		return nil, err
 	}
@@ -506,6 +506,18 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 		return nil, err
 	}
 
+	// A posted follow-up receipt has to be voided first. Cancelling here reverses
+	// only the rows this document wrote, so the follow-up's stock would survive with
+	// nothing left explaining it — and it could not be reversed afterwards either,
+	// because its own cancellation path needs a purchase that is still POSTED.
+	adaSusulan, err := c.PembelianRepository.HasPostedSusulan(ctx, tx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if adaSusulan {
+		return nil, model.Conflict("batalkan penerimaan susulannya lebih dulu")
+	}
+
 	asal, err := c.KartuStokRepository.FindByRef(ctx, tx, entity.RefTablePembelian, request.ID)
 	if err != nil {
 		return nil, err
@@ -677,17 +689,6 @@ func (c *PembelianUseCase) kunciDenganStatus(ctx context.Context, tx repository.
 	}
 
 	return pembelian, nil
-}
-
-// nomorBaru reserves the next number in the series for the document's own month, so
-// a document dated in July gets a July number however late it is typed in.
-func (c *PembelianUseCase) nomorBaru(ctx context.Context, tx repository.DBTX, prefix string, tanggal time.Time) (string, error) {
-	urut, err := c.CounterRepository.Next(ctx, tx, prefix, tanggal.Year(), int(tanggal.Month()))
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf("%s/%04d/%02d/%04d", prefix, tanggal.Year(), int(tanggal.Month()), urut), nil
 }
 
 // siapkanDetail turns request lines into rows: it resolves conversion factors,
@@ -911,7 +912,12 @@ func (c *PembelianUseCase) sinkronkanHeader(ctx context.Context, tx repository.D
 	for i := range detail {
 		subtotal.Add(subtotal, mustParseNumeric(detail[i].Subtotal))
 
-		if detail[i].QtyDiterimaDasar != detail[i].QtyDasar {
+		// Follow-up receipts count towards completeness. They are always zero here
+		// — a purchase cannot have one before it is POSTED, and this runs at
+		// create, patch, and posting — but reading the same formula everywhere is
+		// what stops the two answers drifting apart. Once the document is POSTED,
+		// PembelianRepository.RecalculateStatusPenerimaan takes over.
+		if detail[i].QtyDiterimaDasar+detail[i].QtySusulanDasar != detail[i].QtyDasar {
 			statusPenerimaan = entity.StatusPenerimaanKurang
 		}
 	}

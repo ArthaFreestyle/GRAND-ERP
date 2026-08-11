@@ -43,6 +43,7 @@ func Bootstrap(config *BootstrapConfig) {
 	kartuStokRepository := repository.NewKartuStokRepository()
 	counterRepository := repository.NewDocumentCounterRepository()
 	pembelianRepository := repository.NewPembelianRepository()
+	susulanRepository := repository.NewPenerimaanSusulanRepository()
 
 	ruangUseCase := usecase.NewRuangUseCase(
 		config.DB, config.Log, config.Validate, ruangRepository,
@@ -73,6 +74,16 @@ func Bootstrap(config *BootstrapConfig) {
 		config.DB, config.Log, config.Validate,
 		pembelianRepository, productRepository, kartuStokRepository, counterRepository,
 	)
+	// PenerimaanSusulanUseCase reaches into pembelian on purpose: a follow-up
+	// receipt is defined as the remainder of a purchase, so it reads that document's
+	// lines for the outstanding quantity and the cost to copy, locks it to serialise
+	// against other follow-ups, and rewrites its status_penerimaan cache — which the
+	// purchase can no longer do for itself once it is POSTED.
+	susulanUseCase := usecase.NewPenerimaanSusulanUseCase(
+		config.DB, config.Log, config.Validate,
+		susulanRepository, pembelianRepository, productRepository,
+		kartuStokRepository, counterRepository,
+	)
 	// Fails the process at boot when jwt.secret is missing or too short, rather than
 	// at the first login attempt.
 	authConfig := NewAuthConfig(config.Config, config.Log)
@@ -94,6 +105,7 @@ func Bootstrap(config *BootstrapConfig) {
 	authController := deliveryhttp.NewAuthController(config.Log, authUseCase)
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
 	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
+	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
 
@@ -111,6 +123,7 @@ func Bootstrap(config *BootstrapConfig) {
 		DocsController:      docsController,
 		AuthController:      authController,
 		PembelianController: pembelianController,
+		SusulanController:   susulanController,
 		ProductController:   productController,
 		RuangController:     ruangController,
 		SatuanController:    satuanController,

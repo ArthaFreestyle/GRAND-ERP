@@ -67,9 +67,15 @@ type PembelianResponse struct {
 // drives the payable; qty_diterima/qty_diterima_dasar is what came out of the box
 // and drives stock. The *_dasar half of each pair is in the product's base unit.
 //
-// selisih_dasar is qty_dasar − qty_diterima_dasar: what the supplier still owes.
-// Reported rather than left to the client to subtract, because the whole receiving
-// screen is built around it.
+// Three derived quantities, and they are not the same question:
+//
+//	selisih_dasar     = qty_dasar - qty_diterima_dasar   -- short on the first delivery
+//	qty_susulan_dasar = sum of POSTED follow-up receipts -- turned up later
+//	sisa_dasar        = selisih_dasar - qty_susulan_dasar -- still owed today
+//
+// selisih_dasar never changes once the document is posted; sisa_dasar shrinks as
+// follow-up receipts arrive. Reported rather than left to the client to subtract,
+// because the whole receiving screen is built around them.
 type PembelianDetailResponse struct {
 	ID          int64  `json:"id"`
 	IDProduct   int64  `json:"id_product"`
@@ -83,7 +89,9 @@ type PembelianDetailResponse struct {
 	FaktorKonversi   int64  `json:"faktor_konversi"`
 	QtyDasar         int64  `json:"qty_dasar"`
 	QtyDiterimaDasar int64  `json:"qty_diterima_dasar"`
+	QtySusulanDasar  int64  `json:"qty_susulan_dasar"`
 	SelisihDasar     int64  `json:"selisih_dasar"`
+	SisaDasar        int64  `json:"sisa_dasar"`
 	NamaSatuanDasar  string `json:"nama_satuan_dasar,omitempty"`
 
 	HargaSatuanInput string `json:"harga_satuan_input"`
@@ -118,6 +126,7 @@ type SisaPembelianBarisRow struct {
 	NamaProduct       string  `json:"nama_product,omitempty"`
 	QtyDasar          int64   `json:"qty_dasar"`
 	QtyDiterimaDasar  int64   `json:"qty_diterima_dasar"`
+	QtySusulanDasar   int64   `json:"qty_susulan_dasar"`
 	SisaDasar         int64   `json:"sisa_dasar"`
 	NamaSatuanDasar   string  `json:"nama_satuan_dasar,omitempty"`
 	KeteranganSelisih *string `json:"keterangan_selisih"`

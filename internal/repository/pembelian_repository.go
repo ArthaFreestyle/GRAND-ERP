@@ -72,10 +72,27 @@ const pembelianFilter = `
 // because a line shows both ("2 DUS = 24 PCS").
 const pembelianDetailReadColumns = `d.id, d.id_pembelian, d.id_product, d.qty_faktur::TEXT,
 	d.qty_diterima::TEXT, d.id_satuan_input, d.faktor_konversi, d.qty_dasar,
-	d.qty_diterima_dasar, d.harga_satuan_input::TEXT, d.diskon_baris::TEXT,
-	d.subtotal::TEXT, d.jumlah_koli::TEXT, d.alokasi_biaya::TEXT,
+	d.qty_diterima_dasar, ` + pembelianDetailSusulan + `, d.harga_satuan_input::TEXT,
+	d.diskon_baris::TEXT, d.subtotal::TEXT, d.jumlah_koli::TEXT, d.alokasi_biaya::TEXT,
 	d.harga_pokok_satuan_dasar::TEXT, d.keterangan_selisih,
 	pr.nama, pr.kode_barang, si.nama, sd.nama`
+
+// pembelianDetailSusulan totals the follow-up receipts already posted against a
+// line. Declared once because the outstanding quantity is computed from it in three
+// places, and three copies of this predicate would drift.
+//
+// A correlated subquery rather than a grouped LEFT JOIN: it is driven by the outer
+// rows and uses penerimaan_susulan_detail_pembelian_detail_idx, so it costs one
+// index lookup per line instead of aggregating the whole table before joining.
+//
+// Only POSTED documents count. A draft follow-up is not a delivery, and letting one
+// reduce the outstanding figure would let an abandoned draft hide a real shortfall.
+const pembelianDetailSusulan = `COALESCE((
+		SELECT SUM(ps_d.qty_dasar)
+		FROM penerimaan_susulan_detail ps_d
+		JOIN penerimaan_susulan ps ON ps.id = ps_d.id_penerimaan_susulan
+		WHERE ps_d.id_pembelian_detail = d.id AND ps.status = 'POSTED'
+	), 0)`
 
 const pembelianDetailFrom = `
 	FROM pembelian_detail d
@@ -474,7 +491,8 @@ func (r *PembelianRepository) FindDetail(ctx context.Context, db DBTX, idPembeli
 		if err := rows.Scan(
 			&detail.ID, &detail.IDPembelian, &detail.IDProduct, &detail.QtyFaktur,
 			&detail.QtyDiterima, &detail.IDSatuanInput, &detail.FaktorKonversi,
-			&detail.QtyDasar, &detail.QtyDiterimaDasar, &detail.HargaSatuanInput,
+			&detail.QtyDasar, &detail.QtyDiterimaDasar, &detail.QtySusulanDasar,
+			&detail.HargaSatuanInput,
 			&detail.DiskonBaris, &detail.Subtotal, &detail.JumlahKoli,
 			&detail.AlokasiBiaya, &detail.HargaPokokSatuanDasar, &detail.KeteranganSelisih,
 			&detail.NamaProduct, &detail.KodeBarang, &detail.NamaSatuan, &detail.NamaSatuanDasar,
@@ -490,6 +508,85 @@ func (r *PembelianRepository) FindDetail(ctx context.Context, db DBTX, idPembeli
 	}
 
 	return list, nil
+}
+
+// FindDetailByID returns one line with the product and unit names attached, plus
+// what has already been received against it.
+//
+// This is what a follow-up receipt reads to learn the outstanding quantity and the
+// cost to copy. Kept separate from FindDetail so the caller does not have to fetch a
+// whole document to reach one line.
+func (r *PembelianRepository) FindDetailByID(ctx context.Context, db DBTX, id int64) (*entity.PembelianDetail, error) {
+	const query = `SELECT ` + pembelianDetailReadColumns + pembelianDetailFrom + ` WHERE d.id = $1`
+
+	detail := new(entity.PembelianDetail)
+
+	err := db.QueryRowContext(ctx, query, id).Scan(
+		&detail.ID, &detail.IDPembelian, &detail.IDProduct, &detail.QtyFaktur,
+		&detail.QtyDiterima, &detail.IDSatuanInput, &detail.FaktorKonversi,
+		&detail.QtyDasar, &detail.QtyDiterimaDasar, &detail.QtySusulanDasar,
+		&detail.HargaSatuanInput,
+		&detail.DiskonBaris, &detail.Subtotal, &detail.JumlahKoli,
+		&detail.AlokasiBiaya, &detail.HargaPokokSatuanDasar, &detail.KeteranganSelisih,
+		&detail.NamaProduct, &detail.KodeBarang, &detail.NamaSatuan, &detail.NamaSatuanDasar,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return detail, nil
+}
+
+// RecalculateStatusPenerimaan rebuilds the receipt cache from the lines and every
+// POSTED follow-up receipt against them.
+//
+// status_penerimaan follows the same rule as status_pembayaran: always recomputed,
+// never set from a form. Posting or voiding a penerimaan_susulan is what changes the
+// answer, and the purchase itself is POSTED by then and can no longer recompute it
+// on its own.
+//
+// One statement, so there is no window where the cache disagrees with the rows it
+// summarises.
+func (r *PembelianRepository) RecalculateStatusPenerimaan(ctx context.Context, db DBTX, idPembelian int64) error {
+	const query = `
+		UPDATE pembelian p SET status_penerimaan = CASE
+			WHEN EXISTS (
+				SELECT 1 FROM pembelian_detail d
+				WHERE d.id_pembelian = p.id
+				  AND d.qty_dasar > d.qty_diterima_dasar + ` + pembelianDetailSusulan + `
+			) THEN 'KURANG'
+			ELSE 'LENGKAP'
+		END
+		WHERE p.id = $1`
+
+	if _, err := db.ExecContext(ctx, query, idPembelian); err != nil {
+		return fmt.Errorf("recalculate status_penerimaan: %w", err)
+	}
+
+	return nil
+}
+
+// HasPostedSusulan reports whether a follow-up receipt has already been posted
+// against a purchase.
+//
+// Cancelling the purchase reverses only the rows the purchase itself wrote
+// (ref_table = 'pembelian'), so a posted follow-up's stock would survive with no
+// document left explaining it — and it could not be reversed afterwards either,
+// since its own cancellation path needs a purchase that is still POSTED. Void the
+// follow-up first.
+func (r *PembelianRepository) HasPostedSusulan(ctx context.Context, db DBTX, idPembelian int64) (bool, error) {
+	const query = `
+		SELECT EXISTS (
+			SELECT 1 FROM penerimaan_susulan
+			WHERE id_pembelian = $1 AND status = 'POSTED'
+		)`
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, idPembelian).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check penerimaan_susulan POSTED: %w", err)
+	}
+
+	return exists, nil
 }
 
 // UpdateDetailPosting writes back what posting computed for one line.

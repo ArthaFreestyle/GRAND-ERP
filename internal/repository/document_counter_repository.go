@@ -10,6 +10,7 @@ import (
 // cannot accidentally share a counter by both typing the same literal.
 const (
 	PrefixPembelian = "BL"
+	PrefixSusulan   = "PS"
 )
 
 // DocumentCounterRepository hands out the per-month sequence behind every document

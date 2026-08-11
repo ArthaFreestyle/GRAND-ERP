@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: GRAND-ERP API
-  version: 0.5.0
+  version: 0.6.0
   description: >
     Backend kontrak API untuk GRAND-ERP. Setiap perubahan route, request, atau
     response di internal/delivery dan internal/model harus tercermin di sini
@@ -32,11 +32,19 @@ info:
     apa saja. `role` dan `user` khusus `SUPERADMIN`, termasuk untuk membaca.
 
 
-    `pembelian` dibagi menurut tahap alurnya, bukan menurut data yang disentuh.
-    `INVENTARIS` mengetik faktur, menghitung barang, dan mengajukan; `SUPERADMIN`
-    yang memposting, menolak, atau membatalkan. Alasannya: posting bukan
-    penyuntingan — ia menambah baris ke `kartu_stok` yang bersifat append-only,
-    jadi posting yang salah tidak bisa diperbaiki, hanya dibalik.
+    `pembelian` dan `penerimaan-susulan` dibagi menurut tahap alurnya, bukan menurut
+    data yang disentuh. `INVENTARIS` mengetik faktur, menghitung barang, dan
+    mengajukan; `SUPERADMIN` yang memposting, menolak, atau membatalkan. Alasannya:
+    posting bukan penyuntingan — ia menambah baris ke `kartu_stok` yang bersifat
+    append-only, jadi posting yang salah tidak bisa diperbaiki, hanya dibalik.
+
+
+    `penerimaan-susulan` adalah kiriman kedua untuk barang yang belum datang di
+    kiriman pertama. Ia **menambah stok dan tidak pernah menambah utang** — faktur
+    supplier terbit penuh di kiriman pertama dan sudah dibukukan penuh di sana, jadi
+    yang tersisa adalah barang, bukan uang. Nilai yang masuk adalah porsi sisa dari
+    nilai faktur asli, sehingga satu faktur menyumbang persis nilainya sendiri ke
+    persediaan berapa pun kali barangnya datang.
 
 
     Uang dan kuantitas pada modul pembelian dikirim dan diterima sebagai **string
@@ -75,6 +83,7 @@ security:
 tags:
   - name: auth
   - name: pembelian
+  - name: penerimaan-susulan
   - name: product
   - name: docs
   - name: ruang
@@ -953,6 +962,333 @@ paths:
                   data: { $ref: "#/components/schemas/SisaPembelian" }
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penerimaan-susulan:
+    get:
+      tags: [penerimaan-susulan]
+      summary: List penerimaan susulan
+      operationId: listPenerimaanSusulan
+      description: >
+        Tidak menyertakan `detail`; kuncinya hilang sama sekali, bukan array kosong.
+        `search` mencocokkan nomor dokumen ini maupun nomor pembelian asalnya.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        - name: id_pembelian
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/PenerimaanSusulan" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [penerimaan-susulan]
+      summary: Buat draft penerimaan susulan
+      operationId: createPenerimaanSusulan
+      description: >
+        Kiriman kedua untuk barang yang belum datang di kiriman pertama. **Menambah
+        stok, tidak menambah utang** — fakturnya terbit penuh di kiriman pertama.
+
+
+        Bentuknya cermin dari retur pembelian: sama-sama menunjuk baris
+        `pembelian_detail`, arah barangnya saja yang berlawanan. Menaikkan
+        `qty_diterima` pada baris yang sudah diposting bukan pilihan — itu melanggar
+        imutabilitas dokumen POSTED, membuat pembatalan mustahil diaudit, dan
+        menghapus jejak kapan susulan benar-benar datang.
+
+
+        **Pembelian asalnya harus `POSTED`.** Sebelum itu barisnya belum punya
+        `harga_pokok_satuan_dasar` untuk disalin dan belum punya sisa yang pasti.
+
+
+        `id_supplier` dan `id_ruang` tidak ada di body: keduanya disalin dari
+        pembelian. Suppliernya sudah tertentu, dan ruangnya sudah ditetapkan dokumen
+        asal — barang yang perlu pindah ruang setelah diterima adalah pekerjaan
+        mutasi.
+
+
+        Nomor digenerate server dengan seri sendiri, `PS/2026/08/0001`.
+
+
+        Setiap baris tidak boleh melebihi sisa
+        (`qty_dasar − qty_diterima_dasar − Σ susulan POSTED`). Pengecekan yang
+        menentukan terjadi saat posting, di bawah row lock pembelian; yang di sini
+        hanya memberi error lebih cepat.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id_pembelian, tanggal, detail]
+              properties:
+                id_pembelian: { type: integer, format: int64, minimum: 1 }
+                tanggal: { type: string, format: date, example: "2026-08-20" }
+                keterangan: { type: string, nullable: true, maxLength: 1000 }
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/PenerimaanSusulanDetailInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PenerimaanSusulan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penerimaan-susulan/{id}:
+    get:
+      tags: [penerimaan-susulan]
+      summary: Detail penerimaan susulan beserta barisnya
+      operationId: getPenerimaanSusulan
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PenerimaanSusulan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [penerimaan-susulan]
+      summary: Ubah header penerimaan susulan
+      operationId: updatePenerimaanSusulan
+      description: >
+        **Hanya saat `DRAFT`.** Hanya dua field yang benar-benar milik operator yang
+        bisa diubah; `id_pembelian`, `id_supplier`, dan `id_ruang` menentukan dokumen
+        ini sisa dari apa dan tidak ada di sini.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggal: { type: string, format: date }
+                keterangan: { type: string, nullable: true, maxLength: 1000 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PenerimaanSusulan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penerimaan-susulan/{id}/detail:
+    put:
+      tags: [penerimaan-susulan]
+      summary: Ganti seluruh baris penerimaan susulan
+      operationId: replacePenerimaanSusulanDetail
+      description: >
+        `PUT`, bukan `PATCH`: barisnya diganti sekaligus, karena baris satu kiriman
+        adalah satu kesatuan yang dihitung bersamaan. **Hanya saat `DRAFT`.**
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [detail]
+              properties:
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/PenerimaanSusulanDetailInput" }
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PenerimaanSusulan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penerimaan-susulan/{id}/ajukan:
+    post:
+      tags: [penerimaan-susulan]
+      summary: Ajukan draft untuk disetujui
+      operationId: ajukanPenerimaanSusulan
+      description: >
+        `DRAFT` → `DIAJUKAN`. Tanpa body. Dokumen tanpa baris ditolak 400.
+        Role: `INVENTARIS` atau `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diajukan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PenerimaanSusulan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penerimaan-susulan/{id}/tolak:
+    post:
+      tags: [penerimaan-susulan]
+      summary: Tolak pengajuan, kembalikan ke DRAFT
+      operationId: tolakPenerimaanSusulan
+      description: "`DIAJUKAN` → `DRAFT`, `alasan` wajib. Role: `SUPERADMIN`."
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan]
+              properties:
+                alasan: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Ditolak
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PenerimaanSusulan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penerimaan-susulan/{id}/posting:
+    post:
+      tags: [penerimaan-susulan]
+      summary: Setujui dan tulis ke kartu stok
+      operationId: postingPenerimaanSusulan
+      description: >
+        `DIAJUKAN` → `POSTED`. Satu transaksi menulis satu baris `kartu_stok` per
+        baris dokumen dengan `jenis_transaksi = PENERIMAAN_SUSULAN`, lalu menghitung
+        ulang `pembelian.status_penerimaan`.
+
+
+        Nilai yang masuk disalin dari `pembelian_detail.harga_pokok_satuan_dasar`,
+        bukan dihitung ulang dan bukan dibaca dari rata-rata terkini: harga barang
+        sudah ditetapkan faktur, dan kiriman keduanya tidak mengubahnya. Karena itu
+        pembelian dan seluruh susulannya berjumlah **persis** nilai faktur.
+
+
+        Sisa per baris diperiksa lagi di sini, di bawah row lock pembelian — dan itu
+        pemeriksaan yang menentukan. Di antara draft ditulis dan diposting, susulan
+        lain untuk pembelian yang sama bisa lebih dulu menghabiskan sisanya.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Posted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PenerimaanSusulan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penerimaan-susulan/{id}/batal:
+    post:
+      tags: [penerimaan-susulan]
+      summary: Batalkan dokumen POSTED dengan baris pembalik
+      operationId: batalPenerimaanSusulan
+      description: >
+        `POSTED` → `BATAL`. Menambah satu baris `kartu_stok` pembalik untuk setiap
+        pergerakan yang dibuat dokumen ini, lalu mengembalikan sisanya ke pembelian
+        dengan menghitung ulang `status_penerimaan`.
+
+
+        Berlaku catatan yang sama seperti pembatalan pembelian: baris pembalik
+        dinilai pada rata-rata bergerak yang berlaku sekarang, bukan pada harga pokok
+        baris aslinya, karena trigger menimpa harga pokok setiap baris keluar.
+
+
+        **Membatalkan pembelian yang punya susulan POSTED ditolak 409** — batalkan
+        susulannya lebih dulu. Pembatalan pembelian hanya membalik baris yang ditulis
+        pembelian itu sendiri, jadi stok susulannya akan tertinggal tanpa dokumen yang
+        menjelaskannya, dan setelah itu tidak bisa dibalik lagi karena jalur
+        pembatalannya menuntut pembelian yang masih POSTED.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_batal]
+              properties:
+                alasan_batal: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PenerimaanSusulan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/ruang:
     get:
@@ -2102,10 +2438,26 @@ components:
             angka ini tidak, atau dokumen lama diam-diam berganti arti.
         qty_dasar: { type: integer, format: int64, example: 100 }
         qty_diterima_dasar: { type: integer, format: int64, example: 95 }
+        qty_susulan_dasar:
+          type: integer
+          format: int64
+          description: >
+            Jumlah seluruh penerimaan susulan **POSTED** terhadap baris ini. Draft
+            tidak dihitung — draft bukan pengiriman.
+          example: 0
         selisih_dasar:
           type: integer
           format: int64
-          description: "`qty_dasar - qty_diterima_dasar`: yang masih jadi tanggungan supplier."
+          description: >
+            `qty_dasar - qty_diterima_dasar`: yang kurang di kiriman pertama. Beku
+            setelah dokumen diposting, berapa pun yang menyusul kemudian.
+          example: 5
+        sisa_dasar:
+          type: integer
+          format: int64
+          description: >
+            `selisih_dasar - qty_susulan_dasar`: yang masih jadi tanggungan supplier
+            hari ini. Menyusut setiap kali penerimaan susulan diposting.
           example: 5
         nama_satuan_dasar: { type: string }
         harga_satuan_input: { type: string, example: "10000.00" }
@@ -2179,9 +2531,126 @@ components:
               nama_product: { type: string }
               qty_dasar: { type: integer, format: int64 }
               qty_diterima_dasar: { type: integer, format: int64 }
+              qty_susulan_dasar: { type: integer, format: int64 }
               sisa_dasar: { type: integer, format: int64 }
               nama_satuan_dasar: { type: string }
               keterangan_selisih: { type: string, nullable: true }
+
+    PenerimaanSusulan:
+      type: object
+      description: >
+        Kiriman kedua untuk barang yang belum datang di kiriman pertama.
+
+
+        Tidak punya `total`, `ppn`, maupun `status_pembayaran`, karena ia bukan
+        tagihan: faktur supplier terbit penuh di kiriman pertama dan sudah dibukukan
+        penuh di sana. `total_nilai` adalah nilai barang yang datang terlambat, yang
+        dibawa masuk ke persediaan — bukan uang yang terutang.
+      properties:
+        id: { type: integer, format: int64 }
+        nomor:
+          type: string
+          description: Seri sendiri, terpisah dari pembelian.
+          example: PS/2026/08/0001
+        tanggal: { type: string, format: date-time }
+        id_pembelian: { type: integer, format: int64 }
+        nomor_pembelian: { type: string }
+        id_supplier:
+          type: integer
+          format: int64
+          description: Disalin dari pembelian, bukan dipilih.
+        nama_supplier: { type: string }
+        id_ruang:
+          type: integer
+          format: int64
+          description: >
+            Disalin dari pembelian. Barang yang perlu pindah ruang setelah diterima
+            adalah pekerjaan mutasi, bukan penerimaan.
+        nama_ruang: { type: string }
+        keterangan: { type: string, nullable: true }
+        total_nilai:
+          type: string
+          description: Nilai barang yang menyusul. Dihitung ulang dari barisnya.
+          example: "52500.00"
+        status: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        detail:
+          type: array
+          description: Hanya pada endpoint detail. Kuncinya hilang pada list.
+          items: { $ref: "#/components/schemas/PenerimaanSusulanDetail" }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        diajukan_oleh: { type: integer, format: int64, nullable: true }
+        diajukan_pada: { type: string, format: date-time, nullable: true }
+        disetujui_oleh: { type: integer, format: int64, nullable: true }
+        disetujui_pada: { type: string, format: date-time, nullable: true }
+        posted_at: { type: string, format: date-time, nullable: true }
+        dibatalkan_oleh: { type: integer, format: int64, nullable: true }
+        alasan_batal: { type: string, nullable: true }
+        alasan_tolak: { type: string, nullable: true }
+
+    PenerimaanSusulanDetail:
+      type: object
+      description: >
+        Satu baris, menunjuk baris faktur yang dilengkapinya — produknya adalah
+        produk baris itu.
+      properties:
+        id: { type: integer, format: int64 }
+        id_pembelian_detail: { type: integer, format: int64 }
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        qty_input: { type: string, example: "5.0000" }
+        id_satuan_input: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        faktor_konversi:
+          type: integer
+          format: int64
+          description: >
+            Snapshot dari `product_satuan` saat baris ditulis. Diambil segar karena
+            kuantitasnya adalah hitungan baru dan boleh dalam satuan yang berbeda
+            dari yang dipakai faktur.
+        qty_dasar: { type: integer, format: int64, example: 5 }
+        nama_satuan_dasar: { type: string }
+        harga_pokok_satuan_dasar:
+          type: string
+          description: >
+            **Disalin dari baris pembelian**, tidak pernah dihitung ulang dan tidak
+            pernah dibaca dari rata-rata bergerak terkini. Harga barang sudah
+            ditetapkan faktur; kiriman keduanya tidak mengubahnya. Ini juga yang
+            membuat pembelian dan seluruh susulannya berjumlah persis nilai faktur.
+          example: "10500.0000"
+        nilai:
+          type: string
+          description: "`qty_dasar x harga_pokok_satuan_dasar`."
+          example: "52500.00"
+
+    PenerimaanSusulanDetailInput:
+      type: object
+      required: [id_pembelian_detail, id_satuan_input, qty_input]
+      properties:
+        id_pembelian_detail:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Harus milik pembelian di header, dan harga pokoknya harus sudah terisi
+            (yaitu pembeliannya sudah POSTED). Satu baris pembelian hanya boleh
+            muncul sekali per dokumen.
+        id_satuan_input:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Harus terdaftar di `product_satuan` produk itu. Boleh berbeda dari satuan
+            yang dipakai baris fakturnya — lima pcs kurang dari baris yang diketik
+            dalam dus adalah kasus yang wajar.
+        qty_input:
+          type: string
+          description: >
+            Tidak boleh melebihi sisa baris itu
+            (`qty_dasar - qty_diterima_dasar - Σ susulan POSTED`), setelah dikonversi
+            ke satuan dasar. `qty x faktor` wajib bilangan bulat.
+          example: "5"
 
     Role:
       type: object

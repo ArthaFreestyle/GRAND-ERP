@@ -6,10 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Master data is implemented, and **`pembelian` is the first transaction document** — the first thing that writes `kartu_stok`. Copy an existing slice when adding a module — don't invent a new shape.
 
-- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`ruang`** (create / get / list, no patch), **`product`** with `product_satuan` + `product_harga_jual`, and **`pembelian`** with `pembelian_detail`, `kartu_stok` posting, and `document_counter`
+- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`ruang`** (create / get / list, no patch), **`product`** with `product_satuan` + `product_harga_jual`, **`pembelian`** with `pembelian_detail`, `kartu_stok` posting, and `document_counter`, and **`penerimaan_susulan`** with `penerimaan_susulan_detail`
 - Use **`supplier`** as the template for a plain master slice: it is the one with every ordinary concern at once — nullable unique `kode`, PATCH presence semantics, and a `LEFT JOIN` in the list query
 - Use **`user`** as the template when a slice writes two tables: a user and its `user_role` grants in one transaction, and it is where `Optional[[]int64]`, bcrypt hashing, and the `Touch` pattern live. See "Users and roles" below
 - Use **`pembelian`** as the template for a **transaction document** — a state machine, a generated number, exact decimal arithmetic, and stock movements, all in one transaction. See "Pembelian and the posting engine" below. Do not model a transaction document on a master slice; the concerns barely overlap
+- Use **`penerimaan_susulan`** as the template for a **document that derives from another** — one that points at a parent's detail rows, draws down a quota held there, copies a cost snapshot from it, and rewrites a cache on it. `retur_pembelian` is the same shape with the goods moving the other way. See "Penerimaan susulan" below
 - Module path: `Arthafreestyle/ERP` (no domain prefix); internal imports are `Arthafreestyle/ERP/internal/...`
 - Go 1.25.0 — required by Fiber v3.4.0, which refuses to build on 1.24
 - The rest of the inventory/sales schema exists as migrations `000002`–`000008` and still has **no Go layers** — sales, returns, `pemakaian`, `mutasi`, stock opname, and both payment sides. See "Inventory data model" below
@@ -192,6 +193,23 @@ The first transaction document, and the first thing that writes `kartu_stok`. It
 - Lines are replaced wholesale (`PUT .../detail`), never edited one at a time: they are one thing retyped off one piece of paper, and a partial edit leaves the header's totals disagreeing with its own lines between requests. `DeleteDetail` is safe only on a `DRAFT` — a posted line is what `retur_pembelian_detail` points at.
 - `status_penerimaan` follows the `status_pembayaran` rule: **always recomputed, never set from a form.** A cache a form can write is a second source of truth.
 
+### Penerimaan susulan (migration 000013)
+
+The second shipment for goods that did not arrive with the first. It adds stock and never a payable — the supplier's invoice was issued in full with the first delivery and booked in full then, so what is still outstanding after that is goods.
+
+- **Why a separate document rather than raising `qty_diterima`.** A POSTED `pembelian` must not change and `kartu_stok` is append-only, so editing the posted line is not available: it would break document immutability, make cancellation impossible to audit (which `kartu_stok` rows would be reversed?), and erase when the goods actually turned up. The shape that fits is the mirror of `retur_pembelian` — both point at `pembelian_detail`, the goods just move the other way.
+- **`harga_pokok_satuan_dasar` is copied from the source line, never recomputed and never read off the current moving average.** That is what makes a purchase and all its follow-ups contribute exactly the invoice value to inventory, and it is why the average does not shift when the remainder turns up. Copying a cost rather than deriving one is the pattern every document deriving from another should follow.
+- **Two snapshots from different places, deliberately.** `faktor_konversi` is resolved from `product_satuan` *now*, because the quantity is a fresh count and may arrive in a different unit than the invoice used (five loose pieces short of a line typed in boxes). The cost is copied from the source. Quantity conversion follows current master; cost follows the invoice.
+- **The quota check that counts runs at posting, under `PembelianRepository.LockByID`.** The one in `siapkanDetail` only produces a friendlier error sooner. Two drafts may both claim the same remainder — a draft is not a delivery — and the second must fail when it tries to consume what the first already took. `TestSisaDiperiksaUlangSaatPosting` pins exactly that.
+- Only **POSTED** follow-ups count towards the outstanding figure. `pembelianDetailSusulan` in `pembelian_repository.go` is that predicate, declared once and reused by `FindDetail`, `FindDetailByID`, and `RecalculateStatusPenerimaan` — three copies of it would drift.
+- **`pembelian.status_penerimaan` is rewritten from here**, by `RecalculateStatusPenerimaan`, after posting and after voiding. The purchase is POSTED by then and can no longer recompute its own cache, so this is the only thing keeping it honest.
+- **Three derived quantities on a purchase line, and they answer different questions.** `selisih_dasar` is what the first delivery was short and is frozen once posted; `qty_susulan_dasar` is what turned up later; `sisa_dasar` is what is still owed. Don't collapse them.
+- `penerimaan_susulan_detail_baris_uidx` stops one source line appearing twice in one document. Without it two lines for the same source each pass the quota check on their own and together exceed it. The usecase catches it first so the message names the field.
+- **Cancelling a purchase is refused while a POSTED follow-up exists** (`HasPostedSusulan` → 409). The purchase's cancellation only reverses rows it wrote itself, so the follow-up's stock would survive with nothing explaining it — and it could not be reversed afterwards either, since its own cancellation path needs a purchase that is still POSTED. Void the follow-up first.
+- `jenis_transaksi` gained `'PENERIMAAN_SUSULAN'`. **`ALTER TYPE ... ADD VALUE` cannot be undone** — PostgreSQL has no `DROP VALUE`, and removing one means rebuilding the type and every column using it, including append-only `kartu_stok`. The down migration says so plainly and leaves the value behind rather than pretending. `ADD VALUE IF NOT EXISTS` keeps the up idempotent after a down. It is safe inside golang-migrate's transaction on PG 12+ as long as the value is not *used* in the same transaction, which this migration does not do.
+- No freight columns. Value entering stock is the remaining share of the original invoice value, so one invoice contributes exactly its own value however many times the goods turn up. If a follow-up shipment ever needs its own carrier bill, that is a schema change and a deliberate one — it makes the second batch cost more per unit than the first.
+- `id_supplier` and `id_ruang` are copied from the purchase, not chosen. Goods that need to move rooms after arrival are a `mutasi`.
+
 ### Product, units, and versioned prices (migration 000011)
 
 Three tables, one slice: `product`, `product_satuan`, `product_harga_jual`.
@@ -227,7 +245,7 @@ One user holds many roles. `user_role` is the only record of that, and permissio
 
 ### Inventory data model (migrations 000002–000008)
 
-`pembelian` now exercises this schema end to end; sales, returns, `pemakaian`, `mutasi`, stock opname, and both payment sides still have **no Go code**. Read these invariants before writing any inventory usecase; several are enforced by the database and will reject wrong code at runtime. `internal/usecase/pembelian_usecase.go` is the worked example of obeying them.
+`pembelian` and `penerimaan_susulan` now exercise this schema end to end; sales, returns, `pemakaian`, `mutasi`, stock opname, and both payment sides still have **no Go code**. Read these invariants before writing any inventory usecase; several are enforced by the database and will reject wrong code at runtime. `internal/usecase/pembelian_usecase.go` is the worked example of obeying them.
 
 - **`kartu_stok` is the only source of truth for stock and inventory value.** No master table carries a stock column. Never compute stock by summing documents.
 - **It is append-only, enforced by trigger.** `UPDATE`, `DELETE`, and `TRUNCATE` all raise. Corrections are new reversing rows that fill `id_kartu_stok_asal`.
@@ -253,8 +271,8 @@ Still **application-side only** (section E of the design notes) — the database
 - ~~`alokasi_biaya` must sum exactly to `biaya_angkut`; push the rounding remainder onto the line with the largest `jumlah_koli`~~ — done, `bagiProporsional`
 - ~~posted documents must reject detail edits~~ — done for `pembelian`, via `kunciDenganStatus`. Still owed by every other document type
 - ~~cancelling a posted document writes reversing `kartu_stok` rows with `id_kartu_stok_asal` set~~ — done for `pembelian`. **The "HPP copied from the original" half of that rule is not achievable** and was dropped: the trigger overwrites `harga_pokok_satuan` and `nilai_keluar` on every outgoing row, so reversals take the current moving average. See "Pembelian and the posting engine"
+- ~~a follow-up receipt must not exceed the outstanding amount (`qty_dasar − qty_diterima_dasar − Σ susulan`)~~ — done, `periksaSisa`, re-checked at posting under the purchase's row lock
 - cumulative return qty must not exceed the source document's qty
-- a follow-up receipt must not exceed the outstanding amount (`qty_dasar − qty_diterima_dasar − Σ susulan`) — `penerimaan_susulan` is not built; `GET /pembelian/{id}/sisa` already reports the figure it will need
 - allocation must not exceed the payment amount or the document's remaining balance, on either the receivable or the payable side
 - cancelled documents must not accept allocations
 - credit sales must respect `plafon_kredit`

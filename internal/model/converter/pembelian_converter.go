@@ -91,10 +91,13 @@ func PembelianDetailToResponse(detail *entity.PembelianDetail) *model.PembelianD
 		FaktorKonversi:   detail.FaktorKonversi,
 		QtyDasar:         detail.QtyDasar,
 		QtyDiterimaDasar: detail.QtyDiterimaDasar,
+		QtySusulanDasar:  detail.QtySusulanDasar,
 		// Computed here rather than left to the client: the whole receiving screen
-		// is built around this number, and every caller would otherwise derive it
-		// the same way.
+		// is built around these, and every caller would otherwise derive them the
+		// same way. selisih_dasar is frozen at what the first delivery was short;
+		// sisa_dasar is what is still owed after follow-up receipts.
 		SelisihDasar:    detail.QtyDasar - detail.QtyDiterimaDasar,
+		SisaDasar:       detail.QtyDasar - detail.QtyDiterimaDasar - detail.QtySusulanDasar,
 		NamaSatuanDasar: detail.NamaSatuanDasar,
 
 		HargaSatuanInput:      detail.HargaSatuanInput,
@@ -133,7 +136,9 @@ func PembelianToSisaResponse(pembelian *entity.Pembelian) *model.SisaPembelianRe
 	for i := range pembelian.Detail {
 		detail := &pembelian.Detail[i]
 
-		sisa := detail.QtyDasar - detail.QtyDiterimaDasar
+		// Follow-up receipts already posted come off the outstanding figure, so a
+		// line completed by a later shipment drops off this list entirely.
+		sisa := detail.QtyDasar - detail.QtyDiterimaDasar - detail.QtySusulanDasar
 		if sisa <= 0 {
 			continue
 		}
@@ -145,6 +150,7 @@ func PembelianToSisaResponse(pembelian *entity.Pembelian) *model.SisaPembelianRe
 			NamaProduct:       detail.NamaProduct,
 			QtyDasar:          detail.QtyDasar,
 			QtyDiterimaDasar:  detail.QtyDiterimaDasar,
+			QtySusulanDasar:   detail.QtySusulanDasar,
 			SisaDasar:         sisa,
 			NamaSatuanDasar:   detail.NamaSatuanDasar,
 			KeteranganSelisih: detail.KeteranganSelisih,

@@ -7,6 +7,7 @@ import "time"
 // an invalid-enum error from PostgreSQL naming a type instead of a module.
 const (
 	JenisTransaksiPembelian           = "PEMBELIAN"
+	JenisTransaksiPenerimaanSusulan   = "PENERIMAAN_SUSULAN"
 	JenisTransaksiReturPembelian      = "RETUR_PEMBELIAN"
 	JenisTransaksiPembatalanTransaksi = "PEMBATALAN_TRANSAKSI"
 )
@@ -16,6 +17,7 @@ const (
 // it has to reverse.
 const (
 	RefTablePembelian = "pembelian"
+	RefTableSusulan   = "penerimaan_susulan"
 )
 
 // KartuStok maps the kartu_stok table: the only source of truth for stock and

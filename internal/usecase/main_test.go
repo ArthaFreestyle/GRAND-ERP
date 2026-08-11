@@ -70,6 +70,7 @@ type app struct {
 	product   *usecase.ProductUseCase
 	user      *usecase.UserUseCase
 	pembelian *usecase.PembelianUseCase
+	susulan   *usecase.PenerimaanSusulanUseCase
 }
 
 // newApp wires the same graph config.Bootstrap does, minus Fiber, and empties the
@@ -85,6 +86,9 @@ func newApp(t *testing.T) *app {
 
 	roleRepository := repository.NewRoleRepository()
 	productRepository := repository.NewProductRepository()
+	pembelianRepository := repository.NewPembelianRepository()
+	kartuStokRepository := repository.NewKartuStokRepository()
+	counterRepository := repository.NewDocumentCounterRepository()
 
 	return &app{
 		satuan: usecase.NewSatuanUseCase(
@@ -113,8 +117,13 @@ func newApp(t *testing.T) *app {
 		),
 		pembelian: usecase.NewPembelianUseCase(
 			testDB, log, validate,
-			repository.NewPembelianRepository(), productRepository,
-			repository.NewKartuStokRepository(), repository.NewDocumentCounterRepository(),
+			pembelianRepository, productRepository,
+			kartuStokRepository, counterRepository,
+		),
+		susulan: usecase.NewPenerimaanSusulanUseCase(
+			testDB, log, validate,
+			repository.NewPenerimaanSusulanRepository(), pembelianRepository,
+			productRepository, kartuStokRepository, counterRepository,
 		),
 	}
 }
@@ -153,8 +162,11 @@ func truncateMaster(t *testing.T) {
 
 	for _, table := range []string{
 		// Children before parents. kartu_stok references product, ruang, satuan and
-		// users; pembelian_detail references pembelian, product and satuan.
-		"kartu_stok", "pembelian_detail", "pembelian", "document_counter",
+		// users; penerimaan_susulan_detail references pembelian_detail, so it has to
+		// go before it.
+		"kartu_stok",
+		"penerimaan_susulan_detail", "penerimaan_susulan",
+		"pembelian_detail", "pembelian", "document_counter",
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.
 		"product_harga_jual", "product_satuan", "product",

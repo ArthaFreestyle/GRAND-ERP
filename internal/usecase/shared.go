@@ -1,8 +1,11 @@
 package usecase
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"time"
 
 	"Arthafreestyle/ERP/internal/model"
 	"Arthafreestyle/ERP/internal/repository"
@@ -92,6 +95,27 @@ func conflictOnTransisi(err error, message string) error {
 	}
 
 	return err
+}
+
+// nomorDokumen reserves the next number in a series and formats it as
+// PREFIX/YYYY/MM/NNNN.
+//
+// The month comes from the document's own date, not from today, so an invoice dated
+// in July gets a July number however late it is typed in — which is what makes a
+// numbering series match the books it belongs to.
+//
+// Shared by every transaction document rather than reimplemented per module: two
+// modules formatting a number two ways is how a numbering scheme quietly stops
+// being one.
+func nomorDokumen(ctx context.Context, tx repository.DBTX, counter *repository.DocumentCounterRepository, prefix string, tanggal time.Time) (string, error) {
+	tahun, bulan := tanggal.Year(), int(tanggal.Month())
+
+	urut, err := counter.Next(ctx, tx, prefix, tahun, bulan)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s/%04d/%02d/%04d", prefix, tahun, bulan, urut), nil
 }
 
 // pageMetadata builds the paging block. Call it only after

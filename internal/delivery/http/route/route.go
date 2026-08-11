@@ -33,6 +33,7 @@ type RouteConfig struct {
 
 	AuthController      *deliveryhttp.AuthController
 	PembelianController *deliveryhttp.PembelianController
+	SusulanController   *deliveryhttp.PenerimaanSusulanController
 	ProductController   *deliveryhttp.ProductController
 	RuangController     *deliveryhttp.RuangController
 	SatuanController    *deliveryhttp.SatuanController
@@ -144,6 +145,20 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/pembelian/:id/posting", superadmin, c.PembelianController.Posting)
 	api.Post("/pembelian/:id/tolak", superadmin, c.PembelianController.Tolak)
 	api.Post("/pembelian/:id/batal", superadmin, c.PembelianController.Batal)
+
+	// penerimaan-susulan carries the same split for the same reason: it writes
+	// kartu_stok too. Nothing here adds to what the supplier is owed — the invoice
+	// was booked in full with the first delivery — so the approval is about stock,
+	// not about money.
+	api.Get("/penerimaan-susulan", c.SusulanController.List)
+	api.Get("/penerimaan-susulan/:id", c.SusulanController.Get)
+	api.Post("/penerimaan-susulan", inventaris, c.SusulanController.Create)
+	api.Patch("/penerimaan-susulan/:id", inventaris, c.SusulanController.Update)
+	api.Put("/penerimaan-susulan/:id/detail", inventaris, c.SusulanController.ReplaceDetail)
+	api.Post("/penerimaan-susulan/:id/ajukan", inventaris, c.SusulanController.Ajukan)
+	api.Post("/penerimaan-susulan/:id/posting", superadmin, c.SusulanController.Posting)
+	api.Post("/penerimaan-susulan/:id/tolak", superadmin, c.SusulanController.Tolak)
+	api.Post("/penerimaan-susulan/:id/batal", superadmin, c.SusulanController.Batal)
 
 	api.Get("/satuan", c.SatuanController.List)
 	api.Get("/satuan/:id", c.SatuanController.Get)

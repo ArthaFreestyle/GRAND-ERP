@@ -137,6 +137,10 @@ type PembelianDetail struct {
 	FaktorKonversi   int64
 	QtyDasar         int64
 	QtyDiterimaDasar int64
+	// QtySusulanDasar is not a column: it is the sum of every POSTED
+	// penerimaan_susulan line pointing at this row. What the supplier still owes is
+	// QtyDasar - QtyDiterimaDasar - QtySusulanDasar.
+	QtySusulanDasar int64
 
 	HargaSatuanInput string
 	DiskonBaris      string
