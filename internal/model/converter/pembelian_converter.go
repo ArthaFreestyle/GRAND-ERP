@@ -92,12 +92,16 @@ func PembelianDetailToResponse(detail *entity.PembelianDetail) *model.PembelianD
 		QtyDasar:         detail.QtyDasar,
 		QtyDiterimaDasar: detail.QtyDiterimaDasar,
 		QtySusulanDasar:  detail.QtySusulanDasar,
+		QtyReturDasar:    detail.QtyReturDasar,
 		// Computed here rather than left to the client: the whole receiving screen
 		// is built around these, and every caller would otherwise derive them the
 		// same way. selisih_dasar is frozen at what the first delivery was short;
 		// sisa_dasar is what is still owed after follow-up receipts.
-		SelisihDasar:    detail.QtyDasar - detail.QtyDiterimaDasar,
-		SisaDasar:       detail.QtyDasar - detail.QtyDiterimaDasar - detail.QtySusulanDasar,
+		SelisihDasar: detail.QtyDasar - detail.QtyDiterimaDasar,
+		SisaDasar:    detail.QtyDasar - detail.QtyDiterimaDasar - detail.QtySusulanDasar,
+		// A separate axis from sisa_dasar: what arrived may go back, and sending it
+		// back does not make the supplier owe it again.
+		QtyDapatDiretur: detail.QtyDiterimaDasar + detail.QtySusulanDasar - detail.QtyReturDasar,
 		NamaSatuanDasar: detail.NamaSatuanDasar,
 
 		HargaSatuanInput:      detail.HargaSatuanInput,

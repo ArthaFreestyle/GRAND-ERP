@@ -141,6 +141,12 @@ type PembelianDetail struct {
 	// penerimaan_susulan line pointing at this row. What the supplier still owes is
 	// QtyDasar - QtyDiterimaDasar - QtySusulanDasar.
 	QtySusulanDasar int64
+	// QtyReturDasar is not a column either: the sum of every POSTED retur_pembelian
+	// line pointing at this row. It answers a different question from the one above —
+	// goods returned were still received, so a return does not reopen what the
+	// supplier owes. What may still go back is
+	// QtyDiterimaDasar + QtySusulanDasar - QtyReturDasar.
+	QtyReturDasar int64
 
 	HargaSatuanInput string
 	DiskonBaris      string

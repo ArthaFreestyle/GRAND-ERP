@@ -34,6 +34,7 @@ type RouteConfig struct {
 	AuthController      *deliveryhttp.AuthController
 	PembelianController *deliveryhttp.PembelianController
 	SusulanController   *deliveryhttp.PenerimaanSusulanController
+	ReturController     *deliveryhttp.ReturPembelianController
 	ProductController   *deliveryhttp.ProductController
 	RuangController     *deliveryhttp.RuangController
 	SatuanController    *deliveryhttp.SatuanController
@@ -88,8 +89,8 @@ func (c *RouteConfig) setupGuestRoute() {
 //   - user and role are SUPERADMIN-only, reads included. Listing accounts and their
 //     privileges is itself sensitive, and being able to write there is a privilege
 //     escalation path: grant yourself SUPERADMIN and the rest follows.
-//   - pembelian splits along its approval flow rather than by module: see the
-//     comment above those routes.
+//   - pembelian, penerimaan-susulan, and retur-pembelian split along their approval
+//     flow rather than by module: see the comment above those routes.
 //
 // This split is a starting assumption drawn from the three role names, not something
 // derived from a spec. Adjust the guards as the real division of work becomes clear.
@@ -165,6 +166,22 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/penerimaan-susulan/:id/posting", superadmin, c.SusulanController.Posting)
 	api.Post("/penerimaan-susulan/:id/tolak", superadmin, c.SusulanController.Tolak)
 	api.Post("/penerimaan-susulan/:id/batal", superadmin, c.SusulanController.Batal)
+
+	// retur-pembelian carries the same split, and here the case for it is strongest:
+	// this is the one document so far whose posting takes goods *out* of stock, so a
+	// wrong one can drive a balance to a figure that no longer matches the shelf, and
+	// its reversal is valued at whatever the moving average has become. Nothing here
+	// reduces what the supplier is owed either — the credit note is settled with them on
+	// paper, and the payable side is fase 6.
+	api.Get("/retur-pembelian", c.ReturController.List)
+	api.Get("/retur-pembelian/:id", c.ReturController.Get)
+	api.Post("/retur-pembelian", inventaris, c.ReturController.Create)
+	api.Patch("/retur-pembelian/:id", inventaris, c.ReturController.Update)
+	api.Put("/retur-pembelian/:id/detail", inventaris, c.ReturController.ReplaceDetail)
+	api.Post("/retur-pembelian/:id/ajukan", inventaris, c.ReturController.Ajukan)
+	api.Post("/retur-pembelian/:id/posting", superadmin, c.ReturController.Posting)
+	api.Post("/retur-pembelian/:id/tolak", superadmin, c.ReturController.Tolak)
+	api.Post("/retur-pembelian/:id/batal", superadmin, c.ReturController.Batal)
 
 	api.Get("/satuan", c.SatuanController.List)
 	api.Get("/satuan/:id", c.SatuanController.Get)

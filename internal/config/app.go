@@ -44,6 +44,7 @@ func Bootstrap(config *BootstrapConfig) {
 	counterRepository := repository.NewDocumentCounterRepository()
 	pembelianRepository := repository.NewPembelianRepository()
 	susulanRepository := repository.NewPenerimaanSusulanRepository()
+	returRepository := repository.NewReturPembelianRepository()
 
 	ruangUseCase := usecase.NewRuangUseCase(
 		config.DB, config.Log, config.Validate, ruangRepository,
@@ -87,6 +88,16 @@ func Bootstrap(config *BootstrapConfig) {
 		susulanRepository, pembelianRepository, productRepository,
 		kartuStokRepository, counterRepository,
 	)
+	// ReturPembelianUseCase takes the same five as the follow-up receipt above, and for
+	// the same reasons — it is the mirror document. It reads the purchase's lines for
+	// the cost to copy and locks the purchase to serialise returns against each other.
+	// What it does NOT do is rewrite status_penerimaan: sending goods back does not make
+	// a delivery incomplete.
+	returUseCase := usecase.NewReturPembelianUseCase(
+		config.DB, config.Log, config.Validate,
+		returRepository, pembelianRepository, productRepository,
+		kartuStokRepository, counterRepository,
+	)
 	// Fails the process at boot when jwt.secret is missing or too short, rather than
 	// at the first login attempt.
 	authConfig := NewAuthConfig(config.Config, config.Log)
@@ -109,6 +120,7 @@ func Bootstrap(config *BootstrapConfig) {
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
 	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
 	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
+	returController := deliveryhttp.NewReturPembelianController(config.Log, returUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
 
@@ -127,6 +139,7 @@ func Bootstrap(config *BootstrapConfig) {
 		AuthController:      authController,
 		PembelianController: pembelianController,
 		SusulanController:   susulanController,
+		ReturController:     returController,
 		ProductController:   productController,
 		RuangController:     ruangController,
 		SatuanController:    satuanController,

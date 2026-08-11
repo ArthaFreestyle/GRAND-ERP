@@ -72,7 +72,8 @@ const pembelianFilter = `
 // because a line shows both ("2 DUS = 24 PCS").
 const pembelianDetailReadColumns = `d.id, d.id_pembelian, d.id_product, d.qty_faktur::TEXT,
 	d.qty_diterima::TEXT, d.id_satuan_input, d.faktor_konversi, d.qty_dasar,
-	d.qty_diterima_dasar, ` + pembelianDetailSusulan + `, d.harga_satuan_input::TEXT,
+	d.qty_diterima_dasar, ` + pembelianDetailSusulan + `, ` + pembelianDetailRetur + `,
+	d.harga_satuan_input::TEXT,
 	d.diskon_baris::TEXT, d.subtotal::TEXT, d.jumlah_koli::TEXT, d.alokasi_biaya::TEXT,
 	d.harga_pokok_satuan_dasar::TEXT, d.keterangan_selisih,
 	pr.nama, pr.kode_barang, si.nama, sd.nama`
@@ -92,6 +93,24 @@ const pembelianDetailSusulan = `COALESCE((
 		FROM penerimaan_susulan_detail ps_d
 		JOIN penerimaan_susulan ps ON ps.id = ps_d.id_penerimaan_susulan
 		WHERE ps_d.id_pembelian_detail = d.id AND ps.status = 'POSTED'
+	), 0)`
+
+// pembelianDetailRetur totals the returns already posted against a line. Declared
+// alongside pembelianDetailSusulan and for the same reasons: it is a correlated
+// subquery driven by the outer rows, using
+// retur_pembelian_detail_pembelian_detail_idx, and only POSTED documents count — a
+// draft return is a packing list, not a shipment, and letting one reduce the figure
+// would let an abandoned draft hide goods that are still on the shelf.
+//
+// What may still go back is qty_diterima_dasar + Σ susulan − Σ retur. Note that this
+// is a different question from the outstanding quantity: goods returned were still
+// received, so a return neither reopens the supplier's obligation to deliver nor
+// entitles the buyer to a follow-up shipment.
+const pembelianDetailRetur = `COALESCE((
+		SELECT SUM(rp_d.qty_dasar)
+		FROM retur_pembelian_detail rp_d
+		JOIN retur_pembelian rp ON rp.id = rp_d.id_retur_pembelian
+		WHERE rp_d.id_pembelian_detail = d.id AND rp.status = 'POSTED'
 	), 0)`
 
 const pembelianDetailFrom = `
@@ -492,6 +511,7 @@ func (r *PembelianRepository) FindDetail(ctx context.Context, db DBTX, idPembeli
 			&detail.ID, &detail.IDPembelian, &detail.IDProduct, &detail.QtyFaktur,
 			&detail.QtyDiterima, &detail.IDSatuanInput, &detail.FaktorKonversi,
 			&detail.QtyDasar, &detail.QtyDiterimaDasar, &detail.QtySusulanDasar,
+			&detail.QtyReturDasar,
 			&detail.HargaSatuanInput,
 			&detail.DiskonBaris, &detail.Subtotal, &detail.JumlahKoli,
 			&detail.AlokasiBiaya, &detail.HargaPokokSatuanDasar, &detail.KeteranganSelisih,
@@ -525,6 +545,7 @@ func (r *PembelianRepository) FindDetailByID(ctx context.Context, db DBTX, id in
 		&detail.ID, &detail.IDPembelian, &detail.IDProduct, &detail.QtyFaktur,
 		&detail.QtyDiterima, &detail.IDSatuanInput, &detail.FaktorKonversi,
 		&detail.QtyDasar, &detail.QtyDiterimaDasar, &detail.QtySusulanDasar,
+		&detail.QtyReturDasar,
 		&detail.HargaSatuanInput,
 		&detail.DiskonBaris, &detail.Subtotal, &detail.JumlahKoli,
 		&detail.AlokasiBiaya, &detail.HargaPokokSatuanDasar, &detail.KeteranganSelisih,
@@ -584,6 +605,30 @@ func (r *PembelianRepository) HasPostedSusulan(ctx context.Context, db DBTX, idP
 	var exists bool
 	if err := db.QueryRowContext(ctx, query, idPembelian).Scan(&exists); err != nil {
 		return false, fmt.Errorf("check penerimaan_susulan POSTED: %w", err)
+	}
+
+	return exists, nil
+}
+
+// HasPostedRetur reports whether a return has already been posted against a purchase.
+//
+// Cancelling the purchase must be refused while one exists, for two reasons that
+// compound. The cancellation reverses the full received quantity, but the return has
+// already taken part of it out — so the reversal would drive the balance negative and
+// be rejected by the kartu_stok trigger with a message about stock rather than about
+// the return. And even where the balance happens to allow it, the return would be left
+// pointing at a BATAL purchase whose own reversal already accounted for those goods,
+// which is the same shortfall counted twice. Void the return first.
+func (r *PembelianRepository) HasPostedRetur(ctx context.Context, db DBTX, idPembelian int64) (bool, error) {
+	const query = `
+		SELECT EXISTS (
+			SELECT 1 FROM retur_pembelian
+			WHERE id_pembelian = $1 AND status = 'POSTED'
+		)`
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, idPembelian).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check retur_pembelian POSTED: %w", err)
 	}
 
 	return exists, nil

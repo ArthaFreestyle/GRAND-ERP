@@ -71,6 +71,7 @@ type app struct {
 	user      *usecase.UserUseCase
 	pembelian *usecase.PembelianUseCase
 	susulan   *usecase.PenerimaanSusulanUseCase
+	retur     *usecase.ReturPembelianUseCase
 }
 
 // newApp wires the same graph config.Bootstrap does, minus Fiber, and empties the
@@ -125,6 +126,11 @@ func newApp(t *testing.T) *app {
 			repository.NewPenerimaanSusulanRepository(), pembelianRepository,
 			productRepository, kartuStokRepository, counterRepository,
 		),
+		retur: usecase.NewReturPembelianUseCase(
+			testDB, log, validate,
+			repository.NewReturPembelianRepository(), pembelianRepository,
+			productRepository, kartuStokRepository, counterRepository,
+		),
 	}
 }
 
@@ -143,6 +149,8 @@ func requireDB(t *testing.T) {
 // users comes after the master tables because every one of them has a created_by
 // pointing at it. kartu_stok goes first of all — it references product, ruang,
 // satuan, and users, and pembelian_detail rows are what its postings describe.
+// penerimaan_susulan_detail and retur_pembelian_detail both point at pembelian_detail,
+// so both come before it.
 //
 // kartu_stok also refuses DELETE, by the same append-only trigger, so the trigger is
 // switched off for the length of the wipe. That is a licence a test database gets
@@ -166,6 +174,7 @@ func truncateMaster(t *testing.T) {
 		// go before it.
 		"kartu_stok",
 		"penerimaan_susulan_detail", "penerimaan_susulan",
+		"retur_pembelian_detail", "retur_pembelian",
 		"pembelian_detail", "pembelian", "document_counter",
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.

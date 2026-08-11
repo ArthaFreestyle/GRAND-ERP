@@ -11,6 +11,7 @@ import (
 const (
 	PrefixPembelian = "BL"
 	PrefixSusulan   = "PS"
+	PrefixRetur     = "RB"
 )
 
 // DocumentCounterRepository hands out the per-month sequence behind every document

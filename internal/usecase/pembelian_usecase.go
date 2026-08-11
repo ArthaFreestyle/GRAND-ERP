@@ -518,6 +518,20 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 		return nil, model.Conflict("batalkan penerimaan susulannya lebih dulu")
 	}
 
+	// A posted return has to be voided first, and the reason compounds. This
+	// cancellation reverses the full received quantity, but the return already took part
+	// of it out — so the reversal would drive the balance negative and be refused by the
+	// kartu_stok trigger with a message about stock rather than about the return. Even
+	// where the balance allows it, the return would be left pointing at a BATAL purchase
+	// whose reversal already accounted for those goods: the same shortfall twice.
+	adaRetur, err := c.PembelianRepository.HasPostedRetur(ctx, tx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if adaRetur {
+		return nil, model.Conflict("batalkan retur pembeliannya lebih dulu")
+	}
+
 	asal, err := c.KartuStokRepository.FindByRef(ctx, tx, entity.RefTablePembelian, request.ID)
 	if err != nil {
 		return nil, err

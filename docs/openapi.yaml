@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: GRAND-ERP API
-  version: 0.7.0
+  version: 0.8.0
   description: >
     Backend kontrak API untuk GRAND-ERP. Setiap perubahan route, request, atau
     response di internal/delivery dan internal/model harus tercermin di sini
@@ -32,11 +32,12 @@ info:
     apa saja. `role` dan `user` khusus `SUPERADMIN`, termasuk untuk membaca.
 
 
-    `pembelian` dan `penerimaan-susulan` dibagi menurut tahap alurnya, bukan menurut
-    data yang disentuh. `INVENTARIS` mengetik faktur, menghitung barang, dan
-    mengajukan; `SUPERADMIN` yang memposting, menolak, atau membatalkan. Alasannya:
-    posting bukan penyuntingan — ia menambah baris ke `kartu_stok` yang bersifat
-    append-only, jadi posting yang salah tidak bisa diperbaiki, hanya dibalik.
+    `pembelian`, `penerimaan-susulan`, dan `retur-pembelian` dibagi menurut tahap
+    alurnya, bukan menurut data yang disentuh. `INVENTARIS` mengetik faktur,
+    menghitung barang, dan mengajukan; `SUPERADMIN` yang memposting, menolak, atau
+    membatalkan. Alasannya: posting bukan penyuntingan — ia menambah baris ke
+    `kartu_stok` yang bersifat append-only, jadi posting yang salah tidak bisa
+    diperbaiki, hanya dibalik.
 
 
     `penerimaan-susulan` adalah kiriman kedua untuk barang yang belum datang di
@@ -45,6 +46,15 @@ info:
     yang tersisa adalah barang, bukan uang. Nilai yang masuk adalah porsi sisa dari
     nilai faktur asli, sehingga satu faktur menyumbang persis nilainya sendiri ke
     persediaan berapa pun kali barangnya datang.
+
+
+    `retur-pembelian` adalah cerminnya: dokumen yang sama-sama menunjuk baris
+    `pembelian_detail` dan sama-sama menyalin harga pokoknya dari sana, hanya arah
+    barangnya berlawanan. Yang bisa diretur adalah yang **benar-benar datang**
+    (`qty_diterima_dasar + Σ susulan − Σ retur`), bukan yang difakturkan — barang yang
+    tidak pernah datang dikejar dengan penerimaan susulan, bukan dikirim balik. Retur
+    tidak mengurangi utang di sistem ini: berapa yang dikreditkan supplier diselesaikan
+    di atas nota, dan sisi utang belum punya lapisan Go.
 
 
     Uang dan kuantitas pada modul pembelian dikirim dan diterima sebagai **string
@@ -84,6 +94,7 @@ tags:
   - name: auth
   - name: pembelian
   - name: penerimaan-susulan
+  - name: retur-pembelian
   - name: product
   - name: docs
   - name: ruang
@@ -1343,6 +1354,354 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
+  /api/v1/retur-pembelian:
+    get:
+      tags: [retur-pembelian]
+      summary: List retur pembelian
+      operationId: listReturPembelian
+      description: >
+        Tidak menyertakan `detail`; kuncinya hilang sama sekali, bukan array kosong.
+        `search` mencocokkan nomor dokumen ini maupun nomor pembelian asalnya.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        - name: id_pembelian
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: id_supplier
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/ReturPembelian" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [retur-pembelian]
+      summary: Buat draft retur pembelian
+      operationId: createReturPembelian
+      description: >
+        Barang yang dikembalikan ke supplier. Cermin dari penerimaan susulan:
+        sama-sama menunjuk baris `pembelian_detail` dan sama-sama menyalin harga
+        pokoknya dari sana, arah barangnya saja yang berlawanan.
+
+
+        **Pembelian asalnya harus `POSTED`.** Sebelum itu barisnya belum punya
+        `harga_pokok_satuan_dasar` untuk disalin, dan belum ada barang yang datang
+        untuk dikirim balik.
+
+
+        `id_supplier` dan `id_ruang` tidak ada di body: keduanya disalin dari
+        pembelian. Suppliernya adalah yang menjual barangnya, dan ruangnya adalah
+        tempat pembelian itu menaruhnya — barang yang perlu dikembalikan dari ruang
+        lain adalah pekerjaan mutasi lebih dulu.
+
+
+        Nomor digenerate server dengan seri sendiri, `RB/2026/08/0001`.
+
+
+        Setiap baris tidak boleh melebihi yang bisa diretur
+        (`qty_diterima_dasar + Σ susulan POSTED − Σ retur POSTED`). Perhatikan
+        kuantitas yang **tidak** ikut: `qty_dasar`. Yang difakturkan adalah yang
+        ditagih supplier, dan barang yang tidak pernah datang tidak bisa dikirim
+        balik — kekurangan kiriman dikejar dengan penerimaan susulan, bukan retur.
+
+
+        Pengecekan yang menentukan terjadi saat posting, di bawah row lock pembelian;
+        yang di sini hanya memberi error lebih cepat.
+
+
+        `alasan` wajib meski kolomnya nullable. Ia satu-satunya catatan kenapa barang
+        yang sudah dibayar dikirim balik, dan itu yang dibacakan ke supplier.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id_pembelian, tanggal, alasan, detail]
+              properties:
+                id_pembelian: { type: integer, format: int64, minimum: 1 }
+                tanggal: { type: string, format: date, example: "2026-08-15" }
+                alasan: { type: string, maxLength: 1000, example: barang rusak saat diterima }
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/ReturPembelianDetailInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/retur-pembelian/{id}:
+    get:
+      tags: [retur-pembelian]
+      summary: Detail retur pembelian beserta barisnya
+      operationId: getReturPembelian
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [retur-pembelian]
+      summary: Ubah header retur pembelian
+      operationId: updateReturPembelian
+      description: >
+        **Hanya saat `DRAFT`.** Hanya dua field yang benar-benar milik operator yang
+        bisa diubah; `id_pembelian`, `id_supplier`, dan `id_ruang` menentukan dokumen
+        ini retur atas apa dan tidak ada di sini.
+
+
+        `alasan: null` ditolak 400 walaupun kolomnya nullable: jalur create menuntut
+        alasan, jadi membiarkan patch mengosongkannya akan menghasilkan dokumen yang
+        tidak mungkin dibuat lewat create.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggal: { type: string, format: date }
+                alasan: { type: string, maxLength: 1000 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/retur-pembelian/{id}/detail:
+    put:
+      tags: [retur-pembelian]
+      summary: Ganti seluruh baris retur pembelian
+      operationId: replaceReturPembelianDetail
+      description: >
+        `PUT`, bukan `PATCH`: barisnya diganti sekaligus, karena baris satu kiriman
+        balik adalah satu kesatuan yang dikemas dan dihitung bersamaan.
+        **Hanya saat `DRAFT`.**
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [detail]
+              properties:
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/ReturPembelianDetailInput" }
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/retur-pembelian/{id}/ajukan:
+    post:
+      tags: [retur-pembelian]
+      summary: Ajukan draft untuk disetujui
+      operationId: ajukanReturPembelian
+      description: >
+        `DRAFT` → `DIAJUKAN`. Tanpa body. Dokumen tanpa baris ditolak 400.
+        Role: `INVENTARIS` atau `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diajukan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/retur-pembelian/{id}/tolak:
+    post:
+      tags: [retur-pembelian]
+      summary: Tolak pengajuan, kembalikan ke DRAFT
+      operationId: tolakReturPembelian
+      description: "`DIAJUKAN` → `DRAFT`, `alasan` wajib. Role: `SUPERADMIN`."
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan]
+              properties:
+                alasan: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Ditolak
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/retur-pembelian/{id}/posting:
+    post:
+      tags: [retur-pembelian]
+      summary: Setujui dan keluarkan dari kartu stok
+      operationId: postingReturPembelian
+      description: >
+        `DIAJUKAN` → `POSTED`. Satu transaksi menulis satu baris `kartu_stok` per baris
+        dokumen dengan `jenis_transaksi = RETUR_PEMBELIAN` dan `stok_keluar` terisi.
+
+
+        **`total` dokumen ini dan nilai yang dicatat kartu stok tidak selalu sama, dan
+        itu bukan bug.** `total` adalah nilai barang menurut faktur, dihitung dari
+        harga pokok yang disalin dari baris pembelian — itu yang membuat pembelian dan
+        returnya saling menghapus. Sementara `kartu_stok` menilai setiap baris keluar
+        pada rata-rata bergerak yang berlaku saat itu, karena barangnya sudah tercampur
+        dengan stok lama sejak ia datang dan tidak ada lagi batch yang bisa dipisahkan.
+
+
+        `pembelian.status_penerimaan` sengaja **tidak** dihitung ulang: mengirim barang
+        balik tidak membuat kiriman jadi tidak lengkap, dan tidak membuat supplier
+        berutang barang lagi.
+
+
+        Yang bisa diretur diperiksa lagi di sini, di bawah row lock pembelian — dan itu
+        pemeriksaan yang menentukan. Di antara draft ditulis dan diposting, retur lain
+        untuk pembelian yang sama bisa lebih dulu menghabiskannya.
+
+
+        Ditolak 400 kalau kuantitasnya melebihi yang bisa diretur, kalau saldo stok di
+        ruang itu tidak mencukupi, atau kalau periode dokumen berstatus `TUTUP`. Bulan
+        tanpa baris `periode` dihitung terbuka.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Posted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/retur-pembelian/{id}/batal:
+    post:
+      tags: [retur-pembelian]
+      summary: Batalkan dokumen POSTED dengan baris pembalik
+      operationId: batalReturPembelian
+      description: >
+        `POSTED` → `BATAL`. Menambah satu baris `kartu_stok` pembalik untuk setiap
+        pergerakan yang dibuat dokumen ini: barangnya kembali masuk, dinilai persis
+        sebesar yang tercatat saat ia keluar — satu-satunya angka yang membuat
+        pasangannya berjumlah nol.
+
+
+        **Membatalkan pembelian yang punya retur POSTED ditolak 409** — batalkan
+        returnya lebih dulu. Pembatalan pembelian membalik seluruh kuantitas yang
+        diterima, sementara returnya sudah mengeluarkan sebagiannya, jadi pembalikannya
+        akan menekan saldo di bawah nol; dan kalaupun saldonya cukup, returnya akan
+        tertinggal menunjuk pembelian `BATAL` yang pembalikannya sudah memperhitungkan
+        barang yang sama — kekurangan yang sama dihitung dua kali.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_batal]
+              properties:
+                alasan_batal: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
   /api/v1/ruang:
     get:
       tags: [ruang]
@@ -2512,6 +2871,27 @@ components:
             `selisih_dasar - qty_susulan_dasar`: yang masih jadi tanggungan supplier
             hari ini. Menyusut setiap kali penerimaan susulan diposting.
           example: 5
+        qty_retur_dasar:
+          type: integer
+          format: int64
+          description: >
+            Jumlah seluruh retur pembelian **POSTED** terhadap baris ini. Draft tidak
+            dihitung — draft adalah daftar kemasan, bukan pengiriman.
+          example: 0
+        qty_dapat_diretur:
+          type: integer
+          format: int64
+          description: >
+            `qty_diterima_dasar + qty_susulan_dasar - qty_retur_dasar`: yang masih bisa
+            dikirim balik ke supplier.
+
+
+            Ini sumbu yang berbeda dari tiga angka di atas, dan mencampurnya adalah
+            kesalahan yang perlu dihindari: barang yang diretur tetap pernah diterima,
+            jadi retur tidak membuat supplier berutang barang lagi dan tidak memberi hak
+            atas kiriman susulan. `sisa_dasar` dan `qty_dapat_diretur` bisa sama-sama
+            bukan nol pada baris yang sama.
+          example: 95
         nama_satuan_dasar: { type: string }
         harga_satuan_input: { type: string, example: "10000.00" }
         diskon_baris: { type: string, example: "0.00" }
@@ -2756,6 +3136,137 @@ components:
             (`qty_dasar - qty_diterima_dasar - Σ susulan POSTED`), setelah dikonversi
             ke satuan dasar. `qty x faktor` wajib bilangan bulat.
           example: "5"
+
+    ReturPembelian:
+      type: object
+      description: >
+        Barang yang dikembalikan ke supplier. Cermin dari penerimaan susulan: sama-sama
+        menunjuk baris `pembelian_detail` dan sama-sama menyalin harga pokoknya dari
+        sana, arah barangnya saja yang berlawanan.
+
+
+        Tidak punya `ppn` maupun `status_pembayaran`. Berapa yang dikreditkan supplier
+        diselesaikan dengan mereka di atas nota; dokumen ini mencatat apa yang keluar
+        dari gudang dan berapa nilainya.
+      properties:
+        id: { type: integer, format: int64 }
+        nomor:
+          type: string
+          description: Seri sendiri, terpisah dari pembelian dan penerimaan susulan.
+          example: RB/2026/08/0001
+        tanggal: { type: string, format: date-time }
+        id_pembelian: { type: integer, format: int64 }
+        nomor_pembelian: { type: string }
+        id_supplier:
+          type: integer
+          format: int64
+          description: Disalin dari pembelian, bukan dipilih.
+        nama_supplier: { type: string }
+        id_ruang:
+          type: integer
+          format: int64
+          description: >
+            Disalin dari pembelian — tempat barangnya ditaruh saat datang. Barang yang
+            perlu dikembalikan dari ruang lain adalah pekerjaan mutasi lebih dulu.
+        nama_ruang: { type: string }
+        alasan:
+          type: string
+          nullable: true
+          description: >
+            Nullable di skema tetapi wajib diisi aplikasi. Ia satu-satunya catatan kenapa
+            barang yang sudah dibayar dikirim balik.
+        total:
+          type: string
+          description: >
+            Nilai persediaan yang keluar menurut faktur, dihitung ulang dari barisnya dan
+            tidak pernah di-set dari form. **Bukan otomatis sama dengan yang dikreditkan
+            supplier**, dan bukan angka yang dicatat kartu stok — lihat
+            `harga_pokok_satuan_dasar` pada barisnya.
+          example: "1000000.00"
+        status: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        detail:
+          type: array
+          description: Hanya pada endpoint detail. Kuncinya hilang pada list.
+          items: { $ref: "#/components/schemas/ReturPembelianDetail" }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        diajukan_oleh: { type: integer, format: int64, nullable: true }
+        diajukan_pada: { type: string, format: date-time, nullable: true }
+        disetujui_oleh: { type: integer, format: int64, nullable: true }
+        disetujui_pada: { type: string, format: date-time, nullable: true }
+        posted_at: { type: string, format: date-time, nullable: true }
+        dibatalkan_oleh: { type: integer, format: int64, nullable: true }
+        alasan_batal: { type: string, nullable: true }
+        alasan_tolak: { type: string, nullable: true }
+
+    ReturPembelianDetail:
+      type: object
+      description: >
+        Satu baris, menunjuk baris faktur yang barangnya masuk lewat sana — produknya
+        adalah produk baris itu.
+      properties:
+        id: { type: integer, format: int64 }
+        id_pembelian_detail: { type: integer, format: int64 }
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        qty_input: { type: string, example: "1.0000" }
+        id_satuan_input: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        faktor_konversi:
+          type: integer
+          format: int64
+          description: >
+            Snapshot dari `product_satuan` saat baris ditulis. Diambil segar karena
+            kuantitasnya adalah hitungan baru atas barang yang sedang dikemas dan boleh
+            dalam satuan yang berbeda dari yang dipakai faktur.
+        qty_dasar: { type: integer, format: int64, example: 12 }
+        nama_satuan_dasar: { type: string }
+        harga_pokok_satuan_dasar:
+          type: string
+          description: >
+            **Disalin dari baris pembelian**, tidak pernah dibaca dari rata-rata bergerak
+            terkini. Tanpa itu pembelian dan returnya tidak saling menghapus — dan itulah
+            yang menurut migrasi `000005` menjadi alasan kolom ini ada.
+          example: "10000.0000"
+        nilai:
+          type: string
+          description: >
+            `qty_dasar x harga_pokok_satuan_dasar` — nilai barangnya menurut faktur.
+            **Bukan** yang dicatat `kartu_stok` sebagai keluar: trigger menilai setiap
+            baris keluar pada rata-rata bergerak yang berlaku saat itu, karena barangnya
+            sudah tercampur dengan stok lama sejak ia datang. Dua-duanya jawaban benar
+            untuk pertanyaan yang berbeda.
+          example: "120000.00"
+
+    ReturPembelianDetailInput:
+      type: object
+      required: [id_pembelian_detail, id_satuan_input, qty_input]
+      properties:
+        id_pembelian_detail:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Harus milik pembelian di header, dan harga pokoknya harus sudah terisi (yaitu
+            pembeliannya sudah POSTED). Satu baris pembelian hanya boleh muncul sekali per
+            dokumen.
+        id_satuan_input:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Harus terdaftar di `product_satuan` produk itu. Boleh berbeda dari satuan yang
+            dipakai baris fakturnya — satu dus dikembalikan dari baris yang diketik dalam
+            pcs adalah kasus yang wajar.
+        qty_input:
+          type: string
+          description: >
+            Tidak boleh melebihi yang bisa diretur
+            (`qty_diterima_dasar + Σ susulan POSTED − Σ retur POSTED`), setelah dikonversi
+            ke satuan dasar. Perhatikan bahwa `qty_dasar` tidak ikut: barang yang tidak
+            pernah datang tidak bisa dikirim balik. `qty x faktor` wajib bilangan bulat.
+          example: "1"
 
     Role:
       type: object
