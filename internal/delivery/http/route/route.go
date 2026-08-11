@@ -32,6 +32,8 @@ type RouteConfig struct {
 	DocsController *deliveryhttp.DocsController
 
 	AuthController      *deliveryhttp.AuthController
+	PembelianController *deliveryhttp.PembelianController
+	SusulanController   *deliveryhttp.PenerimaanSusulanController
 	ProductController   *deliveryhttp.ProductController
 	RuangController     *deliveryhttp.RuangController
 	SatuanController    *deliveryhttp.SatuanController
@@ -86,6 +88,8 @@ func (c *RouteConfig) setupGuestRoute() {
 //   - user and role are SUPERADMIN-only, reads included. Listing accounts and their
 //     privileges is itself sensitive, and being able to write there is a privilege
 //     escalation path: grant yourself SUPERADMIN and the rest follows.
+//   - pembelian splits along its approval flow rather than by module: see the
+//     comment above those routes.
 //
 // This split is a starting assumption drawn from the three role names, not something
 // derived from a spec. Adjust the guards as the real division of work becomes clear.
@@ -119,6 +123,48 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Patch("/product/:id", inventaris, c.ProductController.Update)
 	api.Post("/product/:id/satuan", inventaris, c.ProductController.AddSatuan)
 	api.Post("/product/:id/harga-jual", inventaris, c.ProductController.AddHargaJual)
+
+	// riwayat-beli is a read, so it follows the read rule and is open to any
+	// authenticated caller. It is the replacement for a purchase order: what an
+	// operator needs before ordering is the price last paid, and it reads only
+	// documents that were posted anyway.
+	api.Get("/product/:id/riwayat-beli", c.ProductController.RiwayatBeli)
+
+	// pembelian is the first module whose writes are split by workflow stage rather
+	// than by which data they touch, because posting one is not an edit — it appends
+	// to kartu_stok, which is append-only. A wrong posting cannot be corrected, only
+	// reversed, and the reversal is valued at whatever the moving average has become
+	// by then. So the desk that reads the paper invoice and counts the box is not the
+	// desk that decides those numbers may enter the stock ledger.
+	//
+	// INVENTARIS types the document and submits it; SUPERADMIN approves, rejects, or
+	// voids. The split is on the transition, not the record: the same person may well
+	// hold both roles in a small office, and then nothing changes for them.
+	api.Get("/pembelian", c.PembelianController.List)
+	api.Get("/pembelian/:id", c.PembelianController.Get)
+	api.Get("/pembelian/:id/sisa", c.PembelianController.Sisa)
+	api.Post("/pembelian", inventaris, c.PembelianController.Create)
+	api.Patch("/pembelian/:id", inventaris, c.PembelianController.Update)
+	api.Put("/pembelian/:id/detail", inventaris, c.PembelianController.ReplaceDetail)
+	api.Post("/pembelian/:id/bagi-rata-koli", inventaris, c.PembelianController.BagiRataKoli)
+	api.Post("/pembelian/:id/ajukan", inventaris, c.PembelianController.Ajukan)
+	api.Post("/pembelian/:id/posting", superadmin, c.PembelianController.Posting)
+	api.Post("/pembelian/:id/tolak", superadmin, c.PembelianController.Tolak)
+	api.Post("/pembelian/:id/batal", superadmin, c.PembelianController.Batal)
+
+	// penerimaan-susulan carries the same split for the same reason: it writes
+	// kartu_stok too. Nothing here adds to what the supplier is owed — the invoice
+	// was booked in full with the first delivery — so the approval is about stock,
+	// not about money.
+	api.Get("/penerimaan-susulan", c.SusulanController.List)
+	api.Get("/penerimaan-susulan/:id", c.SusulanController.Get)
+	api.Post("/penerimaan-susulan", inventaris, c.SusulanController.Create)
+	api.Patch("/penerimaan-susulan/:id", inventaris, c.SusulanController.Update)
+	api.Put("/penerimaan-susulan/:id/detail", inventaris, c.SusulanController.ReplaceDetail)
+	api.Post("/penerimaan-susulan/:id/ajukan", inventaris, c.SusulanController.Ajukan)
+	api.Post("/penerimaan-susulan/:id/posting", superadmin, c.SusulanController.Posting)
+	api.Post("/penerimaan-susulan/:id/tolak", superadmin, c.SusulanController.Tolak)
+	api.Post("/penerimaan-susulan/:id/batal", superadmin, c.SusulanController.Batal)
 
 	api.Get("/satuan", c.SatuanController.List)
 	api.Get("/satuan/:id", c.SatuanController.Get)

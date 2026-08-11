@@ -26,11 +26,18 @@ const dateOnly = "2006-01-02"
 // It carries the rules the database cannot: the base unit must exist with faktor = 1,
 // a price may only be set for a unit the product actually sells in, and opening a price
 // version must close the previous one in the same transaction.
+//
+// PembelianRepository is here for one read only: the purchase history behind
+// GET /product/{id}/riwayat-beli. It is the same arrangement UserUseCase has with
+// RoleRepository — the SQL is over another module's tables, so it stays in that
+// module's repository, and the usecase that owns the resource borrows it. The
+// alternative, a usecase of its own, would be a module for what is one query.
 type ProductUseCase struct {
-	DB                *sql.DB
-	Log               *logrus.Logger
-	Validate          *validator.Validate
-	ProductRepository *repository.ProductRepository
+	DB                  *sql.DB
+	Log                 *logrus.Logger
+	Validate            *validator.Validate
+	ProductRepository   *repository.ProductRepository
+	PembelianRepository *repository.PembelianRepository
 }
 
 func NewProductUseCase(
@@ -38,12 +45,14 @@ func NewProductUseCase(
 	log *logrus.Logger,
 	validate *validator.Validate,
 	productRepository *repository.ProductRepository,
+	pembelianRepository *repository.PembelianRepository,
 ) *ProductUseCase {
 	return &ProductUseCase{
-		DB:                db,
-		Log:               log,
-		Validate:          validate,
-		ProductRepository: productRepository,
+		DB:                  db,
+		Log:                 log,
+		Validate:            validate,
+		ProductRepository:   productRepository,
+		PembelianRepository: pembelianRepository,
 	}
 }
 
@@ -367,6 +376,38 @@ func (c *ProductUseCase) AddHargaJual(ctx context.Context, request *model.AddPro
 	}
 
 	return c.detail(ctx, request.IDProduct)
+}
+
+// RiwayatBeli answers what each supplier last charged for this product.
+//
+// This is isu #4 fase 4, and the point of it is that there is no purchase order in
+// this system: what an operator actually wants before ordering is not a document to
+// fill in but the price they last paid, and every POSTED purchase already recorded
+// one. Nothing has to be entered for this to work, and nothing can fall out of step
+// with it.
+//
+// The product is looked up first so an unknown id answers 404 rather than an empty
+// page. Those are different facts — "nobody has ever bought this" and "there is no
+// such product" — and a client that cannot tell them apart will show the wrong one.
+func (c *ProductUseCase) RiwayatBeli(ctx context.Context, request *model.ListRiwayatBeliRequest) ([]model.RiwayatBeliResponse, *model.PageMetadata, error) {
+	request.Normalize()
+
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, nil, err
+	}
+
+	if _, err := c.ProductRepository.FindByID(ctx, c.DB, request.IDProduct); err != nil {
+		return nil, nil, notFoundOnNoRows(err, "product not found")
+	}
+
+	list, total, err := c.PembelianRepository.FindRiwayatBeli(
+		ctx, c.DB, request.IDProduct, request.IDSupplier, request.Size, request.Offset(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return converter.RiwayatBeliToResponses(list), pageMetadata(&request.PageRequest, total), nil
 }
 
 func (c *ProductUseCase) Search(ctx context.Context, request *model.ListProductRequest) ([]model.ProductResponse, *model.PageMetadata, error) {

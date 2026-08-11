@@ -19,6 +19,18 @@ const foreignKeyViolation = "23503"
 // from being valid at once for the same product and unit.
 const exclusionViolation = "23P01"
 
+// checkViolation is PostgreSQL's SQLSTATE for a failed CHECK constraint. The
+// kartu_stok trigger raises with this code too — deliberately, via
+// `USING ERRCODE = 'check_violation'` — for stock that would go negative and for a
+// posting into a periode that is already TUTUP.
+const checkViolation = "23514"
+
+// ErrTransisiStatus reports that a guarded status change matched no row: the
+// document either vanished or moved to another state between the read and the
+// write. Kept as a sentinel rather than a driver error because nothing failed at
+// the database — the guard did its job.
+var ErrTransisiStatus = errors.New("transisi status tidak berlaku lagi")
+
 // UniqueViolation reports whether err is a unique-constraint violation and, if
 // so, which constraint or index rejected the row.
 //
@@ -56,6 +68,23 @@ func IsExclusionViolation(err error) bool {
 	var pgErr *pgconn.PgError
 
 	return errors.As(err, &pgErr) && pgErr.Code == exclusionViolation
+}
+
+// IsCheckViolation reports whether err is a CHECK constraint or trigger rejection.
+//
+// This is how the kartu_stok engine says no. Its trigger raises with
+// ERRCODE = 'check_violation' for a movement that would drive stock below zero and
+// for one dated inside a closed periode — both of which are the caller's problem to
+// fix, not a server fault. Without this mapping they surface as a 500 saying
+// nothing.
+//
+// A trigger's RAISE carries no constraint name, so unlike UniqueViolation there is
+// nothing useful to return beyond the fact of it; each call site supplies its own
+// message.
+func IsCheckViolation(err error) bool {
+	var pgErr *pgconn.PgError
+
+	return errors.As(err, &pgErr) && pgErr.Code == checkViolation
 }
 
 // IsForeignKeyViolation reports whether err is a foreign-key violation.

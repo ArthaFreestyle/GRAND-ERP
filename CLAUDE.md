@@ -4,17 +4,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Early stage. Master data is implemented; nothing transactional is. Copy an existing slice when adding a module — don't invent a new shape.
+Master data is implemented, and **`pembelian` is the first transaction document** — the first thing that writes `kartu_stok`. Copy an existing slice when adding a module — don't invent a new shape.
 
-- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`ruang`** (create / get / list, no patch), and **`product`** with `product_satuan` + `product_harga_jual`
+- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`ruang`** (create / get / list, no patch), **`product`** with `product_satuan` + `product_harga_jual`, **`pembelian`** with `pembelian_detail`, `kartu_stok` posting, and `document_counter`, **`penerimaan_susulan`** with `penerimaan_susulan_detail`, and **`riwayat_beli`** — a query, not a module
 - Use **`supplier`** as the template for a plain master slice: it is the one with every ordinary concern at once — nullable unique `kode`, PATCH presence semantics, and a `LEFT JOIN` in the list query
-- Use **`user`** as the template when a slice writes more than one table — it is the only one that does: a user and its `user_role` grants are written in one transaction, and it is where `Optional[[]int64]`, bcrypt hashing, and the `Touch` pattern live. See "Users and roles" below
+- Use **`user`** as the template when a slice writes two tables: a user and its `user_role` grants in one transaction, and it is where `Optional[[]int64]`, bcrypt hashing, and the `Touch` pattern live. See "Users and roles" below
+- Use **`pembelian`** as the template for a **transaction document** — a state machine, a generated number, exact decimal arithmetic, and stock movements, all in one transaction. See "Pembelian and the posting engine" below. Do not model a transaction document on a master slice; the concerns barely overlap
+- Use **`riwayat_beli`** as the template for a **read that is not a module** — no table, no migration, one query in another module's repository, borrowed by the usecase that owns the resource. See "Riwayat harga beli" below
+- Use **`penerimaan_susulan`** as the template for a **document that derives from another** — one that points at a parent's detail rows, draws down a quota held there, copies a cost snapshot from it, and rewrites a cache on it. `retur_pembelian` is the same shape with the goods moving the other way. See "Penerimaan susulan" below
 - Module path: `Arthafreestyle/ERP` (no domain prefix); internal imports are `Arthafreestyle/ERP/internal/...`
 - Go 1.25.0 — required by Fiber v3.4.0, which refuses to build on 1.24
-- The full inventory/sales/purchasing schema exists as migrations `000002`–`000008`, but has **no Go layers yet** — see "Inventory data model" below
+- The rest of the inventory/sales schema exists as migrations `000002`–`000008` and still has **no Go layers** — sales, returns, `pemakaian`, `mutasi`, stock opname, and both payment sides. See "Inventory data model" below
 - Auth is implemented: bearer JWT login, role guards per route — see "Authentication and authorization" below
 - Not built yet: captcha (Redis is wired but unused), logout/refresh, session revocation (stateless tokens cannot be revoked), any worker job, `periode`
-- `product` is the only module that fills `created_by`/`updated_by`, taken from the token via `middleware.SessionFrom`. Every other slice still writes `NULL` — the plumbing exists, they just don't use it yet
+- `product` and `pembelian` are the only modules that fill `created_by`/`updated_by`, taken from the token via `middleware.SessionFrom`. Every other slice still writes `NULL` — the plumbing exists, they just don't use it yet
 
 ## Stack
 
@@ -31,13 +34,15 @@ go run ./cmd/web                 # run the HTTP server
 go run ./cmd/worker              # run the background worker
 go build ./...                   # build everything
 go vet ./...                     # vet
-gofmt -l .                       # list unformatted files
+gofmt -l .                       # list unformatted files — see the CRLF caveat below
 
 go test ./...                                        # all tests
 go test ./internal/usecase/...                       # one package
 go test ./internal/usecase -run TestSatuanCreate     # one test (regex match)
 go test -v -race ./...                               # verbose + race detector
 ```
+
+**`gofmt -l .` is not a usable signal on a Windows checkout.** Git's `core.autocrlf=true` writes CRLF into the working tree while the index holds LF, and gofmt wants LF — so it currently lists ~74 of ~90 files. Nothing is actually misformatted; `git ls-files --eol` shows `i/lf` for all of them, and `gofmt -d` on one shows every line replaced by itself. Do not "fix" this with `gofmt -w .`. To get a real answer, check the files you touched individually, or add a `.gitattributes` with `*.go text eol=lf` and re-checkout.
 
 Docker is the shortest path to a working stack — it brings up PostgreSQL, Redis, migrations, seeders, the server, and the worker, in that enforced order:
 
@@ -62,7 +67,13 @@ go test ./...
 
 Tests in `internal/usecase` run against a **real PostgreSQL** and skip themselves unless `TEST_DATABASE_URL` points at a scratch database — most of what they assert (pagination stability under duplicate names, `ILIKE` wildcard escaping, many rows sharing `kode = NULL`, `NUMERIC` round-tripping, several users holding the same role) lives in the database, where a mock would just agree with a wrong query. Migrate the scratch database first; the tests clear the master tables themselves but do not create the schema.
 
-`truncateMaster` in `internal/usecase/main_test.go` deletes in dependency order: master tables, then `user_role`, then `users`, then `role`. Add new tables to that list, on the correct side — `users` has to come after anything whose `created_by` references it.
+`truncateMaster` in `internal/usecase/main_test.go` deletes in dependency order: `kartu_stok` and the purchase tables first, then master tables, then `user_role`, then `users`, then `role`. It uses `DELETE`, not `TRUNCATE` — `TRUNCATE` would cascade into `kartu_stok`, whose guard trigger raises on it. Add new tables to that list, on the correct side — `users` has to come after anything whose `created_by` references it.
+
+`kartu_stok` refuses `DELETE` too, by the same append-only trigger, so `truncateMaster` disables `kartu_stok_append_only` for the length of the wipe and re-enables it in a `defer`. That is a licence the scratch database gets and nothing else does — if you find yourself reaching for it outside `truncateMaster`, you are about to defeat the guarantee the whole valuation rests on.
+
+The tests live in package `usecase_test` (external), and every one of them starts with `newApp(t)`, which calls `requireDB` + `truncateMaster` and then wires the same graph `config.Bootstrap` does, minus Fiber. A new usecase needs a field on that `app` struct, or its tests have nothing to call.
+
+**A green `go test ./...` without `TEST_DATABASE_URL` means skipped, not passed.** The whole package skips itself. Run with `-v` when you need to know which.
 
 ```bash
 export TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/grand_erp_test?sslmode=disable'
@@ -135,6 +146,16 @@ There is one response envelope, `model.WebResponse[T]`, and one error path:
 - `statusForKind` in `internal/config/fiber.go` is the single place a kind becomes a status code.
 - Handlers just `return err`. The Fiber `ErrorHandler` formats it, unwraps `validator.ValidationErrors` into `validation_errors`, and logs only 5xx.
 - A bare `error` (a wrapped SQL failure, say) becomes a 500 with a generic message — internal details never reach the client.
+- **Don't hand-roll the driver-error-to-kind mapping.** `internal/usecase/shared.go` holds the six funnels every slice wraps its repository calls in: `notFoundOnNoRows` (`sql.ErrNoRows` → 404), `conflictOnUnique` (`23505` → 409), `invalidOnForeignKey` (`23503` → 400), `conflictOnExclusion` (`23P01` → 409), `invalidOnCheck` (`23514` → 400), and `conflictOnTransisi` (`repository.ErrTransisiStatus` → 409). The SQLSTATE predicates behind them live in `internal/repository/pgerror.go`. `pageMetadata` is there too, and must be called *after* `PageRequest.Normalize` or `total_page` divides by zero.
+- `invalidOnCheck` exists mainly for the `kartu_stok` trigger, which raises with `USING ERRCODE = 'check_violation'` for negative stock and for a closed `periode`. A trigger's `RAISE` carries no constraint name, so there is nothing to switch on — each call site supplies its own message, and the database's own text never reaches the client.
+
+Controller boilerplate is fixed — copy it verbatim rather than improvising, because these strings are part of the contract:
+
+- `ctx.Bind().Body(request)` failure → `model.Invalid("malformed request body")`; `ctx.Bind().Query(request)` failure → `model.Invalid("malformed query parameters")`.
+- `strconv.ParseInt(ctx.Params("id"), ...)` failure → `model.Invalid("id must be an integer")`.
+- Create answers `fiber.StatusCreated`; everything else answers 200 via a bare `ctx.JSON`.
+- `WebResponse.Data` deliberately has **no `omitempty`**. An empty slice is "empty" to `encoding/json`, so omitempty would drop the key on exactly the page with no rows and break a client reading `data.length`. The cost is `"data": null` on error responses; keep it.
+- Pagination defaults are `PageRequest.Normalize` in `internal/model/model.go`: page 1, size 20, size capped at 100. The usecase calls it; the controller does not.
 
 ### Authentication and authorization
 
@@ -148,8 +169,60 @@ Bearer JWT, stateless by decision. Every `/api/v1` route needs a token except `P
 - `Authenticate` pins the accepted signing method. Without `jwt.WithValidMethods`, the parser trusts the token's own `alg` header and accepts `alg=none`. `TestAlgNoneTokenIsRejected` covers it.
 - **The whole authorization policy is one function**, `setupAuthRoute` in `internal/delivery/http/route/route.go`, so it can be read as a whole. Reads are open to any authenticated user; writes split by data owner (`INVENTARIS` for goods/units/rooms/carriers/suppliers, `CASHIER` for customers); `role` and `user` are `SUPERADMIN`-only including reads. **That split is a starting assumption from the three role names, not a spec** — adjust it as the real division of work emerges.
 - **`db/seeder_postgres/004_superadmin.sql` is load-bearing.** `POST /api/v1/user` is `SUPERADMIN`-only, so without a seeded first user the API is locked out of itself. It ships `admin` / `admin12345`, a password committed to this repository — treat it as single-use.
-- `middleware.SessionFrom(ctx)` is how a handler gets the caller. This is the seam where `created_by`/`updated_by` should start being filled: the id comes from the token, never from the request body. Nothing uses it for that yet, so those columns are still written `NULL`.
+- `middleware.SessionFrom(ctx)` is how a handler gets the caller, and it is the only acceptable source for `created_by`/`updated_by` — the id comes from the verified token, never from the request body. `product_controller.go` is the worked example: the controller reads the session and copies `session.UserID` onto the request DTO's `ActorID` field. Every other slice still writes `NULL`.
+- Role names are constants in the `route` package (`RoleSuperadmin`, `RoleCashier`, `RoleInventaris`), matching `db/seeder_postgres/003_role.sql`. They are constants precisely because `role.nama` is renameable through the API and the compiler cannot catch a rename — at least the strings to change are in one place.
 - Layering holds: the middleware calls `AuthUseCase.Authenticate` and receives a `*model.Session`. The usecase imports `jwt` but never Fiber.
+
+### Pembelian and the posting engine (migration 000012)
+
+The first transaction document, and the first thing that writes `kartu_stok`. Its number generator and its posting path are built to be reused by sales, transfers, usage, and stock counts — build those on this, not on a master slice.
+
+- **The costing arithmetic is pure and lives apart from the I/O.** `internal/usecase/pembelian_alokasi.go` holds `hitungPosting` and `bagiProporsional`, both operating on `*big.Rat` with no database in sight, and `pembelian_alokasi_test.go` is an **internal** test (`package usecase`) — the only one in the repo. That split is deliberate: this is where a mistake is permanent, so it has to be testable without a fixture.
+- **Money and quantities are `math/big.Rat`, never `float64`.** 0.1 has no exact binary representation and these figures become a payable and an inventory valuation. `internal/usecase/numeric.go` parses `NUMERIC` text into exact rationals and rounds once, deliberately, at the end. `formatNumeric` uses `big.Rat.FloatString`, which rounds halves away from zero — the same rule PostgreSQL's `ROUND` applies to `NUMERIC`, and they have to agree or a value computed in Go and one the database recomputes differ by a cent nobody can see.
+- **`nilai_masuk` is proportional to `qty_diterima_dasar / qty_dasar`, never the full invoice value.** This is the single most expensive thing in the module to get wrong. `kartu_stok` uses a moving average and outgoing rows lock in the cost in force at the time, so 95 of 100 received at full invoice value prices them at 11.052 instead of 10.500 — and any sale before the rest arrives books that permanently into cost of goods sold. Append-only means it can only be reversed, never repaired.
+- Cost per base unit is computed against `qty_dasar`, not `qty_diterima_dasar`. Both numerator and denominator scale by the same ratio so the figure is identical, but expressing it against the invoice quantity is what leaves the remaining value available to a follow-up receipt without recomputing anything.
+- **Allocation sums exactly.** `bagiProporsional` rounds each share and then pushes the remainder onto the largest basis, earliest one on a tie. Three lines splitting 100 give 33.33 three times, which is 99.99; the missing cent would silently become inventory value nobody was billed for. The same function does freight, the nota discount, the PPN share, and `bagi-rata-koli`.
+- Freight basis is `jumlah_koli`, falling back to `qty_diterima_dasar` when every line is still zero — that fallback is the divide-by-zero guard, not a preference. `ditanggung_supplier` zeroes `biaya_angkut` outright.
+- **`biaya_angkut` is not part of `total`.** Total is what the supplier is owed; freight is the carrier's bill and reaches the books through `alokasi_biaya` on the lines. Folding it into total would inflate the payable by money owed elsewhere.
+- **Two quantity pairs, and they mean different things.** `qty_faktur`/`qty_dasar` is the paper and drives the payable; `qty_diterima`/`qty_diterima_dasar` is the physical count and drives stock. Omitting `qty_diterima` means it equals `qty_faktur`. Over-delivery is rejected in Go *and* by a CHECK. A difference makes `keterangan_selisih` mandatory — a policy, not a constraint.
+- **Every state transition takes a row lock first** (`LockByID`, `SELECT ... FOR UPDATE`), then checks the status, then writes with the status repeated in the `WHERE`. Without the lock two concurrent posting requests both read `DIAJUKAN` and both write `kartu_stok`. `KartuStokRepository.HasRef` is the backstop that does not depend on the status column being right.
+- `DRAFT → DIAJUKAN → POSTED → BATAL`, with `DIAJUKAN → DRAFT` on rejection. `INVENTARIS` writes and submits; `SUPERADMIN` posts, rejects, and voids. **This is the only module whose guards split by workflow stage rather than by data owner** — see the comment above those routes in `route.go` for why.
+- **A cancellation cannot copy the original cost, and that is the schema's decision, not a shortcut.** `kartu_stok_hitung_saldo` overwrites `nilai_keluar` and `harga_pokok_satuan` on every outgoing row with the balance in force at the time, so an application-supplied cost is discarded. Reversals are therefore valued at the current moving average. Undoing the mixing would need a different valuation method; don't try to work around it by writing to those columns.
+- **Document numbers come from `document_counter`**, keyed `(prefix, tahun, bulan)`, taken with one `INSERT ... ON CONFLICT DO UPDATE RETURNING` inside the document's transaction. That statement is atomic and holds the row lock until commit, so concurrent requests queue instead of colliding. A rollback leaves a gap — deliberately: gaps are an annoyance, duplicate numbers are a corruption. Reset is monthly and keyed off the **document's** date, so a July invoice typed in August still gets a July number. Add a prefix constant to `repository` rather than typing a literal.
+- `no_faktur_supplier` is unique per supplier via a partial `lower(...)` index excluding `BATAL`, so a mistyped nota can be voided and re-entered. Without a purchase order this document is the only trace of the supplier's invoice, and entering it twice raises stock twice.
+- `faktor_konversi` is a snapshot from `product_satuan`, resolved for every line in **one** query (`FindFaktorBatch`, `unnest` of two arrays), not one per line. `qty × faktor` must be a whole number because `qty_dasar` is `BIGINT`.
+- Lines are replaced wholesale (`PUT .../detail`), never edited one at a time: they are one thing retyped off one piece of paper, and a partial edit leaves the header's totals disagreeing with its own lines between requests. `DeleteDetail` is safe only on a `DRAFT` — a posted line is what `retur_pembelian_detail` points at.
+- `status_penerimaan` follows the `status_pembayaran` rule: **always recomputed, never set from a form.** A cache a form can write is a second source of truth.
+
+### Penerimaan susulan (migration 000013)
+
+The second shipment for goods that did not arrive with the first. It adds stock and never a payable — the supplier's invoice was issued in full with the first delivery and booked in full then, so what is still outstanding after that is goods.
+
+- **Why a separate document rather than raising `qty_diterima`.** A POSTED `pembelian` must not change and `kartu_stok` is append-only, so editing the posted line is not available: it would break document immutability, make cancellation impossible to audit (which `kartu_stok` rows would be reversed?), and erase when the goods actually turned up. The shape that fits is the mirror of `retur_pembelian` — both point at `pembelian_detail`, the goods just move the other way.
+- **`harga_pokok_satuan_dasar` is copied from the source line, never recomputed and never read off the current moving average.** That is what makes a purchase and all its follow-ups contribute exactly the invoice value to inventory, and it is why the average does not shift when the remainder turns up. Copying a cost rather than deriving one is the pattern every document deriving from another should follow.
+- **Two snapshots from different places, deliberately.** `faktor_konversi` is resolved from `product_satuan` *now*, because the quantity is a fresh count and may arrive in a different unit than the invoice used (five loose pieces short of a line typed in boxes). The cost is copied from the source. Quantity conversion follows current master; cost follows the invoice.
+- **The quota check that counts runs at posting, under `PembelianRepository.LockByID`.** The one in `siapkanDetail` only produces a friendlier error sooner. Two drafts may both claim the same remainder — a draft is not a delivery — and the second must fail when it tries to consume what the first already took. `TestSisaDiperiksaUlangSaatPosting` pins exactly that.
+- Only **POSTED** follow-ups count towards the outstanding figure. `pembelianDetailSusulan` in `pembelian_repository.go` is that predicate, declared once and reused by `FindDetail`, `FindDetailByID`, and `RecalculateStatusPenerimaan` — three copies of it would drift.
+- **`pembelian.status_penerimaan` is rewritten from here**, by `RecalculateStatusPenerimaan`, after posting and after voiding. The purchase is POSTED by then and can no longer recompute its own cache, so this is the only thing keeping it honest.
+- **Three derived quantities on a purchase line, and they answer different questions.** `selisih_dasar` is what the first delivery was short and is frozen once posted; `qty_susulan_dasar` is what turned up later; `sisa_dasar` is what is still owed. Don't collapse them.
+- `penerimaan_susulan_detail_baris_uidx` stops one source line appearing twice in one document. Without it two lines for the same source each pass the quota check on their own and together exceed it. The usecase catches it first so the message names the field.
+- **Cancelling a purchase is refused while a POSTED follow-up exists** (`HasPostedSusulan` → 409). The purchase's cancellation only reverses rows it wrote itself, so the follow-up's stock would survive with nothing explaining it — and it could not be reversed afterwards either, since its own cancellation path needs a purchase that is still POSTED. Void the follow-up first.
+- `jenis_transaksi` gained `'PENERIMAAN_SUSULAN'`. **`ALTER TYPE ... ADD VALUE` cannot be undone** — PostgreSQL has no `DROP VALUE`, and removing one means rebuilding the type and every column using it, including append-only `kartu_stok`. The down migration says so plainly and leaves the value behind rather than pretending. `ADD VALUE IF NOT EXISTS` keeps the up idempotent after a down. It is safe inside golang-migrate's transaction on PG 12+ as long as the value is not *used* in the same transaction, which this migration does not do.
+- No freight columns. Value entering stock is the remaining share of the original invoice value, so one invoice contributes exactly its own value however many times the goods turn up. If a follow-up shipment ever needs its own carrier bill, that is a schema change and a deliberate one — it makes the second batch cost more per unit than the first.
+- `id_supplier` and `id_ruang` are copied from the purchase, not chosen. Goods that need to move rooms after arrival are a `mutasi`.
+
+### Riwayat harga beli (no migration)
+
+`GET /api/v1/product/{id}/riwayat-beli` — isu #4 fase 4, and the replacement for the purchase order this system deliberately does not have. It is the worked example of a **read that is not a module**: no table, no migration, no DTO to fill in, nothing that can fall out of step. Copy this shape rather than a slice when a request is answerable from documents that already exist.
+
+- **Nothing new is stored.** Every POSTED `pembelian_detail` row is already a price that was actually paid, which is worth more than a quotation because a quotation is only what was promised in a chat. Adding a table for this would create a second source of truth for a fact the first one already carries.
+- **The SQL lives in `pembelian_repository.go`, the endpoint hangs off product.** `ProductUseCase` borrows `PembelianRepository` the way `UserUseCase` borrows `RoleRepository` — the query is over another module's tables, so it stays in that module's repository. A usecase of its own would be a module for one query.
+- **Two prices, and collapsing them into one is the mistake to avoid.** `harga_satuan_dasar` (= `subtotal / qty_dasar`) is the invoice per base unit and is what a supplier's next quote is compared against; `harga_pokok_satuan_dasar` is after the nota discount, PPN share, and freight, and is what margin is judged against. Negotiating with the second holds the supplier responsible for the carrier's bill; costing with the first drops freight entirely.
+- `harga_satuan_input` is reported but is **not comparable**: it is per input unit, so 120.000/DUS and 10.000/PCS look nothing alike while being the same price.
+- **The product is looked up first**, so an unknown id answers 404 and a product nobody has bought answers an empty page. Those are different facts and a client that cannot tell them apart shows the wrong message.
+- **Only POSTED.** A DRAFT is a typed page and a BATAL is a purchase that was withdrawn; neither is a price anyone paid. One condition covers both, rather than a second clause excluding BATAL.
+- `DISTINCT ON (p.id_supplier)` is what makes it one row per supplier, and it forces the inner `ORDER BY` to lead with `id_supplier` — which is not a useful reading order, hence the wrapping query that re-sorts by date. The outer `ORDER BY` ends in `id_supplier`, unique across the subquery *because* `DISTINCT ON` made it so. The inner tiebreaker `d.id DESC` matters: one document may carry the same product twice.
+- The division is safe because `pembelian_detail_qty_dasar_check` makes `qty_dasar > 0`. Casting to `NUMERIC(20,4)` rounds halves away from zero, matching `formatNumeric` — a figure computed in SQL and one recomputed in Go have to agree.
 
 ### Product, units, and versioned prices (migration 000011)
 
@@ -186,7 +259,7 @@ One user holds many roles. `user_role` is the only record of that, and permissio
 
 ### Inventory data model (migrations 000002–000008)
 
-The schema is installed but almost **no Go code touches it yet** — only `ruang` has a slice. Read these invariants before writing any inventory usecase; several are enforced by the database and will reject wrong code at runtime.
+`pembelian` and `penerimaan_susulan` now exercise this schema end to end; sales, returns, `pemakaian`, `mutasi`, stock opname, and both payment sides still have **no Go code**. Read these invariants before writing any inventory usecase; several are enforced by the database and will reject wrong code at runtime. `internal/usecase/pembelian_usecase.go` is the worked example of obeying them.
 
 - **`kartu_stok` is the only source of truth for stock and inventory value.** No master table carries a stock column. Never compute stock by summing documents.
 - **It is append-only, enforced by trigger.** `UPDATE`, `DELETE`, and `TRUNCATE` all raise. Corrections are new reversing rows that fill `id_kartu_stok_asal`.
@@ -208,11 +281,12 @@ Enforced by CHECK constraints (so don't re-validate in Go, just surface the erro
 Still **application-side only** (section E of the design notes) — the database will not catch these:
 
 - ~~`product_satuan` must include the base unit with `faktor = 1`~~ — done, enforced in `ProductUseCase.Create`
+- ~~`jumlah_koli` across details must equal the header's `total_koli` before a purchase may post; offer a "bagi rata" button that splits `total_koli` proportionally to `qty_dasar`~~ — done, `siapkanPosting` + `POST /pembelian/{id}/bagi-rata-koli`
+- ~~`alokasi_biaya` must sum exactly to `biaya_angkut`; push the rounding remainder onto the line with the largest `jumlah_koli`~~ — done, `bagiProporsional`
+- ~~posted documents must reject detail edits~~ — done for `pembelian`, via `kunciDenganStatus`. Still owed by every other document type
+- ~~cancelling a posted document writes reversing `kartu_stok` rows with `id_kartu_stok_asal` set~~ — done for `pembelian`. **The "HPP copied from the original" half of that rule is not achievable** and was dropped: the trigger overwrites `harga_pokok_satuan` and `nilai_keluar` on every outgoing row, so reversals take the current moving average. See "Pembelian and the posting engine"
+- ~~a follow-up receipt must not exceed the outstanding amount (`qty_dasar − qty_diterima_dasar − Σ susulan`)~~ — done, `periksaSisa`, re-checked at posting under the purchase's row lock
 - cumulative return qty must not exceed the source document's qty
-- `jumlah_koli` across details must equal the header's `total_koli` before a purchase may post; offer a "bagi rata" button that splits `total_koli` proportionally to `qty_dasar`
-- `alokasi_biaya` must sum exactly to `biaya_angkut`; push the rounding remainder onto the line with the largest `jumlah_koli`
-- posted documents must reject detail edits
-- cancelling a posted document writes reversing `kartu_stok` rows with `id_kartu_stok_asal` set and HPP copied from the original
 - allocation must not exceed the payment amount or the document's remaining balance, on either the receivable or the payable side
 - cancelled documents must not accept allocations
 - credit sales must respect `plafon_kredit`
@@ -225,6 +299,10 @@ The daily reconciliation job over the balance chain (section F) is also not buil
 Follow the `supplier` slice, in this order: migration in `db/migrations_postgres/` (most inventory tables already exist — check first) → `entity` → `model` DTOs → `model/converter` → `repository` (methods take `DBTX`) → `usecase` (validate, own the transaction) → `delivery/http` controller → register in `route.RouteConfig` → wire in `config.Bootstrap` → update `docs/openapi.yaml`.
 
 If the slice writes more than one table, follow `user` instead — it is the worked example of a usecase holding two repositories and committing both tables in one transaction.
+
+If the slice is a **transaction document** — one with a status, a generated number, and stock movements — follow `pembelian`. It is the only one of its kind so far, and copying a master slice for it will leave out the row lock on every transition, the exact-decimal arithmetic, and the reuse of `DocumentCounterRepository` and `KartuStokRepository`.
+
+If the request is answerable from rows that already exist — a report, a history, a comparison — do **not** add a slice at all. Follow `riwayat_beli`: an entity for the projection, a query in the repository that already owns those tables, and a method on whichever usecase owns the resource the endpoint hangs off. No migration, no DTO to fill in, nothing to keep in step.
 
 Master data gets no `DELETE`: every master table is referenced by transaction tables, so deleting a used row either fails on a foreign key or destroys the audit trail. Retire rows with `is_aktif = false` instead. The single exception is `user_role`, for the reasons in "Users and roles".
 
@@ -255,7 +333,7 @@ A pointer cannot tell "field absent" from "field explicitly null", and `COALESCE
 - `NOT NULL` columns: `COALESCE` is correct, and an explicit `null` is rejected with `model.Invalid` in the usecase.
 - `UPDATE ... RETURNING` supplies the response; `sql.ErrNoRows` from it means the id does not exist. Never `SELECT` first to check — two queries, still racy.
 - `id`, `created_at`, and `created_by` never appear in an update DTO. The controller binds the body first and then overwrites `ID` from the path.
-- Tags on an `Optional` field must lead with `omitempty`, and each instantiation must be registered in `config.NewValidator` — otherwise its validation tags are silently ignored. Registered today: `Optional[string]`, `Optional[bool]`, `Optional[[]int64]`.
+- Tags on an `Optional` field must lead with `omitempty`, and each instantiation must be registered in `config.NewValidator` — otherwise its validation tags are silently ignored. Registered today: `Optional[string]`, `Optional[bool]`, `Optional[[]int64]`, `Optional[int64]`.
 - A collection field works the same way, with the states meaning replace rather than set: absent leaves it alone, `[]` empties it, a list replaces it wholesale. `dive` does reach elements through the custom type func (`TestValidatorDivesIntoOptionalSlice` pins that), so `dive,gt=0` on an `Optional[[]int64]` is really enforced.
 
 ## API contract
@@ -270,3 +348,9 @@ It is also a **build input**, not just documentation: `docs/docs.go` pulls it in
 `gofiber/contrib/swagger` is not used: its latest release (v1.3.0) still requires Fiber v2. The page is hand-rolled in `internal/delivery/http/docs_controller.go` and loads Swagger UI's assets from unpkg, so the docs page needs internet access even though the API does not.
 
 `web.swagger` turns it off (`WEB_SWAGGER=false`). When false, `config.Bootstrap` leaves `RouteConfig.DocsController` nil and **neither route is registered** — nil rather than a boolean so the routes cannot be enabled without something to serve them. `NewViper` calls `SetDefault("web.swagger", true)` because `GetBool` answers false for an absent key, which would otherwise make a pre-existing `config.json` silently lose the docs.
+
+`README.md` is a **third** surface that goes stale, not just a front page: it carries its own full endpoint table, authorization matrix, and roadmap. A route change touches `route.go`, `docs/openapi.yaml`, *and* that table.
+
+## Language
+
+Identifiers and schema use the project's Indonesian domain vocabulary (`satuan`, `ruang`, `kartu_stok`, `berlaku_dari`) — keep it; don't translate to English when adding tables or fields. Go comments are English and explain *why*, not what. `README.md` and commit subjects are Indonesian (`feat: modul user & role, lingkungan Docker, dan Swagger di root`); `CLAUDE.md` and code comments are English.

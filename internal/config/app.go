@@ -40,6 +40,10 @@ func Bootstrap(config *BootstrapConfig) {
 	roleRepository := repository.NewRoleRepository()
 	userRepository := repository.NewUserRepository()
 	productRepository := repository.NewProductRepository()
+	kartuStokRepository := repository.NewKartuStokRepository()
+	counterRepository := repository.NewDocumentCounterRepository()
+	pembelianRepository := repository.NewPembelianRepository()
+	susulanRepository := repository.NewPenerimaanSusulanRepository()
 
 	ruangUseCase := usecase.NewRuangUseCase(
 		config.DB, config.Log, config.Validate, ruangRepository,
@@ -59,8 +63,29 @@ func Bootstrap(config *BootstrapConfig) {
 	roleUseCase := usecase.NewRoleUseCase(
 		config.DB, config.Log, config.Validate, roleRepository,
 	)
+	// ProductUseCase borrows PembelianRepository for GET /product/{id}/riwayat-beli.
+	// The purchase-history query is SQL over pembelian tables, so it stays in that
+	// module's repository; only the resource it answers for belongs to product.
 	productUseCase := usecase.NewProductUseCase(
-		config.DB, config.Log, config.Validate, productRepository,
+		config.DB, config.Log, config.Validate, productRepository, pembelianRepository,
+	)
+	// PembelianUseCase takes four repositories: posting a purchase writes the
+	// header, its lines, a reserved document number, and one kartu_stok row per
+	// received line — all in one transaction, because a partial posting would leave
+	// stock that no document explains and kartu_stok cannot be edited afterwards.
+	pembelianUseCase := usecase.NewPembelianUseCase(
+		config.DB, config.Log, config.Validate,
+		pembelianRepository, productRepository, kartuStokRepository, counterRepository,
+	)
+	// PenerimaanSusulanUseCase reaches into pembelian on purpose: a follow-up
+	// receipt is defined as the remainder of a purchase, so it reads that document's
+	// lines for the outstanding quantity and the cost to copy, locks it to serialise
+	// against other follow-ups, and rewrites its status_penerimaan cache — which the
+	// purchase can no longer do for itself once it is POSTED.
+	susulanUseCase := usecase.NewPenerimaanSusulanUseCase(
+		config.DB, config.Log, config.Validate,
+		susulanRepository, pembelianRepository, productRepository,
+		kartuStokRepository, counterRepository,
 	)
 	// Fails the process at boot when jwt.secret is missing or too short, rather than
 	// at the first login attempt.
@@ -82,6 +107,8 @@ func Bootstrap(config *BootstrapConfig) {
 	pelangganController := deliveryhttp.NewPelangganController(config.Log, pelangganUseCase)
 	authController := deliveryhttp.NewAuthController(config.Log, authUseCase)
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
+	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
+	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
 
@@ -98,6 +125,8 @@ func Bootstrap(config *BootstrapConfig) {
 		AuthUseCase:         authUseCase,
 		DocsController:      docsController,
 		AuthController:      authController,
+		PembelianController: pembelianController,
+		SusulanController:   susulanController,
 		ProductController:   productController,
 		RuangController:     ruangController,
 		SatuanController:    satuanController,

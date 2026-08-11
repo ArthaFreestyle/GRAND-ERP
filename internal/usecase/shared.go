@@ -1,8 +1,11 @@
 package usecase
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
+	"time"
 
 	"Arthafreestyle/ERP/internal/model"
 	"Arthafreestyle/ERP/internal/repository"
@@ -59,6 +62,60 @@ func conflictOnExclusion(err error, message string) error {
 	}
 
 	return err
+}
+
+// invalidOnCheck maps a CHECK constraint or trigger rejection to a 400, leaving
+// anything else untouched.
+//
+// The kartu_stok engine refuses two things this way: a movement that would drive
+// stock below zero, and one dated inside a periode already closed. Neither is a
+// server fault and neither can be pre-checked honestly — the balance is computed
+// inside the trigger, under an advisory lock, precisely so no reader can decide it
+// first.
+//
+// The database's own message is not passed through. It names internal ids and this
+// codebase does not leak internals to clients, so each call site supplies text that
+// makes sense to an operator.
+func invalidOnCheck(err error, message string) error {
+	if repository.IsCheckViolation(err) {
+		return model.Invalid(message)
+	}
+
+	return err
+}
+
+// conflictOnTransisi maps a guarded status change that matched no row to a 409.
+//
+// The document moved between the read and the write. Nothing failed — the guard is
+// what stopped it — so this is a conflict rather than an error, and the caller can
+// re-read and decide again.
+func conflictOnTransisi(err error, message string) error {
+	if errors.Is(err, repository.ErrTransisiStatus) {
+		return model.Conflict(message)
+	}
+
+	return err
+}
+
+// nomorDokumen reserves the next number in a series and formats it as
+// PREFIX/YYYY/MM/NNNN.
+//
+// The month comes from the document's own date, not from today, so an invoice dated
+// in July gets a July number however late it is typed in — which is what makes a
+// numbering series match the books it belongs to.
+//
+// Shared by every transaction document rather than reimplemented per module: two
+// modules formatting a number two ways is how a numbering scheme quietly stops
+// being one.
+func nomorDokumen(ctx context.Context, tx repository.DBTX, counter *repository.DocumentCounterRepository, prefix string, tanggal time.Time) (string, error) {
+	tahun, bulan := tanggal.Year(), int(tanggal.Month())
+
+	urut, err := counter.Next(ctx, tx, prefix, tahun, bulan)
+	if err != nil {
+		return "", err
+	}
+
+	return fmt.Sprintf("%s/%04d/%02d/%04d", prefix, tahun, bulan, urut), nil
 }
 
 // pageMetadata builds the paging block. Call it only after
