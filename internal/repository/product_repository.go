@@ -300,6 +300,60 @@ func (r *ProductRepository) HasSatuan(ctx context.Context, db DBTX, productID, s
 	return exists, nil
 }
 
+// FaktorKey identifies one (product, unit) pair in the batch factor lookup.
+type FaktorKey struct {
+	IDProduct int64
+	IDSatuan  int64
+}
+
+// FindFaktorBatch resolves the conversion factor for many (product, unit) pairs at
+// once, returning only the pairs that are actually registered.
+//
+// One query, not one per line. A purchase document can carry hundreds of lines and
+// every one of them needs its factor before it can be converted to base units;
+// asking per line would make posting cost a round trip per row inside a transaction
+// that is already holding row locks.
+//
+// A pair that is missing from the result is a unit the product is not sold in — the
+// caller reports which one rather than letting a zero factor through, since
+// qty_dasar would then be zero and the CHECK would reject it with a constraint name
+// instead of a field name.
+//
+// pgx/stdlib implements CheckNamedValue, so a Go []int64 passes through
+// database/sql untouched and needs no array wrapper.
+func (r *ProductRepository) FindFaktorBatch(ctx context.Context, db DBTX, productIDs, satuanIDs []int64) (map[FaktorKey]int64, error) {
+	const query = `
+		SELECT ps.id_product, ps.id_satuan, ps.faktor
+		FROM product_satuan ps
+		JOIN unnest($1::BIGINT[], $2::BIGINT[]) AS pasangan(id_product, id_satuan)
+			ON ps.id_product = pasangan.id_product AND ps.id_satuan = pasangan.id_satuan`
+
+	rows, err := db.QueryContext(ctx, query, productIDs, satuanIDs)
+	if err != nil {
+		return nil, fmt.Errorf("select product_satuan faktor: %w", err)
+	}
+	defer rows.Close()
+
+	faktor := make(map[FaktorKey]int64, len(productIDs))
+
+	for rows.Next() {
+		var key FaktorKey
+		var nilai int64
+
+		if err := rows.Scan(&key.IDProduct, &key.IDSatuan, &nilai); err != nil {
+			return nil, fmt.Errorf("scan product_satuan faktor: %w", err)
+		}
+
+		faktor[key] = nilai
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate product_satuan faktor: %w", err)
+	}
+
+	return faktor, nil
+}
+
 // CloseOpenHargaJual ends any still-open price version for a product and unit at the
 // given date.
 //

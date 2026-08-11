@@ -61,6 +61,39 @@ func conflictOnExclusion(err error, message string) error {
 	return err
 }
 
+// invalidOnCheck maps a CHECK constraint or trigger rejection to a 400, leaving
+// anything else untouched.
+//
+// The kartu_stok engine refuses two things this way: a movement that would drive
+// stock below zero, and one dated inside a periode already closed. Neither is a
+// server fault and neither can be pre-checked honestly — the balance is computed
+// inside the trigger, under an advisory lock, precisely so no reader can decide it
+// first.
+//
+// The database's own message is not passed through. It names internal ids and this
+// codebase does not leak internals to clients, so each call site supplies text that
+// makes sense to an operator.
+func invalidOnCheck(err error, message string) error {
+	if repository.IsCheckViolation(err) {
+		return model.Invalid(message)
+	}
+
+	return err
+}
+
+// conflictOnTransisi maps a guarded status change that matched no row to a 409.
+//
+// The document moved between the read and the write. Nothing failed — the guard is
+// what stopped it — so this is a conflict rather than an error, and the caller can
+// re-read and decide again.
+func conflictOnTransisi(err error, message string) error {
+	if errors.Is(err, repository.ErrTransisiStatus) {
+		return model.Conflict(message)
+	}
+
+	return err
+}
+
 // pageMetadata builds the paging block. Call it only after
 // PageRequest.Normalize, or Size may still be 0 and total_page divides by zero.
 func pageMetadata(request *model.PageRequest, total int64) *model.PageMetadata {

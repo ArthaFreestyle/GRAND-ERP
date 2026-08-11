@@ -32,6 +32,7 @@ type RouteConfig struct {
 	DocsController *deliveryhttp.DocsController
 
 	AuthController      *deliveryhttp.AuthController
+	PembelianController *deliveryhttp.PembelianController
 	ProductController   *deliveryhttp.ProductController
 	RuangController     *deliveryhttp.RuangController
 	SatuanController    *deliveryhttp.SatuanController
@@ -86,6 +87,8 @@ func (c *RouteConfig) setupGuestRoute() {
 //   - user and role are SUPERADMIN-only, reads included. Listing accounts and their
 //     privileges is itself sensitive, and being able to write there is a privilege
 //     escalation path: grant yourself SUPERADMIN and the rest follows.
+//   - pembelian splits along its approval flow rather than by module: see the
+//     comment above those routes.
 //
 // This split is a starting assumption drawn from the three role names, not something
 // derived from a spec. Adjust the guards as the real division of work becomes clear.
@@ -119,6 +122,28 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Patch("/product/:id", inventaris, c.ProductController.Update)
 	api.Post("/product/:id/satuan", inventaris, c.ProductController.AddSatuan)
 	api.Post("/product/:id/harga-jual", inventaris, c.ProductController.AddHargaJual)
+
+	// pembelian is the first module whose writes are split by workflow stage rather
+	// than by which data they touch, because posting one is not an edit — it appends
+	// to kartu_stok, which is append-only. A wrong posting cannot be corrected, only
+	// reversed, and the reversal is valued at whatever the moving average has become
+	// by then. So the desk that reads the paper invoice and counts the box is not the
+	// desk that decides those numbers may enter the stock ledger.
+	//
+	// INVENTARIS types the document and submits it; SUPERADMIN approves, rejects, or
+	// voids. The split is on the transition, not the record: the same person may well
+	// hold both roles in a small office, and then nothing changes for them.
+	api.Get("/pembelian", c.PembelianController.List)
+	api.Get("/pembelian/:id", c.PembelianController.Get)
+	api.Get("/pembelian/:id/sisa", c.PembelianController.Sisa)
+	api.Post("/pembelian", inventaris, c.PembelianController.Create)
+	api.Patch("/pembelian/:id", inventaris, c.PembelianController.Update)
+	api.Put("/pembelian/:id/detail", inventaris, c.PembelianController.ReplaceDetail)
+	api.Post("/pembelian/:id/bagi-rata-koli", inventaris, c.PembelianController.BagiRataKoli)
+	api.Post("/pembelian/:id/ajukan", inventaris, c.PembelianController.Ajukan)
+	api.Post("/pembelian/:id/posting", superadmin, c.PembelianController.Posting)
+	api.Post("/pembelian/:id/tolak", superadmin, c.PembelianController.Tolak)
+	api.Post("/pembelian/:id/batal", superadmin, c.PembelianController.Batal)
 
 	api.Get("/satuan", c.SatuanController.List)
 	api.Get("/satuan/:id", c.SatuanController.Get)

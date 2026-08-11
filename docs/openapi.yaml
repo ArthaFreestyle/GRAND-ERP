@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: GRAND-ERP API
-  version: 0.4.0
+  version: 0.5.0
   description: >
     Backend kontrak API untuk GRAND-ERP. Setiap perubahan route, request, atau
     response di internal/delivery dan internal/model harus tercermin di sini
@@ -30,6 +30,18 @@ info:
     menulis dibagi menurut pemilik datanya — `INVENTARIS` untuk barang, satuan,
     ruang, ekspedisi, dan supplier, `CASHIER` untuk pelanggan. `SUPERADMIN` boleh
     apa saja. `role` dan `user` khusus `SUPERADMIN`, termasuk untuk membaca.
+
+
+    `pembelian` dibagi menurut tahap alurnya, bukan menurut data yang disentuh.
+    `INVENTARIS` mengetik faktur, menghitung barang, dan mengajukan; `SUPERADMIN`
+    yang memposting, menolak, atau membatalkan. Alasannya: posting bukan
+    penyuntingan — ia menambah baris ke `kartu_stok` yang bersifat append-only,
+    jadi posting yang salah tidak bisa diperbaiki, hanya dibalik.
+
+
+    Uang dan kuantitas pada modul pembelian dikirim dan diterima sebagai **string
+    desimal**, bukan angka JSON. `NUMERIC(20,2)` yang lewat float JSON kehilangan
+    sen, dan angka-angka ini menjadi utang ke supplier sekaligus nilai persediaan.
 
 
     Token bersifat stateless: **tidak ada cara mencabutnya.** Menonaktifkan user
@@ -62,6 +74,7 @@ security:
 
 tags:
   - name: auth
+  - name: pembelian
   - name: product
   - name: docs
   - name: ruang
@@ -429,6 +442,517 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian:
+    get:
+      tags: [pembelian]
+      summary: List pembelian
+      operationId: listPembelian
+      description: >
+        Tidak menyertakan `detail` — mengambilnya berarti satu query per baris.
+        Kuncinya hilang sama sekali, bukan array kosong. Pakai endpoint detail
+        untuk barisnya.
+
+
+        Diurutkan `tanggal DESC, id DESC`. Pemecah seri yang unik itu wajib: banyak
+        dokumen bertanggal sama, dan tanpa pemecah seri satu baris bisa muncul di
+        dua halaman sementara baris lain tidak pernah keluar.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Cocokkan sebagian pada nomor dokumen atau no faktur supplier.
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        - name: status_penerimaan
+          in: query
+          schema: { type: string, enum: [LENGKAP, KURANG] }
+        - name: id_supplier
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: tanggal_dari
+          in: query
+          description: Inklusif, satu hari penuh.
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          description: Inklusif, satu hari penuh sampai tengah malam berikutnya.
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Pembelian" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [pembelian]
+      summary: Buat draft pembelian beserta barisnya
+      operationId: createPembelian
+      description: >
+        Dokumen selalu dibuat sebagai `DRAFT`; `status` tidak ada di body sama
+        sekali. Stok bergerak saat posting dan hanya saat posting.
+
+
+        **Nomor dokumen digenerate server** dengan format `BL/2026/08/0001`,
+        mereset tiap bulan mengikuti `tanggal` dokumen — faktur Juli yang baru
+        diketik bulan Agustus tetap dapat nomor Juli. Counter-nya diambil dengan
+        satu `INSERT ... ON CONFLICT DO UPDATE RETURNING` di dalam transaksi
+        dokumen, jadi dua request bersamaan antre alih-alih menghasilkan nomor
+        kembar. Nomor bisa berlubang kalau transaksinya rollback; itu jauh lebih
+        murah daripada dua dokumen bernomor sama.
+
+
+        **`qty_diterima` boleh dikosongkan** dan artinya sama dengan `qty_faktur`
+        — kasus biasa di mana semua yang tertulis memang ada di dalam box.
+        Mengisinya adalah cara mencatat kiriman kurang, dan saat berbeda
+        `keterangan_selisih` jadi wajib.
+
+
+        `qty_diterima` **tidak boleh melebihi** `qty_faktur`: barang yang tidak
+        difakturkan tidak punya nilai, sehingga `nilai_masuk` proporsionalnya akan
+        melebihi nilai faktur dan rata-rata bergerak jadi salah permanen.
+
+
+        `faktor_konversi` diambil dari `product_satuan` dan disimpan sebagai
+        snapshot. Satuan yang belum terdaftar di produk itu ditolak 400 — tidak ada
+        foreign key yang mengikat `id_satuan_input` ke `product_satuan`.
+        `qty x faktor` juga harus bilangan bulat, karena `qty_dasar` bertipe
+        `BIGINT`.
+
+
+        `subtotal`, `total`, `biaya_angkut`, dan `status_penerimaan` dihitung ulang
+        server dari barisnya; mengirimnya tidak ada gunanya. `biaya_angkut =
+        total_koli x tarif_per_koli` dan **bukan** bagian dari `total` — itu
+        tagihan ekspedisi, bukan utang ke supplier.
+
+
+        `created_by` diambil dari token, tidak pernah dari body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tanggal, id_supplier, id_ruang, detail]
+              properties:
+                tanggal: { type: string, format: date, example: "2026-08-11" }
+                id_supplier: { type: integer, format: int64, minimum: 1 }
+                id_ruang:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: >
+                    Ruang tujuan seluruh baris. Satu dokumen tidak bisa masuk ke dua
+                    ruang.
+                no_faktur_supplier:
+                  type: string
+                  nullable: true
+                  maxLength: 64
+                  description: >
+                    Unik per supplier dan tidak peduli huruf besar-kecil. Tanpa
+                    purchase order, ini satu-satunya jejak faktur supplier — nota
+                    yang sama diinput dua kali akan menaikkan stok dua kali. Dokumen
+                    `BATAL` melepas nomornya kembali. Boleh kosong, dan berapa pun
+                    dokumen boleh sama-sama kosong.
+                tanggal_faktur: { type: string, format: date, nullable: true }
+                diskon_nota:
+                  type: string
+                  description: Desimal. Tidak boleh melebihi subtotal.
+                  example: "0"
+                ppn: { type: string, example: "0" }
+                ppn_dikreditkan:
+                  type: boolean
+                  default: false
+                  description: >
+                    `false` berarti PPN ikut masuk harga pokok; `true` berarti jadi
+                    pajak masukan dan tidak menyentuh harga pokok.
+                pembulatan:
+                  type: string
+                  description: Boleh negatif — ini baris pembulatan nota.
+                  example: "0"
+                id_ekspedisi: { type: integer, format: int64, nullable: true, minimum: 1 }
+                no_resi: { type: string, nullable: true, maxLength: 64 }
+                total_koli: { type: string, nullable: true, example: "3" }
+                tarif_per_koli: { type: string, nullable: true, example: "50000" }
+                ditanggung_supplier:
+                  type: boolean
+                  default: false
+                  description: >
+                    `true` berarti ongkir sudah termasuk nota supplier dan **tidak
+                    dialokasikan lagi** — mengalokasikannya berarti rupiah yang sama
+                    masuk harga pokok dua kali.
+                metode_alokasi_angkut:
+                  type: string
+                  enum: [KOLI, QTY]
+                  default: KOLI
+                jenis_pembayaran:
+                  type: string
+                  enum: [TUNAI, KREDIT]
+                  default: TUNAI
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/PembelianDetailInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/{id}:
+    get:
+      tags: [pembelian]
+      summary: Detail pembelian beserta barisnya
+      operationId: getPembelian
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [pembelian]
+      summary: Ubah header pembelian
+      operationId: updatePembelian
+      description: >
+        **Hanya saat `DRAFT`.** Status lain menjawab 409; dokumen yang sudah
+        diajukan tertutup untuk diedit, dan itulah gunanya mengajukan.
+
+
+        `nomor`, `id_supplier`, dan `id_ruang` tidak ada di sini dengan sengaja.
+        Nomor mengidentifikasi dokumen, supplier menentukan utangnya milik siapa,
+        dan ruang menentukan saldo stok mana yang disentuh setiap barisnya.
+        Batalkan lalu input ulang kalau salah satu keliru.
+
+
+        Total header dihitung ulang setelah patch, karena `diskon_nota`, `ppn`,
+        `pembulatan`, `total_koli`, dan `tarif_per_koli` semuanya memberi makan
+        angka itu.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggal: { type: string, format: date }
+                no_faktur_supplier: { type: string, nullable: true, maxLength: 64 }
+                tanggal_faktur: { type: string, format: date, nullable: true }
+                diskon_nota: { type: string }
+                ppn: { type: string }
+                ppn_dikreditkan: { type: boolean }
+                pembulatan: { type: string }
+                id_ekspedisi: { type: integer, format: int64, nullable: true }
+                no_resi: { type: string, nullable: true }
+                total_koli: { type: string, nullable: true }
+                tarif_per_koli: { type: string, nullable: true }
+                ditanggung_supplier: { type: boolean }
+                metode_alokasi_angkut: { type: string, enum: [KOLI, QTY] }
+                jenis_pembayaran: { type: string, enum: [TUNAI, KREDIT] }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/{id}/detail:
+    put:
+      tags: [pembelian]
+      summary: Ganti seluruh baris pembelian
+      operationId: replacePembelianDetail
+      description: >
+        `PUT`, bukan `PATCH`: barisnya diganti sekaligus. Baris satu dokumen adalah
+        satu kesatuan yang diketik ulang dari satu lembar kertas, dan edit sebagian
+        akan meninggalkan total header berbeda dari barisnya di antara request.
+
+
+        **Hanya saat `DRAFT`.** Baris yang sudah diposting adalah yang ditunjuk
+        `retur_pembelian_detail` dan sumber harga pokok setiap pembalikan, jadi
+        menghapusnya akan memutus jejak audit.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [detail]
+              properties:
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/PembelianDetailInput" }
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/{id}/bagi-rata-koli:
+    post:
+      tags: [pembelian]
+      summary: Bagi total_koli proporsional ke qty_dasar
+      operationId: bagiRataKoliPembelian
+      description: >
+        Membagi `total_koli` ke seluruh baris sebanding `qty_dasar`, dan hasilnya
+        berjumlah **persis** `total_koli`.
+
+
+        Ada karena posting menolak dokumen yang jumlah kolinya tidak cocok, dan
+        mengetik jatah per baris dengan tangan persis jenis aritmetika yang
+        menghasilkan dokumen meleset 0,01. Butuh `total_koli` sudah terisi, dan
+        hanya berlaku saat `DRAFT`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Dibagi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/{id}/ajukan:
+    post:
+      tags: [pembelian]
+      summary: Ajukan draft untuk disetujui
+      operationId: ajukanPembelian
+      description: >
+        `DRAFT` → `DIAJUKAN`. Tanpa body: semua yang dibutuhkan sudah ada di
+        dokumen. Setelah ini dokumen tertutup untuk diedit, dan jalan keluarnya
+        hanya posting atau penolakan. Dokumen tanpa baris ditolak 400.
+
+
+        Role: `INVENTARIS` atau `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diajukan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/{id}/tolak:
+    post:
+      tags: [pembelian]
+      summary: Tolak pengajuan, kembalikan ke DRAFT
+      operationId: tolakPembelian
+      description: >
+        `DIAJUKAN` → `DRAFT`, dengan `alasan_tolak` terisi dan penanda pengaju
+        dikosongkan — pengajuan berikutnya adalah pengajuan baru.
+
+
+        `alasan` wajib: penolakan tanpa alasan tidak memberi operator apa pun untuk
+        diperbaiki, dan catatan itu satu-satunya jalur balik.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan]
+              properties:
+                alasan: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Ditolak
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/{id}/posting:
+    post:
+      tags: [pembelian]
+      summary: Setujui dan tulis ke kartu stok
+      operationId: postingPembelian
+      description: >
+        `DIAJUKAN` → `POSTED`. Satu transaksi menghitung alokasi ongkir, menulis
+        `alokasi_biaya` dan `harga_pokok_satuan_dasar` ke setiap baris, menambah
+        satu baris `kartu_stok` per baris yang benar-benar menerima barang, dan
+        menutup dokumen.
+
+
+        **Nilai yang masuk kartu stok proporsional terhadap yang datang, bukan
+        nilai faktur penuh.** Faktur 100 pcs senilai 1.050.000 yang datang 95
+        masuk sebagai 997.500, bukan 1.050.000. Ini yang paling mudah salah dan
+        akibatnya permanen: `kartu_stok` memakai rata-rata bergerak, baris keluar
+        mengunci harga pokok yang berlaku saat itu, dan penjualan yang terjadi
+        sebelum susulan datang akan membukukan harga pokok yang melambung itu
+        secara permanen. Tabelnya append-only — tidak bisa diperbaiki, hanya
+        dibalik.
+
+
+        Baris yang tidak menerima apa pun tidak ditulis ke kartu stok sama sekali.
+
+
+        Ditolak 400 kalau jumlah `jumlah_koli` seluruh baris tidak sama dengan
+        `total_koli`, kalau `diskon_nota` melebihi subtotal, kalau periode dokumen
+        berstatus `TUTUP`, atau kalau saldo stok tidak mencukupi. Bulan tanpa baris
+        `periode` dihitung terbuka.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Posted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/{id}/batal:
+    post:
+      tags: [pembelian]
+      summary: Batalkan dokumen POSTED dengan baris pembalik
+      operationId: batalPembelian
+      description: >
+        `POSTED` → `BATAL`. Tidak ada `DELETE` di modul ini: pembatalan menambah
+        satu baris `kartu_stok` pembalik untuk setiap pergerakan yang dibuat
+        dokumen ini, dengan `id_kartu_stok_asal` menunjuk baris aslinya. Tidak ada
+        yang dihapus dan tidak ada yang diubah — `kartu_stok` melarang keduanya
+        lewat trigger.
+
+
+        **Catatan penting soal nilainya:** baris pembalik dinilai pada rata-rata
+        bergerak yang berlaku sekarang, bukan pada harga pokok baris aslinya.
+        Trigger `kartu_stok_hitung_saldo` menimpa `nilai_keluar` dan
+        `harga_pokok_satuan` setiap baris keluar dengan saldo yang berlaku saat
+        itu, jadi harga pokok yang dikirim aplikasi diabaikan. Kalau barangnya
+        sudah bercampur dengan stok lama dan sebagian terjual, pembalikannya
+        mengeluarkan harga pokok campuran. Itu sifat metode rata-rata bergerak,
+        bukan jalan pintas di sini.
+
+
+        Ditolak 400 kalau stok sudah terpakai sehingga saldo akan negatif.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_batal]
+              properties:
+                alasan_batal:
+                  type: string
+                  maxLength: 500
+                  description: >
+                    Wajib. Pembalikan yang tidak dijelaskan siapa pun tidak bisa
+                    dibedakan dari kekeliruan, dan `kartu_stok` menyimpan keduanya
+                    selamanya.
+      responses:
+        "200":
+          description: Dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Pembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/{id}/sisa:
+    get:
+      tags: [pembelian]
+      summary: Baris yang belum lengkap diterima
+      operationId: sisaPembelian
+      description: >
+        Hanya baris yang `qty_diterima_dasar` kurang dari `qty_dasar`. Baris yang
+        datang lengkap tidak muncul — ini daftar kerja untuk mengejar susulan lewat
+        WhatsApp, dan baris yang lengkap tidak ada di dalamnya.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SisaPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /api/v1/ruang:
     get:
@@ -1474,6 +1998,190 @@ components:
         String desimal, bukan angka floating point, supaya NUMERIC(20,2) yang disimpan
         PostgreSQL sampai ke klien tanpa pembulatan biner.
       example: "50000.00"
+
+    Pembelian:
+      type: object
+      description: >
+        Satu dokumen pembelian. Seluruh angka uang dan kuantitas berupa string
+        desimal — lihat `Harga` untuk alasannya.
+      properties:
+        id: { type: integer, format: int64 }
+        nomor:
+          type: string
+          description: Digenerate server, format `BL/2026/08/0001`, mereset tiap bulan.
+          example: BL/2026/08/0001
+        tanggal: { type: string, format: date-time }
+        id_supplier: { type: integer, format: int64 }
+        nama_supplier: { type: string }
+        id_ruang: { type: integer, format: int64 }
+        nama_ruang: { type: string }
+        no_faktur_supplier: { type: string, nullable: true }
+        tanggal_faktur: { type: string, format: date, nullable: true }
+        subtotal:
+          type: string
+          description: Jumlah subtotal seluruh baris, mengikuti `qty_faktur`. Dihitung server.
+          example: "1000000.00"
+        diskon_nota: { type: string, example: "0.00" }
+        ppn: { type: string, example: "0.00" }
+        ppn_dikreditkan: { type: boolean }
+        pembulatan: { type: string, example: "0.00" }
+        total:
+          type: string
+          description: >
+            `subtotal - diskon_nota + ppn + pembulatan`. **`biaya_angkut` sengaja
+            tidak termasuk** — itu tagihan ekspedisi, bukan utang ke supplier, dan
+            masuk ke pembukuan lewat `alokasi_biaya` di tiap baris.
+          example: "1000000.00"
+        id_ekspedisi: { type: integer, format: int64, nullable: true }
+        no_resi: { type: string, nullable: true }
+        total_koli: { type: string, nullable: true, example: "3.00" }
+        tarif_per_koli: { type: string, nullable: true, example: "50000.00" }
+        biaya_angkut:
+          type: string
+          description: >
+            `total_koli x tarif_per_koli`, atau `0.00` kalau `ditanggung_supplier`.
+          example: "150000.00"
+        ditanggung_supplier: { type: boolean }
+        metode_alokasi_angkut:
+          type: string
+          enum: [KOLI, QTY]
+          description: >
+            Disimpan per dokumen, jadi mengubah metodenya belakangan tidak pernah
+            menulis ulang alokasi lama. `KOLI` jatuh ke `QTY` saat seluruh
+            `jumlah_koli` nol, supaya tidak membagi dengan nol.
+        jenis_pembayaran: { type: string, enum: [TUNAI, KREDIT] }
+        status_pembayaran:
+          type: string
+          enum: [BELUM, SEBAGIAN, LUNAS]
+          description: >
+            Cache, dihitung ulang dari alokasi POSTED dan retur POSTED. Tidak
+            pernah di-set dari form. Modul pembayaran utang yang mengisinya.
+        status_penerimaan:
+          type: string
+          enum: [LENGKAP, KURANG]
+          description: >
+            Cache atas baris detailnya: `KURANG` kalau ada baris yang diterima
+            kurang dari faktur. Dihitung ulang, tidak pernah di-set dari form.
+        status: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        detail:
+          type: array
+          description: Hanya pada endpoint detail. Kuncinya hilang pada list, bukan array kosong.
+          items: { $ref: "#/components/schemas/PembelianDetail" }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        diajukan_oleh: { type: integer, format: int64, nullable: true }
+        diajukan_pada: { type: string, format: date-time, nullable: true }
+        disetujui_oleh: { type: integer, format: int64, nullable: true }
+        disetujui_pada: { type: string, format: date-time, nullable: true }
+        posted_at: { type: string, format: date-time, nullable: true }
+        dibatalkan_oleh: { type: integer, format: int64, nullable: true }
+        alasan_batal: { type: string, nullable: true }
+        alasan_tolak: { type: string, nullable: true }
+
+    PembelianDetail:
+      type: object
+      description: >
+        Satu baris faktur, dengan empat kuantitas dalam dua pasang.
+        `qty_faktur`/`qty_dasar` adalah yang tertulis di kertas dan menggerakkan
+        utang; `qty_diterima`/`qty_diterima_dasar` adalah hasil hitung fisik dan
+        menggerakkan stok. Yang berakhiran `_dasar` dalam satuan dasar produk.
+      properties:
+        id: { type: integer, format: int64 }
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        qty_faktur: { type: string, example: "100.0000" }
+        qty_diterima: { type: string, example: "95.0000" }
+        id_satuan_input: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        faktor_konversi:
+          type: integer
+          format: int64
+          description: >
+            Snapshot dari `product_satuan` saat baris ditulis. Master boleh berubah;
+            angka ini tidak, atau dokumen lama diam-diam berganti arti.
+        qty_dasar: { type: integer, format: int64, example: 100 }
+        qty_diterima_dasar: { type: integer, format: int64, example: 95 }
+        selisih_dasar:
+          type: integer
+          format: int64
+          description: "`qty_dasar - qty_diterima_dasar`: yang masih jadi tanggungan supplier."
+          example: 5
+        nama_satuan_dasar: { type: string }
+        harga_satuan_input: { type: string, example: "10000.00" }
+        diskon_baris: { type: string, example: "0.00" }
+        subtotal: { type: string, example: "1000000.00" }
+        jumlah_koli:
+          type: string
+          description: >
+            Desimal: satu baris boleh menempati sebagian koli. Diisi petugas gudang
+            saat membongkar, jadi biasanya nol saat pertama diinput.
+          example: "1.00"
+        alokasi_biaya:
+          type: string
+          description: >
+            Bagian ongkir baris ini. Jumlah seluruh baris **persis** sama dengan
+            `biaya_angkut`; sisa pembulatan didorong ke baris dengan basis terbesar.
+          example: "50000.00"
+        harga_pokok_satuan_dasar:
+          type: string
+          nullable: true
+          description: >
+            `(subtotal - bagian diskon nota + bagian PPN + alokasi_biaya) /
+            qty_dasar` — **bukan** `harga_satuan_input / faktor_konversi`. Null
+            sampai dokumen diposting: belum diketahui, bukan hilang.
+          example: "10500.0000"
+        keterangan_selisih: { type: string, nullable: true }
+
+    PembelianDetailInput:
+      type: object
+      required: [id_product, id_satuan_input, qty_faktur, harga_satuan_input]
+      properties:
+        id_product: { type: integer, format: int64, minimum: 1 }
+        id_satuan_input:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Harus sudah terdaftar di `product_satuan` produk itu; kalau tidak,
+            400. Tidak ada foreign key yang mengikatnya ke sana.
+        qty_faktur: { type: string, example: "100" }
+        qty_diterima:
+          type: string
+          nullable: true
+          description: >
+            Boleh dikosongkan, dan artinya sama dengan `qty_faktur`. Tidak boleh
+            melebihi `qty_faktur`. Berbeda dari `qty_faktur` mewajibkan
+            `keterangan_selisih`.
+          example: "95"
+        harga_satuan_input: { type: string, example: "10000" }
+        diskon_baris: { type: string, example: "0" }
+        jumlah_koli: { type: string, example: "0" }
+        keterangan_selisih: { type: string, nullable: true, maxLength: 500 }
+
+    SisaPembelian:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        nomor: { type: string }
+        id_supplier: { type: integer, format: int64 }
+        nama_supplier: { type: string }
+        status: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        status_penerimaan: { type: string, enum: [LENGKAP, KURANG] }
+        baris:
+          type: array
+          items:
+            type: object
+            properties:
+              id_pembelian_detail: { type: integer, format: int64 }
+              id_product: { type: integer, format: int64 }
+              kode_barang: { type: string }
+              nama_product: { type: string }
+              qty_dasar: { type: integer, format: int64 }
+              qty_diterima_dasar: { type: integer, format: int64 }
+              sisa_dasar: { type: integer, format: int64 }
+              nama_satuan_dasar: { type: string }
+              keterangan_selisih: { type: string, nullable: true }
 
     Role:
       type: object

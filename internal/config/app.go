@@ -40,6 +40,9 @@ func Bootstrap(config *BootstrapConfig) {
 	roleRepository := repository.NewRoleRepository()
 	userRepository := repository.NewUserRepository()
 	productRepository := repository.NewProductRepository()
+	kartuStokRepository := repository.NewKartuStokRepository()
+	counterRepository := repository.NewDocumentCounterRepository()
+	pembelianRepository := repository.NewPembelianRepository()
 
 	ruangUseCase := usecase.NewRuangUseCase(
 		config.DB, config.Log, config.Validate, ruangRepository,
@@ -62,6 +65,14 @@ func Bootstrap(config *BootstrapConfig) {
 	productUseCase := usecase.NewProductUseCase(
 		config.DB, config.Log, config.Validate, productRepository,
 	)
+	// PembelianUseCase takes four repositories: posting a purchase writes the
+	// header, its lines, a reserved document number, and one kartu_stok row per
+	// received line — all in one transaction, because a partial posting would leave
+	// stock that no document explains and kartu_stok cannot be edited afterwards.
+	pembelianUseCase := usecase.NewPembelianUseCase(
+		config.DB, config.Log, config.Validate,
+		pembelianRepository, productRepository, kartuStokRepository, counterRepository,
+	)
 	// Fails the process at boot when jwt.secret is missing or too short, rather than
 	// at the first login attempt.
 	authConfig := NewAuthConfig(config.Config, config.Log)
@@ -82,6 +93,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pelangganController := deliveryhttp.NewPelangganController(config.Log, pelangganUseCase)
 	authController := deliveryhttp.NewAuthController(config.Log, authUseCase)
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
+	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
 
@@ -98,6 +110,7 @@ func Bootstrap(config *BootstrapConfig) {
 		AuthUseCase:         authUseCase,
 		DocsController:      docsController,
 		AuthController:      authController,
+		PembelianController: pembelianController,
 		ProductController:   productController,
 		RuangController:     ruangController,
 		SatuanController:    satuanController,

@@ -69,6 +69,7 @@ type app struct {
 	role      *usecase.RoleUseCase
 	product   *usecase.ProductUseCase
 	user      *usecase.UserUseCase
+	pembelian *usecase.PembelianUseCase
 }
 
 // newApp wires the same graph config.Bootstrap does, minus Fiber, and empties the
@@ -83,6 +84,7 @@ func newApp(t *testing.T) *app {
 	validate := config.NewValidator()
 
 	roleRepository := repository.NewRoleRepository()
+	productRepository := repository.NewProductRepository()
 
 	return &app{
 		satuan: usecase.NewSatuanUseCase(
@@ -104,10 +106,15 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate, roleRepository,
 		),
 		product: usecase.NewProductUseCase(
-			testDB, log, validate, repository.NewProductRepository(),
+			testDB, log, validate, productRepository,
 		),
 		user: usecase.NewUserUseCase(
 			testDB, log, validate, repository.NewUserRepository(), roleRepository,
+		),
+		pembelian: usecase.NewPembelianUseCase(
+			testDB, log, validate,
+			repository.NewPembelianRepository(), productRepository,
+			repository.NewKartuStokRepository(), repository.NewDocumentCounterRepository(),
 		),
 	}
 }
@@ -120,20 +127,36 @@ func requireDB(t *testing.T) {
 	}
 }
 
-// truncateMaster clears the master tables with DELETE rather than TRUNCATE:
-// TRUNCATE would have to cascade into kartu_stok, whose guard trigger raises on
-// TRUNCATE by design.
+// truncateMaster clears the tables with DELETE rather than TRUNCATE: TRUNCATE would
+// have to cascade into kartu_stok, whose guard trigger raises on TRUNCATE by design.
 //
 // Order matters. user_role comes before users and role because it references both;
 // users comes after the master tables because every one of them has a created_by
-// pointing at it. The tests write created_by as NULL, so nothing actually blocks —
-// but the order is what keeps that true once auth starts filling the column in.
+// pointing at it. kartu_stok goes first of all — it references product, ruang,
+// satuan, and users, and pembelian_detail rows are what its postings describe.
+//
+// kartu_stok also refuses DELETE, by the same append-only trigger, so the trigger is
+// switched off for the length of the wipe. That is a licence a test database gets
+// and production never does: it is exactly the guarantee the whole valuation rests
+// on, and disabling it anywhere else would defeat the point of having it.
 func truncateMaster(t *testing.T) {
 	t.Helper()
 
+	if _, err := testDB.Exec(`ALTER TABLE kartu_stok DISABLE TRIGGER kartu_stok_append_only`); err != nil {
+		t.Fatalf("disable kartu_stok guard: %v", err)
+	}
+	defer func() {
+		if _, err := testDB.Exec(`ALTER TABLE kartu_stok ENABLE TRIGGER kartu_stok_append_only`); err != nil {
+			t.Fatalf("re-enable kartu_stok guard: %v", err)
+		}
+	}()
+
 	for _, table := range []string{
-		// Children before parents. product_harga_jual and product_satuan reference
-		// product; product references satuan and users, so it has to go before both.
+		// Children before parents. kartu_stok references product, ruang, satuan and
+		// users; pembelian_detail references pembelian, product and satuan.
+		"kartu_stok", "pembelian_detail", "pembelian", "document_counter",
+		// product_harga_jual and product_satuan reference product; product
+		// references satuan and users, so it has to go before both.
 		"product_harga_jual", "product_satuan", "product",
 		"supplier", "pelanggan", "ekspedisi", "satuan", "ruang",
 		"user_role", "users", "role",
