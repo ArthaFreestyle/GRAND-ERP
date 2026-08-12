@@ -19,14 +19,15 @@ func NewReturPembelianRepository() *ReturPembelianRepository {
 // returColumns is the unqualified list, for INSERT ... RETURNING and the
 // SELECT ... FOR UPDATE that cannot reach the joined tables.
 const returColumns = `id, nomor, tanggal, id_pembelian, id_supplier, id_ruang,
-	alasan, total::TEXT, status, created_by, created_at,
+	alasan, total::TEXT, nilai_kredit_utang::TEXT, status, created_by, created_at,
 	diajukan_oleh, diajukan_pada, disetujui_oleh, disetujui_pada, posted_at,
 	dibatalkan_oleh, alasan_batal, alasan_tolak`
 
 // returReadColumns adds the source document's number and the supplier and room names.
 // Fetching them per row would be an N+1.
 const returReadColumns = `r.id, r.nomor, r.tanggal, r.id_pembelian, r.id_supplier,
-	r.id_ruang, r.alasan, r.total::TEXT, r.status, r.created_by, r.created_at,
+	r.id_ruang, r.alasan, r.total::TEXT, r.nilai_kredit_utang::TEXT, r.status,
+	r.created_by, r.created_at,
 	r.diajukan_oleh, r.diajukan_pada, r.disetujui_oleh, r.disetujui_pada, r.posted_at,
 	r.dibatalkan_oleh, r.alasan_batal, r.alasan_tolak, p.nomor, sup.nama, ru.nama_ruang`
 
@@ -152,6 +153,42 @@ func (r *ReturPembelianRepository) RecalculateTotal(ctx context.Context, db DBTX
 	}
 
 	return nil
+}
+
+// SetNilaiKreditUtang freezes what the supplier is credited, at posting.
+//
+// Separate from RecalculateTotal because the two figures answer different questions and
+// are settled at different moments: `total` is the inventory value and is known as soon as
+// the lines exist, while the credit against the payable is only meaningful once the
+// document actually posts. A DRAFT credits nobody.
+func (r *ReturPembelianRepository) SetNilaiKreditUtang(ctx context.Context, db DBTX, id int64, nilai string) error {
+	const query = `UPDATE retur_pembelian SET nilai_kredit_utang = $2::NUMERIC WHERE id = $1`
+
+	if _, err := db.ExecContext(ctx, query, id, nilai); err != nil {
+		return fmt.Errorf("set nilai_kredit_utang: %w", err)
+	}
+
+	return nil
+}
+
+// SumKreditUtangPosted totals what every POSTED return has already credited against a
+// purchase, excluding one document.
+//
+// The exclusion is what makes it usable from inside the posting path of the document being
+// excluded: it answers "how much credit is already committed by everyone else", which is
+// what the new document's share has to fit inside.
+func (r *ReturPembelianRepository) SumKreditUtangPosted(ctx context.Context, db DBTX, idPembelian, kecualiID int64) (string, error) {
+	const query = `
+		SELECT COALESCE(SUM(nilai_kredit_utang), 0)::NUMERIC(20, 2)::TEXT
+		FROM retur_pembelian
+		WHERE id_pembelian = $1 AND status = 'POSTED' AND id <> $2`
+
+	var jumlah string
+	if err := db.QueryRowContext(ctx, query, idPembelian, kecualiID).Scan(&jumlah); err != nil {
+		return "", fmt.Errorf("sum nilai_kredit_utang: %w", err)
+	}
+
+	return jumlah, nil
 }
 
 func (r *ReturPembelianRepository) Ajukan(ctx context.Context, db DBTX, id, actorID int64) error {
@@ -332,7 +369,8 @@ func returFields(retur *entity.ReturPembelian) []any {
 	return []any{
 		&retur.ID, &retur.Nomor, &retur.Tanggal, &retur.IDPembelian,
 		&retur.IDSupplier, &retur.IDRuang, &retur.Alasan,
-		&retur.Total, &retur.Status, &retur.CreatedBy, &retur.CreatedAt,
+		&retur.Total, &retur.NilaiKreditUtang, &retur.Status,
+		&retur.CreatedBy, &retur.CreatedAt,
 		&retur.DiajukanOleh, &retur.DiajukanPada, &retur.DisetujuiOleh,
 		&retur.DisetujuiPada, &retur.PostedAt,
 		&retur.DibatalkanOleh, &retur.AlasanBatal, &retur.AlasanTolak,

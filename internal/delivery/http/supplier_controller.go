@@ -85,3 +85,28 @@ func (c *SupplierController) List(ctx fiber.Ctx) error {
 
 	return ctx.JSON(model.WebResponse[[]model.SupplierResponse]{Data: responses, Paging: paging})
 }
+
+// Utang lists this supplier's invoices that are still owed money, oldest first.
+//
+// The id is bound from the path after the query string, so an id smuggled into the query
+// cannot point the answer at a different supplier than the URL names.
+func (c *SupplierController) Utang(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	request := new(model.ListUtangSupplierRequest)
+	if err := ctx.Bind().Query(request); err != nil {
+		return model.Invalid("malformed query parameters")
+	}
+
+	request.IDSupplier = id
+
+	responses, paging, err := c.UseCase.Utang(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[[]model.UtangSupplierResponse]{Data: responses, Paging: paging})
+}

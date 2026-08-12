@@ -383,10 +383,24 @@ func (c *ReturPembelianUseCase) Posting(ctx context.Context, request *model.Post
 		return nil, model.Invalid("retur pembelian tanpa baris tidak bisa diposting")
 	}
 
+	// The invoice value of the goods going back, accumulated as the lines are walked. It
+	// is not the same as their cost: cost carries the freight share, which the supplier
+	// never received. See hitungKreditUtang.
+	nilaiFaktur := new(big.Rat)
+
 	for i := range detail {
-		if err := c.periksaDapatDiretur(ctx, tx, retur.IDPembelian, detail[i].IDPembelianDetail, detail[i].QtyDasar, i+1); err != nil {
+		asal, err := c.periksaDapatDiretur(ctx, tx, retur.IDPembelian, detail[i].IDPembelianDetail, detail[i].QtyDasar, i+1)
+		if err != nil {
 			return nil, err
 		}
+
+		// subtotal / qty_dasar is the invoice price per base unit — the same figure
+		// riwayat_beli reports as harga_satuan_dasar. Safe to divide:
+		// pembelian_detail_qty_dasar_check makes qty_dasar > 0.
+		hargaFaktur := new(big.Rat).Quo(
+			mustParseNumeric(asal.Subtotal), ratFromInt(asal.QtyDasar),
+		)
+		nilaiFaktur.Add(nilaiFaktur, hargaFaktur.Mul(hargaFaktur, ratFromInt(detail[i].QtyDasar)))
 
 		qtyInput := detail[i].QtyInput
 		satuanInput := detail[i].IDSatuanInput
@@ -416,6 +430,18 @@ func (c *ReturPembelianUseCase) Posting(ctx context.Context, request *model.Post
 		}
 	}
 
+	// What the supplier is credited, frozen now. It has to be computed before the
+	// transition, because the ceiling it is clamped against counts POSTED returns and
+	// this document must not be counted against itself.
+	kredit, err := c.hitungKreditUtang(ctx, tx, retur, pembelian, nilaiFaktur)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.ReturRepository.SetNilaiKreditUtang(ctx, tx, request.ID, kredit); err != nil {
+		return nil, err
+	}
+
 	if err := c.ReturRepository.Posting(ctx, tx, request.ID, request.ActorID); err != nil {
 		return nil, conflictOnTransisi(err, "status retur pembelian sudah berubah")
 	}
@@ -424,6 +450,13 @@ func (c *ReturPembelianUseCase) Posting(ctx context.Context, request *model.Post
 	// everything on the invoice arrived, and sending goods back afterwards does not
 	// make the delivery incomplete — nor does it entitle anyone to a follow-up
 	// shipment. The two quotas share a source line and nothing else.
+	//
+	// status_pembayaran is a different matter: the credit reduces what the supplier is
+	// owed, so it does have to be rewritten. After the transition, because the recompute
+	// counts POSTED returns.
+	if err := c.PembelianRepository.RecalculateStatusPembayaran(ctx, tx, retur.IDPembelian); err != nil {
+		return nil, err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -451,7 +484,8 @@ func (c *ReturPembelianUseCase) Batal(ctx context.Context, request *model.BatalR
 		_ = tx.Rollback()
 	}()
 
-	if _, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusReturPosted); err != nil {
+	retur, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusReturPosted)
+	if err != nil {
 		return nil, err
 	}
 
@@ -499,11 +533,73 @@ func (c *ReturPembelianUseCase) Batal(ctx context.Context, request *model.BatalR
 		return nil, conflictOnTransisi(err, "status retur pembelian sudah berubah")
 	}
 
+	// The credit is withdrawn with the document: nilai_kredit_utang stays on the row as
+	// the record of what it once claimed, but the payable recompute counts only POSTED
+	// returns, so the supplier is owed the money again.
+	if err := c.PembelianRepository.RecalculateStatusPembayaran(ctx, tx, retur.IDPembelian); err != nil {
+		return nil, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 
 	return c.detail(ctx, c.DB, request.ID)
+}
+
+// hitungKreditUtang works out what the supplier is credited for the returned goods.
+//
+//	nilai_kredit_utang = pembelian.total x nilaiFaktur / pembelian.subtotal
+//
+// Scaled to the invoice's total rather than taken raw from the line values, because total
+// already carries the nota discount, the PPN, and the rounding line. Returning everything
+// and crediting the raw line values would over-credit by exactly the nota discount — money
+// that reduced the bill in the first place. The scaling makes the invariant checkable: the
+// credits of all a purchase's returns never exceed its total, and equal it when every item
+// goes back.
+//
+// This is emphatically not retur_pembelian.total. That figure is the inventory value at
+// cost, and cost includes the freight share paid to the carrier — crediting it would hand
+// the supplier money that went to the ekspedisi.
+//
+// The clamp is a rounding guard rather than a policy. The quantity quota already keeps the
+// returned invoice value at or under subtotal, so the scaled figure is at or under total;
+// what the clamp stops is several returns each rounding up by a cent until their sum crosses
+// it.
+func (c *ReturPembelianUseCase) hitungKreditUtang(ctx context.Context, tx repository.DBTX, retur *entity.ReturPembelian, pembelian *entity.Pembelian, nilaiFaktur *big.Rat) (string, error) {
+	subtotal := mustParseNumeric(pembelian.Subtotal)
+
+	// A zero-subtotal invoice has nothing to scale against. It is reachable — a line
+	// priced at zero is legal — and there is no share of anything to credit.
+	if subtotal.Sign() <= 0 {
+		return formatNumeric(new(big.Rat), skalaUang), nil
+	}
+
+	kredit := new(big.Rat).Mul(mustParseNumeric(pembelian.Total), nilaiFaktur)
+	kredit.Quo(kredit, subtotal)
+	kredit = roundNumeric(kredit, skalaUang)
+
+	if kredit.Sign() < 0 {
+		kredit = new(big.Rat)
+	}
+
+	sudah, err := c.ReturRepository.SumKreditUtangPosted(ctx, tx, retur.IDPembelian, retur.ID)
+	if err != nil {
+		return "", err
+	}
+
+	tersedia := mustParseNumeric(pembelian.Total)
+	tersedia.Sub(tersedia, mustParseNumeric(sudah))
+
+	if tersedia.Sign() < 0 {
+		tersedia = new(big.Rat)
+	}
+
+	if kredit.Cmp(tersedia) > 0 {
+		kredit = tersedia
+	}
+
+	return formatNumeric(kredit, skalaUang), nil
 }
 
 // detail loads a header and its lines. Two queries, independent of how many lines come
@@ -650,7 +746,7 @@ func (c *ReturPembelianUseCase) siapkanDetail(ctx context.Context, tx repository
 
 		qtyDasarInt := ratKeInt64(qtyDasar)
 
-		if err := c.periksaDapatDiretur(ctx, tx, idPembelian, asal.ID, qtyDasarInt, i+1); err != nil {
+		if _, err := c.periksaDapatDiretur(ctx, tx, idPembelian, asal.ID, qtyDasarInt, i+1); err != nil {
 			return nil, err
 		}
 
@@ -685,31 +781,34 @@ func (c *ReturPembelianUseCase) siapkanDetail(ctx context.Context, tx repository
 //
 // The figure is read fresh rather than passed in, because it counts POSTED returns and
 // those can appear between a draft being written and posted.
-func (c *ReturPembelianUseCase) periksaDapatDiretur(ctx context.Context, tx repository.DBTX, idPembelian, idPembelianDetail, qtyDasar int64, nomorBaris int) error {
+//
+// It returns the source line it had to read anyway, so the posting path can take the
+// invoice price off it without a second query per line.
+func (c *ReturPembelianUseCase) periksaDapatDiretur(ctx context.Context, tx repository.DBTX, idPembelian, idPembelianDetail, qtyDasar int64, nomorBaris int) (*entity.PembelianDetail, error) {
 	asal, err := c.PembelianRepository.FindDetailByID(ctx, tx, idPembelianDetail)
 	if err != nil {
-		return notFoundOnNoRows(err, fmt.Sprintf("baris %d: baris pembelian tidak ditemukan", nomorBaris))
+		return nil, notFoundOnNoRows(err, fmt.Sprintf("baris %d: baris pembelian tidak ditemukan", nomorBaris))
 	}
 
 	if asal.IDPembelian != idPembelian {
-		return model.Invalid(fmt.Sprintf("baris %d: baris itu milik pembelian lain", nomorBaris))
+		return nil, model.Invalid(fmt.Sprintf("baris %d: baris itu milik pembelian lain", nomorBaris))
 	}
 
 	dapat := asal.QtyDiterimaDasar + asal.QtySusulanDasar - asal.QtyReturDasar
 
 	if dapat <= 0 {
-		return model.Invalid(fmt.Sprintf(
+		return nil, model.Invalid(fmt.Sprintf(
 			"baris %d: tidak ada barang yang bisa diretur dari baris pembelian itu", nomorBaris,
 		))
 	}
 
 	if qtyDasar > dapat {
-		return model.Invalid(fmt.Sprintf(
+		return nil, model.Invalid(fmt.Sprintf(
 			"baris %d: qty %d satuan dasar melebihi yang bisa diretur, %d", nomorBaris, qtyDasar, dapat,
 		))
 	}
 
-	return nil
+	return asal, nil
 }
 
 // tulisDetail inserts the lines and refreshes the header's total.

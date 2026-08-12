@@ -41,7 +41,15 @@ type ReturPembelian struct {
 	// of why goods a supplier was already paid for went back.
 	Alasan *string
 	Total  string
-	Status string
+	// NilaiKreditUtang is what the supplier is credited, which is a different figure
+	// from Total and has to be. Total is the inventory value at cost, and cost includes
+	// the freight share paid to the carrier — money the supplier never received. This is
+	// the invoice value of the returned goods scaled to pembelian.total, so it carries
+	// the nota discount, the PPN, and the rounding line with it.
+	//
+	// Frozen at posting, and zero on anything not yet posted. Migration 000015 added it.
+	NilaiKreditUtang string
+	Status           string
 
 	CreatedBy int64
 	CreatedAt time.Time

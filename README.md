@@ -460,7 +460,7 @@ nilai persediaan                         0  ← bersih
 > [!IMPORTANT]
 > **`total` dokumen ini dan nilai yang dicatat kartu stok tidak selalu sama, dan itu bukan bug.** `total` adalah nilai barang menurut faktur. Sementara `kartu_stok` menilai setiap baris keluar pada rata-rata bergerak yang berlaku saat itu, karena barangnya sudah tercampur dengan stok lama sejak ia datang dan tidak ada lagi batch yang bisa dipisahkan. Dua-duanya jawaban benar untuk pertanyaan yang berbeda.
 >
-> **Retur juga belum mengurangi utang.** `total`-nya dihitung dari harga pokok, yang sudah termasuk porsi ongkir dan perlakuan PPN — sementara `pembelian.total` tidak memasukkan ongkir sama sekali. Mengurangkan yang satu dari yang lain akan melebihkan kreditnya sebesar porsi ongkir yang dibayar ke ekspedisi, bukan ke supplier. Berapa yang sebenarnya dikreditkan supplier adalah keputusan fase 6 (`pembayaran_utang`), dan sengaja ditinggalkan di sana daripada ditebak di sini.
+> **Karena itu `total` juga bukan angka yang dikreditkan supplier.** Ia sudah termasuk porsi ongkir dan perlakuan PPN, sementara `pembelian.total` tidak memasukkan ongkir sama sekali; mengurangkan yang satu dari yang lain akan melebihkan kredit sebesar uang yang dibayar ke ekspedisi, bukan ke supplier. Utang punya angkanya sendiri, `nilai_kredit_utang`, yang dibekukan saat posting — lihat [Pembayaran utang](#pembayaran-utang-uang-yang-keluar-ke-supplier).
 
 ### Hal lain yang perlu diketahui
 
@@ -470,6 +470,7 @@ nilai persediaan                         0  ← bersih
 - **Satuan boleh berbeda dari fakturnya.** Satu dus dikembalikan dari baris yang diketik dalam pcs adalah kasus wajar: `faktor_konversi` diambil segar dari `product_satuan` (kuantitasnya hitungan baru atas barang yang sedang dikemas), harga pokoknya disalin dari sumber.
 - **`id_supplier` dan `id_ruang` disalin dari pembelian**, tidak dipilih. Barang yang perlu dikembalikan dari ruang lain adalah pekerjaan mutasi lebih dulu.
 - Baris `kartu_stok`-nya memakai `jenis_transaksi = 'RETUR_PEMBELIAN'` dan `stok_keluar`. Nilai enumnya sudah ada di migrasi `000002`, jadi modul ini tidak perlu `ALTER TYPE` — kebetulan yang menyenangkan, karena `ADD VALUE` tidak bisa dibatalkan.
+- **Retur POSTED mengurangi utang, dan pembatalannya mengembalikannya.** `pembelian.status_pembayaran` dihitung ulang setelah posting maupun setelah batal. `nilai_kredit_utang` tetap tertinggal di baris dokumen `BATAL` sebagai catatan berapa yang pernah diklaim, tapi penghitungan ulangnya hanya menjumlahkan retur POSTED, jadi uangnya kembali jadi utang.
 - **Membatalkan pembelian yang punya retur POSTED ditolak 409** — batalkan returnya lebih dulu. Pembatalan pembelian membalik seluruh kuantitas yang diterima, sementara returnya sudah mengeluarkan sebagiannya, jadi pembalikannya akan menekan saldo di bawah nol; dan kalaupun saldonya cukup, returnya akan tertinggal menunjuk pembelian `BATAL` yang pembalikannya sudah memperhitungkan barang yang sama.
 - **Membatalkan penerimaan susulan yang barangnya sudah diretur ditolak trigger** dengan 400, bukan oleh pengecekan di Go. Itu arbiter yang tepat: saldonya dihitung di dalam trigger di bawah advisory lock, justru supaya tidak ada pembaca yang bisa memutuskannya lebih dulu.
 - Nomornya seri sendiri, `RB/2026/08/0001`, dari generator yang sama.
@@ -506,6 +507,75 @@ Ini yang paling mudah disederhanakan jadi satu angka, dan tidak boleh:
 - **Produk yang tidak dikenal menjawab 404; produk yang belum pernah dibeli menjawab halaman kosong.** Dua fakta yang berbeda, dan klien yang tidak bisa membedakannya akan menampilkan pesan yang salah.
 - **Tidak ada migrasi baru.** Fase ini tidak menambah satu kolom pun — seluruh jawabannya sudah ada di `pembelian` dan `pembelian_detail` yang diposting fase 2.
 - Kalau satu dokumen memuat produk yang sama di dua baris, yang diambil adalah baris yang diketik terakhir. Ditegakkan pemecah seri di `ORDER BY`, bukan diserahkan ke planner.
+
+## Pembayaran utang: uang yang keluar ke supplier
+
+Fase terakhir isu #4, dan **satu-satunya modul transaksi yang tidak menyentuh stok sama sekali**. Itu bukan detail sepele — ia yang menentukan hampir seluruh bentuknya.
+
+```
+pembayaran_utang (uang keluar)
+    └── pembayaran_utang_alokasi → menunjuk pembelian, banyak-ke-banyak
+```
+
+Satu pembayaran boleh menutup beberapa faktur, dan satu faktur boleh ditutup beberapa pembayaran. Karena itulah alokasi jadi tabel sendiri, bukan kolom di salah satu ujungnya.
+
+### Tidak ada `DIAJUKAN`, dan itu disengaja
+
+`DRAFT → POSTED → BATAL`. Tahap persetujuan yang ada di `pembelian` sengaja tidak ditiru, karena alasan keberadaannya tidak berlaku di sini: `kartu_stok` append-only, jadi posting stok yang salah hanya bisa dibalik dan pembalikannya dinilai pada rata-rata yang sudah bergeser. Alokasi pembayaran tidak begitu — ia bisa dibatalkan dan seluruh cache dihitung ulang persis, tanpa residu penilaian apa pun. Menambahkan `DIAJUKAN` berarti meniru mekanismenya tanpa alasannya.
+
+Kontrol dua orangnya tetap ada, hanya satu state lebih sedikit: `CASHIER` menyiapkan dokumen dan alokasinya, `SUPERADMIN` yang melepas uangnya.
+
+### Tiga aturan yang tidak simetris
+
+| | Batasnya |
+|---|---|
+| Pembayaran | dialokasikan **paling banyak** sebesar jumlahnya sendiri |
+| Faktur | menerima **paling banyak** sisa utangnya, sudah memperhitungkan retur POSTED |
+| Kelebihan bayar | **normal**, mengendap jadi kredit di supplier — jangan dipaksa pas |
+
+Alokasi yang lebih kecil dari jumlah pembayaran bukan dokumen setengah jadi. Uang kadang dibayar dulu sebelum diputuskan faktur mana yang ditutupnya, dan `POST /api/v1/pembayaran-utang` menerima daftar alokasi yang kosong justru karena itu.
+
+### Giro yang belum cair bukan pembayaran
+
+> [!IMPORTANT]
+> Menyerahkan giro tidak menyelesaikan apa pun. Utang berkurang saat girinya **cair**, bukan saat dokumennya diposting.
+
+Posting giro `BELUM_CAIR` membekukan alokasinya dan menutup dokumennya, tapi meninggalkan utangnya tepat di tempatnya — dan itu memang yang seharusnya terjadi. `POST /{id}/cair` yang menggerakkan `status_pembayaran`, dan `POST /{id}/tolak-giro` memastikan giro yang ditolak tidak pernah menggerakkannya sama sekali.
+
+Konsekuensinya batas sisa utang **diperiksa ulang saat pencairan**, bukan cukup saat posting: di antara keduanya faktur yang sama bisa sudah ditutup pembayaran tunai. `status_giro` wajib ada untuk metode `GIRO` dan wajib kosong untuk metode lain, ditegakkan CHECK di migrasi `000015` — giro tanpa status tidak bisa dibedakan dari giro yang sudah cair, dan itu justru perbedaan antara utang yang berkurang dan yang tidak.
+
+### Berapa yang dikreditkan retur
+
+Ini keputusan yang sengaja ditunda di fase 5 dan diselesaikan di sini. `retur_pembelian.total` **bukan** jawabannya: ia nilai persediaan menurut harga pokok, dan harga pokok memuat porsi ongkir yang dibayar ke ekspedisi. Utang butuh angkanya sendiri, dihitung dari nilai faktur lalu diskalakan:
+
+```
+nilai_faktur_retur = Σ (pembelian_detail.subtotal / qty_dasar) × qty_retur_dasar
+nilai_kredit_utang = pembelian.total × nilai_faktur_retur / pembelian.subtotal
+```
+
+Penskalaan terhadap `total` — bukan mengambil mentah nilai baris fakturnya — karena `total` sudah memuat diskon nota, PPN, dan pembulatan. Mengembalikan seluruh barang lalu mengkredit seluruh nilai barisnya akan melebihkan kredit **persis sebesar diskon nota** yang justru mengurangi tagihannya. Bentuk ini membuat invariannya bisa diperiksa: kredit seluruh retur sebuah pembelian tidak pernah melebihi `total`-nya, dan pas sebesar `total` ketika semua barang kembali.
+
+Dibekukan saat posting, tidak dihitung saat dibaca. Ia turunan dari baris dua dokumen yang sudah POSTED dan tidak bisa berubah, jadi menghitungnya ulang akan selalu memberi jawaban sama — sampai suatu hari tidak, dan saat itu utang lama diam-diam berganti nilai. Setiap angka uang di proyek ini snapshot.
+
+### `status_pembayaran` adalah cache
+
+Selalu dihitung ulang, tidak pernah di-set dari form — aturan yang sama dengan `status_penerimaan`.
+
+```
+sisa = pembelian.total − Σ alokasi efektif − Σ nilai_kredit_utang retur POSTED
+```
+
+"Efektif" berarti alokasi dari pembayaran POSTED yang bukan giro, atau giro yang sudah `CAIR`. Semua yang bisa mengubah jawabannya memanggil penghitungan ulang yang sama: posting dan batal pembayaran, cair dan tolak giro, serta posting dan batal retur. Satu statement SQL, jadi tidak ada jendela ketika cache-nya berbeda dari baris yang ia ringkas.
+
+`SEBAGIAN` juga mencakup faktur yang baru dikurangi retur tanpa uang sepeser pun — memang sebagian terselesaikan, dan kedua angkanya dilaporkan berdampingan supaya layar bisa menyebut mana yang menyebabkannya.
+
+### Hal lain yang perlu diketahui
+
+- **`GET /api/v1/supplier/{id}/utang` adalah daftar kerjanya**, dan seperti riwayat harga beli ia query, bukan modul: tidak ada tabel, tidak ada migrasi. Defaultnya hanya faktur yang masih terbuka; `termasuk_lunas=true` membawa yang sudah selesai. Supplier tidak dikenal menjawab 404, supplier tanpa utang menjawab halaman kosong.
+- **Pembelian tidak bisa dibatalkan saat sudah dibayar**, termasuk saat masih ada giro `BELUM_CAIR` yang menunjuknya. Giro yang belum cair belum mengurangi utang, tapi ia dokumen yang beredar di luar sana atas faktur itu.
+- **Satu pembelian hanya boleh muncul sekali per pembayaran**, ditegakkan `pembayaran_utang_alokasi_baris_uidx`. Tanpa itu dua baris untuk faktur yang sama lolos pengecekan sisa sendiri-sendiri lalu bersama-sama melebihinya — jebakan yang sama seperti di penerimaan susulan dan retur.
+- **Alokasi diganti wholesale** lewat `PUT /{id}/alokasi`, tidak diedit satu-satu — alasannya sama dengan baris pembelian.
+- Nomornya seri sendiri, `PU/2026/08/0001`, dari generator yang sama.
 
 ## Autentikasi
 
@@ -673,6 +743,15 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `POST` | `/api/v1/retur-pembelian/{id}/posting` | Keluarkan dari `kartu_stok`, set `POSTED` — `SUPERADMIN` |
 | `POST` | `/api/v1/retur-pembelian/{id}/tolak` | `DIAJUKAN` → `DRAFT`, wajib `alasan` — `SUPERADMIN` |
 | `POST` | `/api/v1/retur-pembelian/{id}/batal` | Tulis baris pembalik, barang kembali masuk — `SUPERADMIN` |
+| `GET` | `/api/v1/pembayaran-utang` | List — `page`, `size`, `search`, `status`, `metode`, `status_giro`, `id_supplier`, `tanggal_dari`, `tanggal_sampai` |
+| `POST` | `/api/v1/pembayaran-utang` | Buat draft beserta alokasinya; alokasi boleh kosong |
+| `GET` | `/api/v1/pembayaran-utang/{id}` | Detail beserta alokasinya |
+| `PATCH` | `/api/v1/pembayaran-utang/{id}` | Ubah header — hanya saat `DRAFT` |
+| `PUT` | `/api/v1/pembayaran-utang/{id}/alokasi` | Ganti seluruh alokasi — hanya saat `DRAFT` |
+| `POST` | `/api/v1/pembayaran-utang/{id}/posting` | Bekukan alokasi, hitung ulang `status_pembayaran` — `SUPERADMIN` |
+| `POST` | `/api/v1/pembayaran-utang/{id}/batal` | Kembalikan utangnya, wajib `alasan_batal` — `SUPERADMIN` |
+| `POST` | `/api/v1/pembayaran-utang/{id}/cair` | Giro cair — di sinilah utang giro berkurang — `SUPERADMIN` |
+| `POST` | `/api/v1/pembayaran-utang/{id}/tolak-giro` | Giro ditolak bank; utangnya tidak pernah berkurang — `SUPERADMIN` |
 | `GET` | `/api/v1/satuan` | List — `page`, `size`, `search`, `is_aktif` |
 | `POST` | `/api/v1/satuan` | Create |
 | `GET` | `/api/v1/satuan/{id}` | Get by id |
@@ -685,6 +764,7 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `POST` | `/api/v1/supplier` | Create |
 | `GET` | `/api/v1/supplier/{id}` | Get by id |
 | `PATCH` | `/api/v1/supplier/{id}` | Update parsial |
+| `GET` | `/api/v1/supplier/{id}/utang` | Faktur yang masih terbuka — `page`, `size`, `termasuk_lunas` |
 | `GET` | `/api/v1/pelanggan` | List — `page`, `size`, `search`, `is_aktif` |
 | `POST` | `/api/v1/pelanggan` | Create |
 | `GET` | `/api/v1/pelanggan/{id}` | Get by id |
@@ -726,6 +806,9 @@ Sudah ada:
 - **Modul `penerimaan_susulan`** untuk kiriman yang menyusul: menambah stok tanpa menambah utang, harga pokok disalin dari baris pembelian sehingga satu faktur menyumbang persis nilainya sendiri ke persediaan, dan sisa per baris yang diperiksa ulang di bawah row lock saat posting
 - **Modul `retur_pembelian`** untuk barang yang dikirim balik: cermin dari penerimaan susulan, harga pokok disalin dari baris pembelian sehingga pembelian dan returnya saling menghapus, dan kuota yang dibatasi pada barang yang **benar-benar datang** — bukan yang difakturkan
 - **Riwayat harga beli per produk per supplier** — pengganti purchase order, tanpa dokumen tambahan yang harus diinput
+- **Modul `pembayaran_utang` beserta alokasinya** — fase terakhir isu #4: satu pembayaran menutup banyak faktur dan sebaliknya, giro yang baru mengurangi utang saat cair, kelebihan bayar yang mengendap jadi kredit, dan `status_pembayaran` yang dihitung ulang dari alokasi efektif serta kredit retur
+- **Pengurangan utang oleh retur**, lewat `nilai_kredit_utang` yang dibekukan saat posting — diskalakan terhadap `pembelian.total` supaya diskon nota tidak ikut dikreditkan dua kali, dan tidak memakai `retur_pembelian.total` yang sudah memuat porsi ongkir
+- **Daftar utang per supplier** (`GET /supplier/{id}/utang`) — query, bukan modul, seperti riwayat harga beli
 - Tujuh modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `role`, `user` (create/get/list/patch) dan `ruang` (create/get/list)
 - User dengan banyak role, `role_ids` yang mengganti seluruh himpunan dalam satu transaksi, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
@@ -741,9 +824,7 @@ Belum ada:
 - **Logout dan refresh token**
 - Captcha (Redis sudah terhubung tapi belum dipakai)
 - Modul `periode`. Trigger `kartu_stok` sudah menolak posting ke periode `TUTUP`, tapi tanpa lapisan Go tidak ada tutup buku — dan bulan tanpa baris `periode` dihitung terbuka
-- **Lanjutan modul pengadaan** (isu #4): `pembayaran_utang` beserta alokasinya (fase 6) — fase terakhir, dan tidak menyentuh stok
-- **Pengurangan utang oleh retur.** `retur_pembelian` sudah menulis stok tetapi belum menyentuh `pembelian.status_pembayaran`, karena `total`-nya dihitung dari harga pokok (termasuk ongkir) sementara `pembelian.total` tidak. Berapa yang sebenarnya dikreditkan supplier adalah keputusan fase 6
 - Lapisan Go untuk penjualan, piutang, retur penjualan, pemakaian, mutasi, dan stok opname
 - Lampiran foto faktur (isu #5) — job pertama untuk `cmd/worker`
-- Validasi tingkat aplikasi yang tersisa: kuota retur penjualan, batas alokasi pembayaran, plafon kredit, dan penghitungan ulang `status_pembayaran` — didaftar lengkap di CLAUDE.md
+- Validasi tingkat aplikasi yang tersisa, semuanya di sisi penjualan: kuota retur penjualan, batas alokasi penerimaan pembayaran, plafon kredit, dan penghitungan ulang `penjualan.status_pembayaran` — sisi utang sudah selesai di fase 6, dan cerminnya tinggal ditiru. Didaftar lengkap di CLAUDE.md
 - Job rekonsiliasi harian rantai saldo kartu stok

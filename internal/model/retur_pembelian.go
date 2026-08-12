@@ -25,8 +25,16 @@ type ReturPembelianResponse struct {
 	// Total is the inventory value withdrawn, at the cost the invoice settled.
 	// Recomputed from the lines, never set from a form. It is not automatically the
 	// credit the supplier owes — see harga_pokok_satuan_dasar on the lines.
-	Total  string `json:"total"`
-	Status string `json:"status"`
+	Total string `json:"total"`
+	// NilaiKreditUtang is what the supplier is credited, and it is deliberately a
+	// different figure from total. total is the inventory value at cost, and cost carries
+	// the freight share paid to the carrier — money the supplier never received. This is
+	// the invoice value of the returned goods scaled to the purchase's total, so the nota
+	// discount, the PPN, and the rounding line come with it.
+	//
+	// Zero until the document is posted. It is what pembelian.sisa_utang subtracts.
+	NilaiKreditUtang string `json:"nilai_kredit_utang"`
+	Status           string `json:"status"`
 
 	// Detail is filled on detail reads only; a list would need a query per row.
 	Detail []ReturPembelianDetailResponse `json:"detail,omitempty"`

@@ -532,6 +532,20 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 		return nil, model.Conflict("batalkan retur pembeliannya lebih dulu")
 	}
 
+	// A posted payment has to be voided first, and unlike the two above there is nothing
+	// automatic that could clean up after it. The money left the bank; the allocation would
+	// be left pointing at a document that no longer claims to be owed anything, and where
+	// that payment should go instead is a decision rather than an arithmetic step. An
+	// uncashed giro counts too: it reduces no payable, but it is still paper pointed at
+	// this invoice, and it would be unexplainable when it clears.
+	adaPembayaran, err := c.PembelianRepository.HasPostedAlokasi(ctx, tx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if adaPembayaran {
+		return nil, model.Conflict("batalkan pembayaran utang yang dialokasikan ke faktur ini lebih dulu")
+	}
+
 	asal, err := c.KartuStokRepository.FindByRef(ctx, tx, entity.RefTablePembelian, request.ID)
 	if err != nil {
 		return nil, err

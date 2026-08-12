@@ -37,6 +37,15 @@ func PembelianToResponse(pembelian *entity.Pembelian) *model.PembelianResponse {
 		StatusPenerimaan: pembelian.StatusPenerimaan,
 		Status:           pembelian.Status,
 
+		JumlahDialokasikan: pembelian.JumlahDialokasikan,
+		NilaiKreditRetur:   pembelian.NilaiKreditRetur,
+		// Computed here rather than left to the client, the way selisih_dasar is: it is
+		// what status_pembayaran caches, and every caller would derive it the same way.
+		SisaUtang: selisihUang(
+			selisihUang(pembelian.Total, pembelian.JumlahDialokasikan),
+			pembelian.NilaiKreditRetur,
+		),
+
 		CreatedBy: pembelian.CreatedBy,
 		CreatedAt: pembelian.CreatedAt,
 

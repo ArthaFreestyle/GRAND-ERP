@@ -90,6 +90,18 @@ type Pembelian struct {
 	StatusPenerimaan string
 	Status           string
 
+	// Neither of these is a column. Both are sums over other documents, read alongside
+	// the header so a payable screen does not need a query per invoice:
+	//
+	//   JumlahDialokasikan -- allocations from payments that are POSTED *and* effective;
+	//                         an uncashed giro is not a payment, so it does not count
+	//   NilaiKreditRetur   -- Σ nilai_kredit_utang of POSTED returns
+	//
+	// What is still owed is Total - JumlahDialokasikan - NilaiKreditRetur, and
+	// StatusPembayaran is the cache over exactly that.
+	JumlahDialokasikan string
+	NilaiKreditRetur   string
+
 	CreatedBy int64
 	CreatedAt time.Time
 

@@ -52,9 +52,21 @@ info:
     `pembelian_detail` dan sama-sama menyalin harga pokoknya dari sana, hanya arah
     barangnya berlawanan. Yang bisa diretur adalah yang **benar-benar datang**
     (`qty_diterima_dasar + Σ susulan − Σ retur`), bukan yang difakturkan — barang yang
-    tidak pernah datang dikejar dengan penerimaan susulan, bukan dikirim balik. Retur
-    tidak mengurangi utang di sistem ini: berapa yang dikreditkan supplier diselesaikan
-    di atas nota, dan sisi utang belum punya lapisan Go.
+    tidak pernah datang dikejar dengan penerimaan susulan, bukan dikirim balik.
+
+
+    `pembayaran-utang` adalah uang yang keluar ke supplier, dan satu-satunya modul
+    transaksi yang tidak menyentuh stok. Satu pembayaran boleh menutup beberapa faktur
+    dan satu faktur boleh ditutup beberapa pembayaran, jadi alokasinya tabel tersendiri.
+    Kelebihan bayar normal dan mengendap sebagai kredit. **Giro yang belum cair bukan
+    pembayaran** — utangnya berkurang saat giro cair, bukan saat dokumennya diposting.
+
+
+    Retur POSTED juga mengurangi utang, tetapi **bukan sebesar `total`-nya**: angka itu
+    nilai persediaan menurut harga pokok, yang memuat porsi ongkir yang dibayar ke
+    ekspedisi. Utang memakai `nilai_kredit_utang`, dihitung dari nilai faktur lalu
+    diskalakan terhadap `pembelian.total` supaya diskon nota tidak ikut dikreditkan dua
+    kali, dan dibekukan saat posting.
 
 
     Uang dan kuantitas pada modul pembelian dikirim dan diterima sebagai **string
@@ -1702,6 +1714,431 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
+  /api/v1/pembayaran-utang:
+    get:
+      tags: [pembayaran-utang]
+      summary: List pembayaran utang
+      operationId: listPembayaranUtang
+      description: >
+        Tidak menyertakan `alokasi`; kuncinya hilang sama sekali, bukan array kosong —
+        untuk dokumen ini array kosong adalah klaim yang bermakna (uang titipan yang
+        belum dialokasikan), jadi menghilangkan kuncinya lebih jujur pada endpoint yang
+        tidak membacanya. `search` mencocokkan nomor dokumen maupun `no_referensi`.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [DRAFT, POSTED, BATAL] }
+        - name: metode
+          in: query
+          schema: { type: string, enum: [TUNAI, TRANSFER, GIRO] }
+        - name: status_giro
+          in: query
+          description: Daftar giro yang belum cair adalah pekerjaan harian keuangan.
+          schema: { type: string, enum: [BELUM_CAIR, CAIR, TOLAK] }
+        - name: id_supplier
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/PembayaranUtang" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [pembayaran-utang]
+      summary: Buat draft pembayaran utang
+      operationId: createPembayaranUtang
+      description: >
+        Uang yang dibayarkan ke supplier, beserta pembagiannya ke faktur-faktur.
+
+
+        **Tidak ada tahap `DIAJUKAN`**, dan itu keputusan, bukan kelalaian meniru
+        pembelian. Tahap persetujuan di sana ada karena `kartu_stok` append-only:
+        posting yang salah hanya bisa dibalik, dan pembalikannya dinilai pada rata-rata
+        yang sudah bergeser. Alokasi pembayaran tidak begitu — ia bisa dibatalkan dan
+        seluruh cache dihitung ulang persis. Kontrol dua orangnya tetap ada, satu state
+        lebih sedikit: `CASHIER` menyiapkan, `SUPERADMIN` melepas uangnya.
+
+
+        `alokasi` boleh kosong atau tidak dikirim sama sekali. Uang kadang dibayarkan
+        sebelum diputuskan menutup faktur yang mana, dan sisanya mengendap sebagai
+        titipan — aturan yang sama dengan `jumlah_dialokasikan` yang boleh lebih kecil
+        dari `jumlah`.
+
+
+        Dua batas diperiksa dan keduanya pertanyaan yang berbeda: total alokasi tidak
+        boleh melebihi `jumlah` pembayaran, dan setiap alokasi tidak boleh melebihi sisa
+        utang fakturnya. Satu request bisa lolos yang satu dan gagal yang lain.
+
+
+        Fakturnya harus `POSTED` dan milik supplier yang sama. `DRAFT` adalah halaman
+        yang diketik, bukan utang; `BATAL` adalah utang yang ditarik kembali.
+
+
+        `metode: GIRO` mengisi `status_giro` menjadi `BELUM_CAIR` secara otomatis.
+        `tanggal_jatuh_tempo_giro` hanya diterima untuk GIRO.
+
+
+        Nomor digenerate server dengan seri sendiri, `PU/2026/08/0001`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id_supplier, tanggal, metode, jumlah]
+              properties:
+                id_supplier: { type: integer, format: int64, minimum: 1 }
+                tanggal: { type: string, format: date, example: "2026-08-20" }
+                metode: { type: string, enum: [TUNAI, TRANSFER, GIRO] }
+                no_referensi:
+                  type: string
+                  nullable: true
+                  maxLength: 64
+                  description: Nomor transfer, nomor warkat giro, atau nomor kuitansi.
+                nama_bank: { type: string, nullable: true, maxLength: 128 }
+                tanggal_jatuh_tempo_giro:
+                  type: string
+                  format: date
+                  nullable: true
+                  description: "Hanya untuk `metode: GIRO`; ditolak 400 pada metode lain."
+                jumlah:
+                  type: string
+                  description: String desimal, harus lebih dari nol.
+                  example: "400000"
+                keterangan: { type: string, nullable: true, maxLength: 1000 }
+                alokasi:
+                  type: array
+                  maxItems: 500
+                  description: Boleh kosong. Satu faktur hanya boleh muncul sekali.
+                  items: { $ref: "#/components/schemas/PembayaranUtangAlokasiInput" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PembayaranUtang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembayaran-utang/{id}:
+    get:
+      tags: [pembayaran-utang]
+      summary: Detail pembayaran utang beserta alokasinya
+      operationId: getPembayaranUtang
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PembayaranUtang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [pembayaran-utang]
+      summary: Ubah header pembayaran utang
+      operationId: updatePembayaranUtang
+      description: >
+        **Hanya saat `DRAFT`.**
+
+
+        `id_supplier` tidak ada di sini: ia adalah tujuan uangnya, dan mengubahnya akan
+        membuat seluruh alokasi menunjuk faktur supplier lain. `metode` juga tidak,
+        karena ia yang menentukan boleh-tidaknya kolom giro terisi — ganti dengan
+        membatalkan lalu menginput ulang, yang juga bentuk yang akan terlihat di rekening
+        koran.
+
+
+        Menurunkan `jumlah` di bawah yang sudah dialokasikan ditolak 400 dengan menyebut
+        angkanya, bukan dibiarkan gagal di constraint.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggal: { type: string, format: date }
+                no_referensi: { type: string, nullable: true, maxLength: 64 }
+                nama_bank: { type: string, nullable: true, maxLength: 128 }
+                tanggal_jatuh_tempo_giro: { type: string, format: date, nullable: true }
+                jumlah: { type: string }
+                keterangan: { type: string, nullable: true, maxLength: 1000 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PembayaranUtang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembayaran-utang/{id}/alokasi:
+    put:
+      tags: [pembayaran-utang]
+      summary: Ganti seluruh alokasi pembayaran
+      operationId: replacePembayaranUtangAlokasi
+      description: >
+        `PUT`, bukan `PATCH`: alokasinya diganti sekaligus, karena pembagian satu
+        pembayaran ke beberapa faktur adalah satu keputusan, dan suntingan sebagian akan
+        membuat `jumlah_dialokasikan` di header berselisih dengan barisnya sendiri di
+        antara dua request. **Hanya saat `DRAFT`.**
+
+
+        Array kosong diterima dan berarti "jangan alokasikan apa pun" — berbeda dari baris
+        detail dokumen yang tidak boleh kosong. Pembayaran tanpa alokasi adalah titipan
+        yang mengendap di supplier, dan itu keadaan yang nyata.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                alokasi:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/PembayaranUtangAlokasiInput" }
+      responses:
+        "200":
+          description: Replaced
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PembayaranUtang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembayaran-utang/{id}/posting:
+    post:
+      tags: [pembayaran-utang]
+      summary: Sahkan pembayaran dan lunasi fakturnya
+      operationId: postingPembayaranUtang
+      description: >
+        `DRAFT` → `POSTED`. Satu transaksi memeriksa ulang setiap alokasi terhadap sisa
+        utang fakturnya, menutup dokumen, lalu menghitung ulang
+        `pembelian.status_pembayaran` untuk setiap faktur yang disentuhnya.
+
+
+        Pemeriksaan yang menentukan terjadi di sini, di bawah row lock tiap faktur. Yang
+        saat draft hanya memberi error lebih cepat: di antara draft ditulis dan diposting,
+        pembayaran lain atau sebuah retur bisa lebih dulu menghabiskan sisa yang dituju.
+
+
+        **Giro diposting seperti yang lain dan belum melunasi apa pun.** Dokumennya jadi
+        nyata, alokasinya jadi nyata, seluruh cache dihitung ulang — dan untuk giro
+        `BELUM_CAIR` hasilnya membiarkan utangnya tepat di tempatnya. Itu memang
+        maksudnya: kertasnya sudah berpindah tangan, uangnya belum.
+
+
+        Ditolak 400 kalau ada alokasi yang melebihi sisa utang fakturnya, kalau fakturnya
+        bukan `POSTED`, atau kalau fakturnya milik supplier lain.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Posted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PembayaranUtang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembayaran-utang/{id}/batal:
+    post:
+      tags: [pembayaran-utang]
+      summary: Batalkan pembayaran yang sudah diposting
+      operationId: batalPembayaranUtang
+      description: >
+        `POSTED` → `BATAL`. Setiap faktur yang ditutupnya kembali berutang seperti
+        sebelumnya.
+
+
+        Tidak ada dokumen pembalik dan tidak ada yang dihapus — ini satu-satunya tempat
+        modul ini benar-benar lebih sederhana daripada sisi stok. `status_pembayaran`
+        adalah fungsi murni dari baris-baris POSTED, jadi memindahkan dokumen ini keluar
+        dari POSTED lalu menghitung ulang sudah persis. Tidak ada residu penilaian yang
+        tertinggal, tidak seperti pembalikan `kartu_stok`.
+
+
+        Baris alokasinya tetap ada, jadi pembatalannya bisa diaudit: apa yang diklaim
+        dilunasi pembayaran ini tetap terbaca di samping `alasan_batal`.
+
+
+        **Membatalkan pembelian yang punya pembayaran POSTED ditolak 409** — batalkan
+        pembayarannya lebih dulu. Uangnya sudah keluar dari bank, dan ke mana seharusnya
+        uang itu pergi adalah keputusan, bukan langkah aritmetika. Giro yang belum cair
+        ikut memblokir: ia tidak mengurangi utang, tetapi ia kertas yang menunjuk faktur
+        itu dan akan mustahil dijelaskan saat cair.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_batal]
+              properties:
+                alasan_batal: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PembayaranUtang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembayaran-utang/{id}/cair:
+    post:
+      tags: [pembayaran-utang]
+      summary: Catat giro sudah cair di bank
+      operationId: cairkanGiro
+      description: >
+        `status_giro: BELUM_CAIR` → `CAIR`. **Ini momen utangnya benar-benar berkurang**,
+        bukan saat gironya diserahkan. Sampai di sini kertasnya cuma janji, dan
+        memperlakukan janji sebagai pembayaran adalah cara supplier berakhir menagih
+        faktur yang menurut sistem sudah lunas.
+
+
+        Sisa utang setiap faktur diperiksa lagi di sini, dan itu bukan paranoia:
+        alokasinya tidak berarti apa-apa selama giro menggantung, jadi tidak ada yang
+        menahan pembayaran lain melunasi faktur yang sama lebih dulu — dan giro bisa
+        menggantung berminggu-minggu. Kalau itu terjadi, pencairannya ditolak 400 dan
+        gironya tetap `BELUM_CAIR`.
+
+
+        Butuh dokumen `POSTED` dengan `metode: GIRO` dan `status_giro: BELUM_CAIR`. Giro
+        yang sudah cair atau sudah ditolak tidak bisa dicairkan lagi.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tanggal_cair]
+              properties:
+                tanggal_cair:
+                  type: string
+                  format: date
+                  description: Tidak boleh sebelum tanggal pembayarannya.
+                  example: "2026-09-22"
+      responses:
+        "200":
+          description: Cair
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PembayaranUtang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembayaran-utang/{id}/tolak-giro:
+    post:
+      tags: [pembayaran-utang]
+      summary: Catat giro ditolak bank
+      operationId: tolakGiro
+      description: >
+        `status_giro: BELUM_CAIR` → `TOLAK`. Tidak ada yang perlu dikembalikan dan tidak
+        ada cache yang berubah, karena giro yang belum cair memang belum pernah mengurangi
+        utang apa pun. Fakturnya masih terbuka penuh dan masih bisa dibayar dengan cara
+        lain.
+
+
+        `tanggal_cair` tetap kosong: giro yang ditolak tidak punya tanggal cair, dan
+        constraint `pembayaran_utang_tanggal_cair_check` menegakkan itu.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                alasan:
+                  type: string
+                  maxLength: 500
+                  description: Ditambahkan ke `keterangan` dokumen bila dikirim.
+                  example: dana tidak cukup
+      responses:
+        "200":
+          description: Ditolak
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PembayaranUtang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
   /api/v1/ruang:
     get:
       tags: [ruang]
@@ -2113,6 +2550,52 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/supplier/{id}/utang:
+    get:
+      tags: [supplier]
+      summary: Faktur supplier yang masih terbuka
+      operationId: listUtangSupplier
+      description: >
+        Daftar kerja untuk menyusun pembayaran: faktur mana milik supplier ini yang masih
+        punya sisa, dan berapa.
+
+
+        Query, bukan modul — tidak ada tabel dan tidak ada migrasi di belakangnya. Seluruh
+        jawabannya turunan dari dokumen yang memang sudah diposting: total fakturnya,
+        pembayaran yang efektif atasnya, dan kredit yang dihasilkan returnya.
+
+
+        **Diurutkan dari yang paling lama**, berbeda dari setiap list lain di API ini. Ini
+        antrean yang harus dikerjakan, dan faktur yang paling lama menunggu adalah yang
+        berikutnya dibayar.
+
+
+        Supplier yang tidak dikenal menjawab 404; supplier tanpa utang menjawab halaman
+        kosong. Dua fakta yang berbeda.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: termasuk_lunas
+          in: query
+          schema: { type: boolean, default: false }
+          description: >
+            Ikut membawa faktur yang sudah tidak punya sisa. Mati secara default, karena
+            gunanya daftar ini justru yang masih terbuka.
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/UtangSupplier" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "404": { $ref: "#/components/responses/Error" }
 
   /api/v1/role:
     get:
@@ -3183,6 +3666,20 @@ components:
             supplier**, dan bukan angka yang dicatat kartu stok — lihat
             `harga_pokok_satuan_dasar` pada barisnya.
           example: "1000000.00"
+        nilai_kredit_utang:
+          type: string
+          description: >
+            Berapa yang dikreditkan supplier atas barang ini, dan **bukan `total`**.
+            `total` adalah nilai persediaan menurut harga pokok, dan harga pokok memuat
+            porsi ongkir yang dibayar ke ekspedisi — mengkreditkannya berarti memberi
+            supplier uang yang tidak pernah ia terima.
+
+
+            Dihitung `pembelian.total x nilai_faktur_retur / pembelian.subtotal`, jadi
+            diskon nota dan PPN ikut terskala. Nol selama dokumen belum POSTED, dibekukan
+            saat posting, dan tetap tertinggal pada dokumen `BATAL` sebagai catatan berapa
+            yang pernah diklaim — penghitungan ulang utang hanya menjumlahkan retur POSTED.
+          example: "1000000.00"
         status: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
         detail:
           type: array
@@ -3267,6 +3764,154 @@ components:
             ke satuan dasar. Perhatikan bahwa `qty_dasar` tidak ikut: barang yang tidak
             pernah datang tidak bisa dikirim balik. `qty x faktor` wajib bilangan bulat.
           example: "1"
+
+    PembayaranUtang:
+      type: object
+      description: >
+        Uang yang keluar ke supplier. Setiap angka uang adalah string desimal, bukan
+        angka JSON: `NUMERIC(20,2)` lewat float kehilangan sen, dan angka-angka ini yang
+        direkonsiliasi dengan rekening bank.
+
+
+        Statusnya `DRAFT -> POSTED -> BATAL`, **tanpa `DIAJUKAN`**. Tahap persetujuan di
+        `pembelian` ada karena kartu stok append-only sehingga posting yang salah hanya
+        bisa dibalik; alokasi pembayaran bisa dibatalkan dan seluruh cache dihitung ulang
+        persis, jadi menirunya berarti meniru mekanisme tanpa alasannya.
+      properties:
+        id: { type: integer, format: int64 }
+        nomor:
+          type: string
+          description: Digenerate server, seri `PU` yang terpisah dari `BL`, `PS`, dan `RB`.
+          example: PU/2026/08/0001
+        tanggal: { type: string, format: date-time }
+        id_supplier: { type: integer, format: int64 }
+        nama_supplier: { type: string }
+        metode: { type: string, enum: [TUNAI, TRANSFER, GIRO] }
+        no_referensi:
+          type: string
+          nullable: true
+          description: Nomor transfer, nomor warkat giro, atau nomor kuitansi.
+        nama_bank: { type: string, nullable: true }
+        tanggal_jatuh_tempo_giro: { type: string, format: date, nullable: true }
+        tanggal_cair:
+          type: string
+          format: date
+          nullable: true
+          description: Terisi tepat ketika `status_giro` bernilai `CAIR`, ditegakkan CHECK.
+        status_giro:
+          type: string
+          nullable: true
+          enum: [BELUM_CAIR, CAIR, TOLAK]
+          description: >
+            Null untuk metode selain `GIRO`, dan wajib ada untuk `GIRO`.
+
+
+            **Menentukan apakah pembayaran ini mengurangi apa pun.** `BELUM_CAIR` dan
+            `TOLAK` meninggalkan setiap utang tepat di tempatnya — menyerahkan giro tidak
+            menyelesaikan apa pun, yang menyelesaikan adalah giro yang cair.
+        jumlah:
+          type: string
+          description: Uang yang keluar. Harus lebih dari nol.
+          example: "400000.00"
+        jumlah_dialokasikan:
+          type: string
+          description: >
+            Dihitung ulang dari baris alokasi, tidak pernah di-set dari form. **Boleh
+            lebih kecil dari `jumlah`**, dan itu normal: sisanya mengendap sebagai kredit
+            di supplier untuk faktur berikutnya.
+          example: "400000.00"
+        sisa_belum_dialokasikan:
+          type: string
+          description: >
+            `jumlah − jumlah_dialokasikan`. Dilaporkan alih-alih diserahkan ke klien untuk
+            dikurangkan sendiri, karena inilah angka yang menyatakan apakah pembayaran ini
+            masih punya ruang.
+          example: "0.00"
+        status: { type: string, enum: [DRAFT, POSTED, BATAL] }
+        keterangan: { type: string, nullable: true }
+        alokasi:
+          type: array
+          description: Hanya pada endpoint detail. Kuncinya hilang pada list.
+          items: { $ref: "#/components/schemas/PembayaranUtangAlokasi" }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        posted_at: { type: string, format: date-time, nullable: true }
+        dibatalkan_oleh: { type: integer, format: int64, nullable: true }
+        alasan_batal: { type: string, nullable: true }
+
+    PembayaranUtangAlokasi:
+      type: object
+      description: >
+        Satu bagian pembayaran yang ditujukan ke satu faktur. Hubungan pembayaran dengan
+        faktur banyak-ke-banyak, karena itulah alokasi jadi tabel tersendiri.
+      properties:
+        id: { type: integer, format: int64 }
+        id_pembelian: { type: integer, format: int64 }
+        nomor_pembelian: { type: string, example: BL/2026/08/0001 }
+        no_faktur_supplier: { type: string, nullable: true }
+        total_pembelian:
+          type: string
+          description: Keadaan faktur sekarang, supaya layar pembayaran bisa menyebut apa yang ditutupnya.
+          example: "1050000.00"
+        status_pembayaran: { type: string, enum: [BELUM, SEBAGIAN, LUNAS] }
+        jumlah: { type: string, example: "400000.00" }
+        created_at: { type: string, format: date-time }
+
+    PembayaranUtangAlokasiInput:
+      type: object
+      required: [id_pembelian, jumlah]
+      properties:
+        id_pembelian:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Fakturnya harus `POSTED` dan milik supplier yang sama dengan pembayarannya.
+            `DRAFT` cuma kertas yang sudah diketik dan `BATAL` adalah utang yang ditarik
+            kembali; keduanya tidak bisa dibayar.
+
+
+            Satu faktur hanya boleh muncul sekali per pembayaran.
+        jumlah:
+          type: string
+          description: >
+            String desimal, harus lebih dari nol. Tidak boleh melebihi sisa utang faktur
+            itu — yang sudah memperhitungkan alokasi efektif lain dan kredit retur POSTED —
+            dan seluruh alokasi bersama tidak boleh melebihi `jumlah` pembayarannya.
+          example: "400000"
+
+    UtangSupplier:
+      type: object
+      description: >
+        Satu faktur yang masih terbuka: daftar kerja untuk menyusun pembayaran. Seperti
+        riwayat harga beli, ini query dan bukan modul — tidak ada tabel dan tidak ada
+        migrasi di belakangnya.
+      properties:
+        id_pembelian: { type: integer, format: int64 }
+        nomor: { type: string, example: BL/2026/08/0001 }
+        tanggal: { type: string, format: date-time }
+        no_faktur_supplier: { type: string, nullable: true }
+        tanggal_faktur: { type: string, format: date, nullable: true }
+        jenis_pembayaran: { type: string, enum: [TUNAI, KREDIT] }
+        status_pembayaran: { type: string, enum: [BELUM, SEBAGIAN, LUNAS] }
+        total:
+          type: string
+          description: Yang ditagih supplier. Tidak memuat ongkir — itu tagihan ekspedisi.
+          example: "1050000.00"
+        jumlah_dialokasikan:
+          type: string
+          description: >
+            Hanya alokasi **efektif**: dari pembayaran `POSTED`, dan untuk giro hanya yang
+            sudah `CAIR`. Giro yang belum cair tidak dihitung di sini.
+          example: "400000.00"
+        nilai_kredit_retur:
+          type: string
+          description: Jumlah `nilai_kredit_utang` dari retur POSTED atas faktur ini.
+          example: "0.00"
+        sisa_utang:
+          type: string
+          description: "`total − jumlah_dialokasikan − nilai_kredit_retur`."
+          example: "650000.00"
 
     Role:
       type: object

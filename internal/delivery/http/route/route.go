@@ -31,18 +31,19 @@ type RouteConfig struct {
 	// enable the routes without also having something to serve them.
 	DocsController *deliveryhttp.DocsController
 
-	AuthController      *deliveryhttp.AuthController
-	PembelianController *deliveryhttp.PembelianController
-	SusulanController   *deliveryhttp.PenerimaanSusulanController
-	ReturController     *deliveryhttp.ReturPembelianController
-	ProductController   *deliveryhttp.ProductController
-	RuangController     *deliveryhttp.RuangController
-	SatuanController    *deliveryhttp.SatuanController
-	EkspedisiController *deliveryhttp.EkspedisiController
-	SupplierController  *deliveryhttp.SupplierController
-	PelangganController *deliveryhttp.PelangganController
-	RoleController      *deliveryhttp.RoleController
-	UserController      *deliveryhttp.UserController
+	AuthController       *deliveryhttp.AuthController
+	PembelianController  *deliveryhttp.PembelianController
+	SusulanController    *deliveryhttp.PenerimaanSusulanController
+	ReturController      *deliveryhttp.ReturPembelianController
+	PembayaranController *deliveryhttp.PembayaranUtangController
+	ProductController    *deliveryhttp.ProductController
+	RuangController      *deliveryhttp.RuangController
+	SatuanController     *deliveryhttp.SatuanController
+	EkspedisiController  *deliveryhttp.EkspedisiController
+	SupplierController   *deliveryhttp.SupplierController
+	PelangganController  *deliveryhttp.PelangganController
+	RoleController       *deliveryhttp.RoleController
+	UserController       *deliveryhttp.UserController
 }
 
 func (c *RouteConfig) Setup() {
@@ -183,6 +184,26 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/retur-pembelian/:id/tolak", superadmin, c.ReturController.Tolak)
 	api.Post("/retur-pembelian/:id/batal", superadmin, c.ReturController.Batal)
 
+	// pembayaran-utang is the first module that touches no stock at all, so the reason the
+	// three above split by workflow stage does not apply to it — nothing it writes is
+	// append-only, and voiding it recomputes every cache exactly. It still splits, for a
+	// different reason: this is money leaving the bank. CASHIER prepares the document
+	// because it is the money desk; SUPERADMIN releases it, voids it, and decides what
+	// became of a giro.
+	//
+	// CASHIER rather than INVENTARIS is a judgement call and the least settled guard in
+	// this table — supplier payments arguably belong to a PURCHASING or FINANCE role that
+	// does not exist yet. Isu #4 raises exactly that question and leaves it open.
+	api.Get("/pembayaran-utang", c.PembayaranController.List)
+	api.Get("/pembayaran-utang/:id", c.PembayaranController.Get)
+	api.Post("/pembayaran-utang", cashier, c.PembayaranController.Create)
+	api.Patch("/pembayaran-utang/:id", cashier, c.PembayaranController.Update)
+	api.Put("/pembayaran-utang/:id/alokasi", cashier, c.PembayaranController.ReplaceAlokasi)
+	api.Post("/pembayaran-utang/:id/posting", superadmin, c.PembayaranController.Posting)
+	api.Post("/pembayaran-utang/:id/batal", superadmin, c.PembayaranController.Batal)
+	api.Post("/pembayaran-utang/:id/cair", superadmin, c.PembayaranController.Cairkan)
+	api.Post("/pembayaran-utang/:id/tolak-giro", superadmin, c.PembayaranController.TolakGiro)
+
 	api.Get("/satuan", c.SatuanController.List)
 	api.Get("/satuan/:id", c.SatuanController.Get)
 	api.Post("/satuan", inventaris, c.SatuanController.Create)
@@ -195,6 +216,11 @@ func (c *RouteConfig) setupAuthRoute() {
 
 	api.Get("/supplier", c.SupplierController.List)
 	api.Get("/supplier/:id", c.SupplierController.Get)
+
+	// utang is a read, so it follows the read rule and is open to any authenticated caller.
+	// Like riwayat-beli it is the answer falling out of documents that were posted anyway:
+	// which of this supplier's invoices are still open, and for how much.
+	api.Get("/supplier/:id/utang", c.SupplierController.Utang)
 	api.Post("/supplier", inventaris, c.SupplierController.Create)
 	api.Patch("/supplier/:id", inventaris, c.SupplierController.Update)
 

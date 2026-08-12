@@ -43,6 +43,20 @@ type PembelianResponse struct {
 	StatusPenerimaan string `json:"status_penerimaan"`
 	Status           string `json:"status"`
 
+	// Three payable figures, none of them columns of pembelian:
+	//
+	//	jumlah_dialokasikan -- paid against this invoice by POSTED payments. An uncashed
+	//	                       giro is not a payment, so it is not counted here.
+	//	nilai_kredit_retur  -- credited back by POSTED returns. Not the same as a
+	//	                       return's `total`, which is at cost and includes freight.
+	//	sisa_utang          -- total - the two above: what the supplier is still owed.
+	//
+	// status_pembayaran is the cache over sisa_utang, and these are what it is computed
+	// from — reported alongside it so a screen can show why it says what it says.
+	JumlahDialokasikan string `json:"jumlah_dialokasikan"`
+	NilaiKreditRetur   string `json:"nilai_kredit_retur"`
+	SisaUtang          string `json:"sisa_utang"`
+
 	// Detail is filled on detail reads only; a list would need a query per row.
 	// Always an array when present, never null.
 	Detail []PembelianDetailResponse `json:"detail,omitempty"`
