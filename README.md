@@ -116,6 +116,11 @@ cp config.example.json config.json
 
 Isi `database.password` **dan `jwt.secret`** di `config.json`. File ini masuk `.gitignore` dan tidak pernah ikut ter-commit — karena itu **setiap kunci config baru wajib ditambahkan juga ke `config.example.json`**, kalau tidak clone baru kehilangan kunci itu tanpa suara.
 
+> [!IMPORTANT]
+> Contohnya menunjuk **`127.0.0.1:5433`**, yaitu PostgreSQL milik compose, karena itu kombinasi yang paling sering dipakai: `go run` di host sambil databasenya dibiarkan jalan di Docker. **Kalau Anda memasang PostgreSQL sendiri**, kembalikan `database.port` ke `5432` — dan ingat instalasi lokal biasanya memang sudah memegang port itu, yang justru alasan compose memilih 5433.
+>
+> Host-nya ditulis `127.0.0.1`, bukan `localhost`, dan itu bukan gaya penulisan. Di Windows dengan Docker Desktop, `localhost` bisa resolve ke IPv6 `::1` lalu menggantung sampai timeout alih-alih menolak, sehingga gejalanya menyerupai database yang mati. Sama berlakunya untuk `redis.host`.
+
 `jwt.secret` kosong di contohnya dan **tidak punya default**, jadi server berhenti saat boot sampai diisi, minimal 32 karakter:
 
 ```bash
@@ -132,10 +137,12 @@ DATABASE_HOST=db.internal DATABASE_PASSWORD=rahasia WEB_PORT=8080 go run ./cmd/w
 
 ### 3. Database
 
+Langkah ini untuk PostgreSQL yang Anda pasang sendiri — **sesuaikan portnya dengan yang dipakai `config.json`**. Kalau databasenya dibiarkan jalan di compose, seluruh blok ini tidak perlu: `docker compose up` sudah memigrasi dan menyemai keduanya, `grand_erp` maupun `grand_erp_test`.
+
 ```bash
 createdb grand_erp
 
-export DSN="postgres://postgres:PASSWORD@localhost:5432/grand_erp?sslmode=disable"
+export DSN="postgres://postgres:PASSWORD@127.0.0.1:5432/grand_erp?sslmode=disable"
 migrate -path db/migrations_postgres -database "$DSN" up
 
 psql "$DSN" -f db/seeder_postgres/001_ruang.sql
