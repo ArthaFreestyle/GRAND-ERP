@@ -43,6 +43,20 @@ type PembelianResponse struct {
 	StatusPenerimaan string `json:"status_penerimaan"`
 	Status           string `json:"status"`
 
+	// Three payable figures, none of them columns of pembelian:
+	//
+	//	jumlah_dialokasikan -- paid against this invoice by POSTED payments. An uncashed
+	//	                       giro is not a payment, so it is not counted here.
+	//	nilai_kredit_retur  -- credited back by POSTED returns. Not the same as a
+	//	                       return's `total`, which is at cost and includes freight.
+	//	sisa_utang          -- total - the two above: what the supplier is still owed.
+	//
+	// status_pembayaran is the cache over sisa_utang, and these are what it is computed
+	// from — reported alongside it so a screen can show why it says what it says.
+	JumlahDialokasikan string `json:"jumlah_dialokasikan"`
+	NilaiKreditRetur   string `json:"nilai_kredit_retur"`
+	SisaUtang          string `json:"sisa_utang"`
+
 	// Detail is filled on detail reads only; a list would need a query per row.
 	// Always an array when present, never null.
 	Detail []PembelianDetailResponse `json:"detail,omitempty"`
@@ -67,15 +81,22 @@ type PembelianResponse struct {
 // drives the payable; qty_diterima/qty_diterima_dasar is what came out of the box
 // and drives stock. The *_dasar half of each pair is in the product's base unit.
 //
-// Three derived quantities, and they are not the same question:
+// Five derived quantities, and they are not the same question:
 //
 //	selisih_dasar     = qty_dasar - qty_diterima_dasar   -- short on the first delivery
 //	qty_susulan_dasar = sum of POSTED follow-up receipts -- turned up later
 //	sisa_dasar        = selisih_dasar - qty_susulan_dasar -- still owed today
+//	qty_retur_dasar   = sum of POSTED returns            -- went back to the supplier
+//	qty_dapat_diretur = received + susulan - retur       -- may still go back
 //
 // selisih_dasar never changes once the document is posted; sisa_dasar shrinks as
 // follow-up receipts arrive. Reported rather than left to the client to subtract,
 // because the whole receiving screen is built around them.
+//
+// The last two are a separate axis from the first three, and mixing them is the
+// mistake to avoid: goods returned were still received, so a return neither reopens
+// what the supplier owes nor entitles anyone to a follow-up shipment. sisa_dasar and
+// qty_dapat_diretur can be nonzero at the same time on the same line.
 type PembelianDetailResponse struct {
 	ID          int64  `json:"id"`
 	IDProduct   int64  `json:"id_product"`
@@ -92,6 +113,8 @@ type PembelianDetailResponse struct {
 	QtySusulanDasar  int64  `json:"qty_susulan_dasar"`
 	SelisihDasar     int64  `json:"selisih_dasar"`
 	SisaDasar        int64  `json:"sisa_dasar"`
+	QtyReturDasar    int64  `json:"qty_retur_dasar"`
+	QtyDapatDiretur  int64  `json:"qty_dapat_diretur"`
 	NamaSatuanDasar  string `json:"nama_satuan_dasar,omitempty"`
 
 	HargaSatuanInput string `json:"harga_satuan_input"`

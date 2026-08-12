@@ -16,8 +16,9 @@ const (
 // document produced a row, which is what makes a cancellation able to find the rows
 // it has to reverse.
 const (
-	RefTablePembelian = "pembelian"
-	RefTableSusulan   = "penerimaan_susulan"
+	RefTablePembelian      = "pembelian"
+	RefTableSusulan        = "penerimaan_susulan"
+	RefTableReturPembelian = "retur_pembelian"
 )
 
 // KartuStok maps the kartu_stok table: the only source of truth for stock and

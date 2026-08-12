@@ -20,6 +20,11 @@ type SupplierUseCase struct {
 	Log                *logrus.Logger
 	Validate           *validator.Validate
 	SupplierRepository *repository.SupplierRepository
+	// PembelianRepository is borrowed for GET /supplier/{id}/utang, the same way
+	// ProductUseCase borrows it for riwayat-beli: the query is over pembelian's tables, so
+	// it stays in that module's repository, and only the resource it answers for is a
+	// supplier's.
+	PembelianRepository *repository.PembelianRepository
 }
 
 func NewSupplierUseCase(
@@ -27,12 +32,14 @@ func NewSupplierUseCase(
 	log *logrus.Logger,
 	validate *validator.Validate,
 	supplierRepository *repository.SupplierRepository,
+	pembelianRepository *repository.PembelianRepository,
 ) *SupplierUseCase {
 	return &SupplierUseCase{
-		DB:                 db,
-		Log:                log,
-		Validate:           validate,
-		SupplierRepository: supplierRepository,
+		DB:                  db,
+		Log:                 log,
+		Validate:            validate,
+		SupplierRepository:  supplierRepository,
+		PembelianRepository: pembelianRepository,
 	}
 }
 
@@ -177,4 +184,35 @@ func (c *SupplierUseCase) Search(ctx context.Context, request *model.ListSupplie
 	}
 
 	return converter.SupplierToResponses(list), pageMetadata(&request.PageRequest, total), nil
+}
+
+// Utang answers which of a supplier's invoices are still open, and for how much.
+//
+// This is isu #4 fase 6, and like riwayat-beli it is a read rather than a module: no table,
+// no migration, nothing to keep in step. The working list for deciding what to pay is
+// entirely derivable from documents that were posted anyway — the invoice total, the
+// payments effectively made against it, and the credits its returns produced.
+//
+// The supplier is looked up first so an unknown id answers 404 rather than an empty page.
+// Those are different facts — "this supplier owes nothing" and "there is no such supplier" —
+// and a client that cannot tell them apart will show the wrong one.
+func (c *SupplierUseCase) Utang(ctx context.Context, request *model.ListUtangSupplierRequest) ([]model.UtangSupplierResponse, *model.PageMetadata, error) {
+	request.Normalize()
+
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, nil, err
+	}
+
+	if _, err := c.SupplierRepository.FindByID(ctx, c.DB, request.IDSupplier); err != nil {
+		return nil, nil, notFoundOnNoRows(err, "supplier not found")
+	}
+
+	list, total, err := c.PembelianRepository.FindUtangSupplier(
+		ctx, c.DB, request.IDSupplier, request.TermasukLunas, request.Size, request.Offset(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return converter.UtangSupplierToResponses(list), pageMetadata(&request.PageRequest, total), nil
 }

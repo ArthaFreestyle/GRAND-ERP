@@ -518,6 +518,34 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 		return nil, model.Conflict("batalkan penerimaan susulannya lebih dulu")
 	}
 
+	// A posted return has to be voided first, and the reason compounds. This
+	// cancellation reverses the full received quantity, but the return already took part
+	// of it out — so the reversal would drive the balance negative and be refused by the
+	// kartu_stok trigger with a message about stock rather than about the return. Even
+	// where the balance allows it, the return would be left pointing at a BATAL purchase
+	// whose reversal already accounted for those goods: the same shortfall twice.
+	adaRetur, err := c.PembelianRepository.HasPostedRetur(ctx, tx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if adaRetur {
+		return nil, model.Conflict("batalkan retur pembeliannya lebih dulu")
+	}
+
+	// A posted payment has to be voided first, and unlike the two above there is nothing
+	// automatic that could clean up after it. The money left the bank; the allocation would
+	// be left pointing at a document that no longer claims to be owed anything, and where
+	// that payment should go instead is a decision rather than an arithmetic step. An
+	// uncashed giro counts too: it reduces no payable, but it is still paper pointed at
+	// this invoice, and it would be unexplainable when it clears.
+	adaPembayaran, err := c.PembelianRepository.HasPostedAlokasi(ctx, tx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if adaPembayaran {
+		return nil, model.Conflict("batalkan pembayaran utang yang dialokasikan ke faktur ini lebih dulu")
+	}
+
 	asal, err := c.KartuStokRepository.FindByRef(ctx, tx, entity.RefTablePembelian, request.ID)
 	if err != nil {
 		return nil, err

@@ -61,16 +61,18 @@ func TestMain(m *testing.M) {
 
 // app carries the usecases under test.
 type app struct {
-	satuan    *usecase.SatuanUseCase
-	ekspedisi *usecase.EkspedisiUseCase
-	supplier  *usecase.SupplierUseCase
-	pelanggan *usecase.PelangganUseCase
-	ruang     *usecase.RuangUseCase
-	role      *usecase.RoleUseCase
-	product   *usecase.ProductUseCase
-	user      *usecase.UserUseCase
-	pembelian *usecase.PembelianUseCase
-	susulan   *usecase.PenerimaanSusulanUseCase
+	satuan     *usecase.SatuanUseCase
+	ekspedisi  *usecase.EkspedisiUseCase
+	supplier   *usecase.SupplierUseCase
+	pelanggan  *usecase.PelangganUseCase
+	ruang      *usecase.RuangUseCase
+	role       *usecase.RoleUseCase
+	product    *usecase.ProductUseCase
+	user       *usecase.UserUseCase
+	pembelian  *usecase.PembelianUseCase
+	susulan    *usecase.PenerimaanSusulanUseCase
+	retur      *usecase.ReturPembelianUseCase
+	pembayaran *usecase.PembayaranUtangUseCase
 }
 
 // newApp wires the same graph config.Bootstrap does, minus Fiber, and empties the
@@ -98,7 +100,7 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate, repository.NewEkspedisiRepository(),
 		),
 		supplier: usecase.NewSupplierUseCase(
-			testDB, log, validate, repository.NewSupplierRepository(),
+			testDB, log, validate, repository.NewSupplierRepository(), pembelianRepository,
 		),
 		pelanggan: usecase.NewPelangganUseCase(
 			testDB, log, validate, repository.NewPelangganRepository(),
@@ -125,6 +127,15 @@ func newApp(t *testing.T) *app {
 			repository.NewPenerimaanSusulanRepository(), pembelianRepository,
 			productRepository, kartuStokRepository, counterRepository,
 		),
+		retur: usecase.NewReturPembelianUseCase(
+			testDB, log, validate,
+			repository.NewReturPembelianRepository(), pembelianRepository,
+			productRepository, kartuStokRepository, counterRepository,
+		),
+		pembayaran: usecase.NewPembayaranUtangUseCase(
+			testDB, log, validate,
+			repository.NewPembayaranUtangRepository(), pembelianRepository, counterRepository,
+		),
 	}
 }
 
@@ -143,6 +154,8 @@ func requireDB(t *testing.T) {
 // users comes after the master tables because every one of them has a created_by
 // pointing at it. kartu_stok goes first of all — it references product, ruang,
 // satuan, and users, and pembelian_detail rows are what its postings describe.
+// penerimaan_susulan_detail and retur_pembelian_detail both point at pembelian_detail,
+// so both come before it.
 //
 // kartu_stok also refuses DELETE, by the same append-only trigger, so the trigger is
 // switched off for the length of the wipe. That is a licence a test database gets
@@ -166,6 +179,10 @@ func truncateMaster(t *testing.T) {
 		// go before it.
 		"kartu_stok",
 		"penerimaan_susulan_detail", "penerimaan_susulan",
+		"retur_pembelian_detail", "retur_pembelian",
+		// pembayaran_utang_alokasi references pembelian, and pembayaran_utang references
+		// supplier and users, so both come before pembelian.
+		"pembayaran_utang_alokasi", "pembayaran_utang",
 		"pembelian_detail", "pembelian", "document_counter",
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.

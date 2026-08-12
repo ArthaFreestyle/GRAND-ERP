@@ -31,17 +31,19 @@ type RouteConfig struct {
 	// enable the routes without also having something to serve them.
 	DocsController *deliveryhttp.DocsController
 
-	AuthController      *deliveryhttp.AuthController
-	PembelianController *deliveryhttp.PembelianController
-	SusulanController   *deliveryhttp.PenerimaanSusulanController
-	ProductController   *deliveryhttp.ProductController
-	RuangController     *deliveryhttp.RuangController
-	SatuanController    *deliveryhttp.SatuanController
-	EkspedisiController *deliveryhttp.EkspedisiController
-	SupplierController  *deliveryhttp.SupplierController
-	PelangganController *deliveryhttp.PelangganController
-	RoleController      *deliveryhttp.RoleController
-	UserController      *deliveryhttp.UserController
+	AuthController       *deliveryhttp.AuthController
+	PembelianController  *deliveryhttp.PembelianController
+	SusulanController    *deliveryhttp.PenerimaanSusulanController
+	ReturController      *deliveryhttp.ReturPembelianController
+	PembayaranController *deliveryhttp.PembayaranUtangController
+	ProductController    *deliveryhttp.ProductController
+	RuangController      *deliveryhttp.RuangController
+	SatuanController     *deliveryhttp.SatuanController
+	EkspedisiController  *deliveryhttp.EkspedisiController
+	SupplierController   *deliveryhttp.SupplierController
+	PelangganController  *deliveryhttp.PelangganController
+	RoleController       *deliveryhttp.RoleController
+	UserController       *deliveryhttp.UserController
 }
 
 func (c *RouteConfig) Setup() {
@@ -88,8 +90,8 @@ func (c *RouteConfig) setupGuestRoute() {
 //   - user and role are SUPERADMIN-only, reads included. Listing accounts and their
 //     privileges is itself sensitive, and being able to write there is a privilege
 //     escalation path: grant yourself SUPERADMIN and the rest follows.
-//   - pembelian splits along its approval flow rather than by module: see the
-//     comment above those routes.
+//   - pembelian, penerimaan-susulan, and retur-pembelian split along their approval
+//     flow rather than by module: see the comment above those routes.
 //
 // This split is a starting assumption drawn from the three role names, not something
 // derived from a spec. Adjust the guards as the real division of work becomes clear.
@@ -166,6 +168,42 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/penerimaan-susulan/:id/tolak", superadmin, c.SusulanController.Tolak)
 	api.Post("/penerimaan-susulan/:id/batal", superadmin, c.SusulanController.Batal)
 
+	// retur-pembelian carries the same split, and here the case for it is strongest:
+	// this is the one document so far whose posting takes goods *out* of stock, so a
+	// wrong one can drive a balance to a figure that no longer matches the shelf, and
+	// its reversal is valued at whatever the moving average has become. Nothing here
+	// reduces what the supplier is owed either — the credit note is settled with them on
+	// paper, and the payable side is fase 6.
+	api.Get("/retur-pembelian", c.ReturController.List)
+	api.Get("/retur-pembelian/:id", c.ReturController.Get)
+	api.Post("/retur-pembelian", inventaris, c.ReturController.Create)
+	api.Patch("/retur-pembelian/:id", inventaris, c.ReturController.Update)
+	api.Put("/retur-pembelian/:id/detail", inventaris, c.ReturController.ReplaceDetail)
+	api.Post("/retur-pembelian/:id/ajukan", inventaris, c.ReturController.Ajukan)
+	api.Post("/retur-pembelian/:id/posting", superadmin, c.ReturController.Posting)
+	api.Post("/retur-pembelian/:id/tolak", superadmin, c.ReturController.Tolak)
+	api.Post("/retur-pembelian/:id/batal", superadmin, c.ReturController.Batal)
+
+	// pembayaran-utang is the first module that touches no stock at all, so the reason the
+	// three above split by workflow stage does not apply to it — nothing it writes is
+	// append-only, and voiding it recomputes every cache exactly. It still splits, for a
+	// different reason: this is money leaving the bank. CASHIER prepares the document
+	// because it is the money desk; SUPERADMIN releases it, voids it, and decides what
+	// became of a giro.
+	//
+	// CASHIER rather than INVENTARIS is a judgement call and the least settled guard in
+	// this table — supplier payments arguably belong to a PURCHASING or FINANCE role that
+	// does not exist yet. Isu #4 raises exactly that question and leaves it open.
+	api.Get("/pembayaran-utang", c.PembayaranController.List)
+	api.Get("/pembayaran-utang/:id", c.PembayaranController.Get)
+	api.Post("/pembayaran-utang", cashier, c.PembayaranController.Create)
+	api.Patch("/pembayaran-utang/:id", cashier, c.PembayaranController.Update)
+	api.Put("/pembayaran-utang/:id/alokasi", cashier, c.PembayaranController.ReplaceAlokasi)
+	api.Post("/pembayaran-utang/:id/posting", superadmin, c.PembayaranController.Posting)
+	api.Post("/pembayaran-utang/:id/batal", superadmin, c.PembayaranController.Batal)
+	api.Post("/pembayaran-utang/:id/cair", superadmin, c.PembayaranController.Cairkan)
+	api.Post("/pembayaran-utang/:id/tolak-giro", superadmin, c.PembayaranController.TolakGiro)
+
 	api.Get("/satuan", c.SatuanController.List)
 	api.Get("/satuan/:id", c.SatuanController.Get)
 	api.Post("/satuan", inventaris, c.SatuanController.Create)
@@ -178,6 +216,11 @@ func (c *RouteConfig) setupAuthRoute() {
 
 	api.Get("/supplier", c.SupplierController.List)
 	api.Get("/supplier/:id", c.SupplierController.Get)
+
+	// utang is a read, so it follows the read rule and is open to any authenticated caller.
+	// Like riwayat-beli it is the answer falling out of documents that were posted anyway:
+	// which of this supplier's invoices are still open, and for how much.
+	api.Get("/supplier/:id/utang", c.SupplierController.Utang)
 	api.Post("/supplier", inventaris, c.SupplierController.Create)
 	api.Patch("/supplier/:id", inventaris, c.SupplierController.Update)
 

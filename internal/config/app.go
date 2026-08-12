@@ -44,6 +44,8 @@ func Bootstrap(config *BootstrapConfig) {
 	counterRepository := repository.NewDocumentCounterRepository()
 	pembelianRepository := repository.NewPembelianRepository()
 	susulanRepository := repository.NewPenerimaanSusulanRepository()
+	returRepository := repository.NewReturPembelianRepository()
+	pembayaranRepository := repository.NewPembayaranUtangRepository()
 
 	ruangUseCase := usecase.NewRuangUseCase(
 		config.DB, config.Log, config.Validate, ruangRepository,
@@ -54,8 +56,11 @@ func Bootstrap(config *BootstrapConfig) {
 	ekspedisiUseCase := usecase.NewEkspedisiUseCase(
 		config.DB, config.Log, config.Validate, ekspedisiRepository,
 	)
+	// SupplierUseCase borrows PembelianRepository for GET /supplier/{id}/utang, the same way
+	// ProductUseCase does for riwayat-beli: the outstanding-payables query is SQL over
+	// pembelian's tables, so it stays in that module's repository.
 	supplierUseCase := usecase.NewSupplierUseCase(
-		config.DB, config.Log, config.Validate, supplierRepository,
+		config.DB, config.Log, config.Validate, supplierRepository, pembelianRepository,
 	)
 	pelangganUseCase := usecase.NewPelangganUseCase(
 		config.DB, config.Log, config.Validate, pelangganRepository,
@@ -87,6 +92,25 @@ func Bootstrap(config *BootstrapConfig) {
 		susulanRepository, pembelianRepository, productRepository,
 		kartuStokRepository, counterRepository,
 	)
+	// ReturPembelianUseCase takes the same five as the follow-up receipt above, and for
+	// the same reasons — it is the mirror document. It reads the purchase's lines for
+	// the cost to copy and locks the purchase to serialise returns against each other.
+	// What it does NOT do is rewrite status_penerimaan: sending goods back does not make
+	// a delivery incomplete.
+	returUseCase := usecase.NewReturPembelianUseCase(
+		config.DB, config.Log, config.Validate,
+		returRepository, pembelianRepository, productRepository,
+		kartuStokRepository, counterRepository,
+	)
+	// PembayaranUtangUseCase is the first transaction usecase that needs no
+	// KartuStokRepository at all: money moving to a supplier changes no stock. It reaches
+	// into pembelian to lock each invoice it allocates against, read what that invoice
+	// still owes, and rewrite its status_pembayaran — which is a cache the purchase cannot
+	// maintain for itself once it is POSTED.
+	pembayaranUseCase := usecase.NewPembayaranUtangUseCase(
+		config.DB, config.Log, config.Validate,
+		pembayaranRepository, pembelianRepository, counterRepository,
+	)
 	// Fails the process at boot when jwt.secret is missing or too short, rather than
 	// at the first login attempt.
 	authConfig := NewAuthConfig(config.Config, config.Log)
@@ -109,6 +133,8 @@ func Bootstrap(config *BootstrapConfig) {
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
 	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
 	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
+	returController := deliveryhttp.NewReturPembelianController(config.Log, returUseCase)
+	pembayaranController := deliveryhttp.NewPembayaranUtangController(config.Log, pembayaranUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
 
@@ -121,20 +147,22 @@ func Bootstrap(config *BootstrapConfig) {
 	}
 
 	routeConfig := route.RouteConfig{
-		App:                 config.App,
-		AuthUseCase:         authUseCase,
-		DocsController:      docsController,
-		AuthController:      authController,
-		PembelianController: pembelianController,
-		SusulanController:   susulanController,
-		ProductController:   productController,
-		RuangController:     ruangController,
-		SatuanController:    satuanController,
-		EkspedisiController: ekspedisiController,
-		SupplierController:  supplierController,
-		PelangganController: pelangganController,
-		RoleController:      roleController,
-		UserController:      userController,
+		App:                  config.App,
+		AuthUseCase:          authUseCase,
+		DocsController:       docsController,
+		AuthController:       authController,
+		PembelianController:  pembelianController,
+		SusulanController:    susulanController,
+		ReturController:      returController,
+		PembayaranController: pembayaranController,
+		ProductController:    productController,
+		RuangController:      ruangController,
+		SatuanController:     satuanController,
+		EkspedisiController:  ekspedisiController,
+		SupplierController:   supplierController,
+		PelangganController:  pelangganController,
+		RoleController:       roleController,
+		UserController:       userController,
 	}
 	routeConfig.Setup()
 }

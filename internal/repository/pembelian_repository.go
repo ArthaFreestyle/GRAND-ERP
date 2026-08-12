@@ -39,7 +39,48 @@ const pembelianReadColumns = `p.id, p.nomor, p.tanggal, p.id_supplier, p.id_ruan
 	p.ditanggung_supplier, p.metode_alokasi_angkut, p.jenis_pembayaran,
 	p.status_pembayaran, p.status_penerimaan, p.status, p.created_by, p.created_at,
 	p.diajukan_oleh, p.diajukan_pada, p.disetujui_oleh, p.disetujui_pada, p.posted_at,
-	p.dibatalkan_oleh, p.alasan_batal, p.alasan_tolak, s.nama, r.nama_ruang`
+	p.dibatalkan_oleh, p.alasan_batal, p.alasan_tolak, s.nama, r.nama_ruang,
+	(` + pembelianAlokasiEfektif + `)::TEXT, (` + pembelianKreditRetur + `)::TEXT`
+
+// pembelianAlokasiEfektif totals what has actually been paid against an invoice.
+//
+// "Effective" is doing real work in that name. A POSTED payment counts, except a giro
+// that has not cleared: **an uncashed giro is not a payment.** Counting one would mark an
+// invoice settled on the strength of a promise, and the supplier would go on chasing a
+// debt the system believes is gone. A bounced giro (TOLAK) never counts either, and needs
+// no reversal precisely because it never counted.
+//
+// A correlated subquery rather than a grouped LEFT JOIN, for the same reason
+// pembelianDetailSusulan is one: it is driven by the outer rows and uses
+// pembayaran_utang_alokasi_pembelian_idx, so it costs one index lookup per invoice
+// instead of aggregating both tables before joining.
+//
+// Correlated on the alias `p`, so every query using it has to name the purchase table
+// `p` — pembelianFrom, RecalculateStatusPembayaran, and FindUtangSupplier all do.
+//
+// It yields NUMERIC, not text: the fallback is cast to NUMERIC(20,2) rather than left as
+// the integer literal 0, so an invoice nobody has paid reports "0.00" like every other money
+// field instead of a bare "0". Callers that want text add their own ::TEXT.
+const pembelianAlokasiEfektif = `COALESCE((
+		SELECT SUM(pu_a.jumlah)
+		FROM pembayaran_utang_alokasi pu_a
+		JOIN pembayaran_utang pu ON pu.id = pu_a.id_pembayaran_utang
+		WHERE pu_a.id_pembelian = p.id
+		  AND pu.status = 'POSTED'
+		  AND (pu.metode <> 'GIRO' OR pu.status_giro = 'CAIR')
+	), 0)::NUMERIC(20, 2)`
+
+// pembelianKreditRetur totals what POSTED returns credit back against an invoice.
+//
+// It reads nilai_kredit_utang, **not** retur_pembelian.total. The two are different
+// figures on purpose: total is the inventory value at cost and cost carries the freight
+// share paid to the carrier, which the supplier never received. Subtracting total from a
+// payable would credit money that went to someone else. See migration 000015.
+const pembelianKreditRetur = `COALESCE((
+		SELECT SUM(rp.nilai_kredit_utang)
+		FROM retur_pembelian rp
+		WHERE rp.id_pembelian = p.id AND rp.status = 'POSTED'
+	), 0)::NUMERIC(20, 2)`
 
 // pembelianFrom joins INNER: id_supplier and id_ruang are both NOT NULL and both
 // carry a foreign key, so a purchase without either cannot exist. An outer join
@@ -72,7 +113,8 @@ const pembelianFilter = `
 // because a line shows both ("2 DUS = 24 PCS").
 const pembelianDetailReadColumns = `d.id, d.id_pembelian, d.id_product, d.qty_faktur::TEXT,
 	d.qty_diterima::TEXT, d.id_satuan_input, d.faktor_konversi, d.qty_dasar,
-	d.qty_diterima_dasar, ` + pembelianDetailSusulan + `, d.harga_satuan_input::TEXT,
+	d.qty_diterima_dasar, ` + pembelianDetailSusulan + `, ` + pembelianDetailRetur + `,
+	d.harga_satuan_input::TEXT,
 	d.diskon_baris::TEXT, d.subtotal::TEXT, d.jumlah_koli::TEXT, d.alokasi_biaya::TEXT,
 	d.harga_pokok_satuan_dasar::TEXT, d.keterangan_selisih,
 	pr.nama, pr.kode_barang, si.nama, sd.nama`
@@ -92,6 +134,24 @@ const pembelianDetailSusulan = `COALESCE((
 		FROM penerimaan_susulan_detail ps_d
 		JOIN penerimaan_susulan ps ON ps.id = ps_d.id_penerimaan_susulan
 		WHERE ps_d.id_pembelian_detail = d.id AND ps.status = 'POSTED'
+	), 0)`
+
+// pembelianDetailRetur totals the returns already posted against a line. Declared
+// alongside pembelianDetailSusulan and for the same reasons: it is a correlated
+// subquery driven by the outer rows, using
+// retur_pembelian_detail_pembelian_detail_idx, and only POSTED documents count — a
+// draft return is a packing list, not a shipment, and letting one reduce the figure
+// would let an abandoned draft hide goods that are still on the shelf.
+//
+// What may still go back is qty_diterima_dasar + Σ susulan − Σ retur. Note that this
+// is a different question from the outstanding quantity: goods returned were still
+// received, so a return neither reopens the supplier's obligation to deliver nor
+// entitles the buyer to a follow-up shipment.
+const pembelianDetailRetur = `COALESCE((
+		SELECT SUM(rp_d.qty_dasar)
+		FROM retur_pembelian_detail rp_d
+		JOIN retur_pembelian rp ON rp.id = rp_d.id_retur_pembelian
+		WHERE rp_d.id_pembelian_detail = d.id AND rp.status = 'POSTED'
 	), 0)`
 
 const pembelianDetailFrom = `
@@ -492,6 +552,7 @@ func (r *PembelianRepository) FindDetail(ctx context.Context, db DBTX, idPembeli
 			&detail.ID, &detail.IDPembelian, &detail.IDProduct, &detail.QtyFaktur,
 			&detail.QtyDiterima, &detail.IDSatuanInput, &detail.FaktorKonversi,
 			&detail.QtyDasar, &detail.QtyDiterimaDasar, &detail.QtySusulanDasar,
+			&detail.QtyReturDasar,
 			&detail.HargaSatuanInput,
 			&detail.DiskonBaris, &detail.Subtotal, &detail.JumlahKoli,
 			&detail.AlokasiBiaya, &detail.HargaPokokSatuanDasar, &detail.KeteranganSelisih,
@@ -525,6 +586,7 @@ func (r *PembelianRepository) FindDetailByID(ctx context.Context, db DBTX, id in
 		&detail.ID, &detail.IDPembelian, &detail.IDProduct, &detail.QtyFaktur,
 		&detail.QtyDiterima, &detail.IDSatuanInput, &detail.FaktorKonversi,
 		&detail.QtyDasar, &detail.QtyDiterimaDasar, &detail.QtySusulanDasar,
+		&detail.QtyReturDasar,
 		&detail.HargaSatuanInput,
 		&detail.DiskonBaris, &detail.Subtotal, &detail.JumlahKoli,
 		&detail.AlokasiBiaya, &detail.HargaPokokSatuanDasar, &detail.KeteranganSelisih,
@@ -587,6 +649,200 @@ func (r *PembelianRepository) HasPostedSusulan(ctx context.Context, db DBTX, idP
 	}
 
 	return exists, nil
+}
+
+// HasPostedRetur reports whether a return has already been posted against a purchase.
+//
+// Cancelling the purchase must be refused while one exists, for two reasons that
+// compound. The cancellation reverses the full received quantity, but the return has
+// already taken part of it out — so the reversal would drive the balance negative and
+// be rejected by the kartu_stok trigger with a message about stock rather than about
+// the return. And even where the balance happens to allow it, the return would be left
+// pointing at a BATAL purchase whose own reversal already accounted for those goods,
+// which is the same shortfall counted twice. Void the return first.
+func (r *PembelianRepository) HasPostedRetur(ctx context.Context, db DBTX, idPembelian int64) (bool, error) {
+	const query = `
+		SELECT EXISTS (
+			SELECT 1 FROM retur_pembelian
+			WHERE id_pembelian = $1 AND status = 'POSTED'
+		)`
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, idPembelian).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check retur_pembelian POSTED: %w", err)
+	}
+
+	return exists, nil
+}
+
+// HasPostedAlokasi reports whether a POSTED payment allocates anything to a purchase.
+//
+// Cancelling the purchase must be refused while one exists. The payment is real money
+// that left the bank, and it would be left pointing at a document that no longer claims
+// to be owed anything — the supplier's ledger and ours would disagree with no record
+// saying why. Unlike the stock side there is nothing to reverse automatically either: the
+// money is gone, and where it should go instead is a decision, not an arithmetic step.
+//
+// It counts a POSTED payment whatever its giro status. An uncashed giro does not reduce
+// the payable, but it is still a document pointed at this invoice, and cancelling the
+// invoice under it would leave the giro unexplainable when it clears.
+func (r *PembelianRepository) HasPostedAlokasi(ctx context.Context, db DBTX, idPembelian int64) (bool, error) {
+	const query = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pembayaran_utang_alokasi a
+			JOIN pembayaran_utang pu ON pu.id = a.id_pembayaran_utang
+			WHERE a.id_pembelian = $1 AND pu.status = 'POSTED'
+		)`
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, idPembelian).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check pembayaran_utang alokasi POSTED: %w", err)
+	}
+
+	return exists, nil
+}
+
+// SisaUtang is what a purchase invoice still owes, and the three figures it comes from.
+type SisaUtang struct {
+	IDSupplier         int64
+	Status             string
+	Total              string
+	JumlahDialokasikan string
+	NilaiKreditRetur   string
+}
+
+// FindSisaUtang reads an invoice's payable position.
+//
+// Call it **after** taking the row lock with LockByID, never instead of it. The lock is
+// what makes the answer usable: two payments can otherwise both read the same remaining
+// balance and both allocate against it, and the sum of allocations would quietly exceed
+// what was owed. Holding the purchase's row lock forces them to queue, because every
+// path that changes this invoice's payable takes the same lock first.
+func (r *PembelianRepository) FindSisaUtang(ctx context.Context, db DBTX, idPembelian int64) (*SisaUtang, error) {
+	const query = `
+		SELECT p.id_supplier, p.status, p.total::TEXT,
+		       (` + pembelianAlokasiEfektif + `)::TEXT, (` + pembelianKreditRetur + `)::TEXT
+		FROM pembelian p
+		WHERE p.id = $1`
+
+	sisa := new(SisaUtang)
+
+	err := db.QueryRowContext(ctx, query, idPembelian).Scan(
+		&sisa.IDSupplier, &sisa.Status, &sisa.Total,
+		&sisa.JumlahDialokasikan, &sisa.NilaiKreditRetur,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return sisa, nil
+}
+
+// RecalculateStatusPembayaran rebuilds the payment cache from POSTED allocations and
+// POSTED returns.
+//
+// status_pembayaran follows the same rule as status_penerimaan: always recomputed, never
+// set from a form. A cache a form can write is a second source of truth.
+//
+// One statement, so there is no window where the cache disagrees with the rows it
+// summarises. Everything that can change the answer calls it: posting and voiding a
+// payment, clearing and rejecting a giro, and posting and voiding a return.
+//
+// SEBAGIAN covers a return-only credit as well as a part payment. That is deliberate: the
+// invoice genuinely is partly settled, and the two figures behind it are reported next to
+// the status so a screen can say which of them did it.
+func (r *PembelianRepository) RecalculateStatusPembayaran(ctx context.Context, db DBTX, idPembelian int64) error {
+	const query = `
+		UPDATE pembelian p SET status_pembayaran = CASE
+			WHEN p.total <= (` + pembelianAlokasiEfektif + `)
+			                + (` + pembelianKreditRetur + `) THEN 'LUNAS'
+			WHEN (` + pembelianAlokasiEfektif + `)
+			     + (` + pembelianKreditRetur + `) > 0 THEN 'SEBAGIAN'
+			ELSE 'BELUM'
+		END
+		WHERE p.id = $1`
+
+	if _, err := db.ExecContext(ctx, query, idPembelian); err != nil {
+		return fmt.Errorf("recalculate status_pembayaran: %w", err)
+	}
+
+	return nil
+}
+
+// utangSupplierFilter selects a supplier's POSTED invoices, optionally only those with
+// something still owing. Shared by the COUNT and the row query so total_item cannot start
+// disagreeing with the rows it counts.
+//
+// Only POSTED. A DRAFT invoice is a typed page rather than a debt, and a BATAL one is a
+// debt that was withdrawn — neither can be paid, so neither belongs on a list whose whole
+// purpose is deciding what to pay.
+//
+// The open-invoice test repeats the same expression the row list reports as sisa_utang,
+// which is why both live in one constant: two spellings of "still owed" would eventually
+// disagree, and then the list would offer an invoice it reports as settled.
+const utangSupplierFilter = `
+	WHERE p.id_supplier = $1
+	  AND p.status = 'POSTED'
+	  AND ($2::BOOLEAN OR p.total > (` + pembelianAlokasiEfektif + `)
+	                                + (` + pembelianKreditRetur + `))`
+
+// FindUtangSupplier returns one page of a supplier's open invoices, oldest first.
+//
+// Oldest first, unlike every other list in this API. This one is a queue to work through
+// rather than a history to read, and the invoice that has waited longest is the one to
+// settle next. The ORDER BY still ends in a unique column, so a page boundary between
+// same-day invoices cannot repeat or skip one.
+func (r *PembelianRepository) FindUtangSupplier(ctx context.Context, db DBTX, idSupplier int64, termasukLunas bool, limit, offset int) ([]entity.UtangSupplier, int64, error) {
+	const countQuery = `SELECT COUNT(*) FROM pembelian p` + utangSupplierFilter
+
+	var total int64
+	if err := db.QueryRowContext(ctx, countQuery, idSupplier, termasukLunas).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count utang supplier: %w", err)
+	}
+
+	if total == 0 {
+		return []entity.UtangSupplier{}, 0, nil
+	}
+
+	const query = `
+		SELECT p.id, p.nomor, p.tanggal, p.no_faktur_supplier, p.tanggal_faktur,
+		       p.jenis_pembayaran, p.status_pembayaran, p.total::TEXT,
+		       (` + pembelianAlokasiEfektif + `)::TEXT, (` + pembelianKreditRetur + `)::TEXT,
+		       (p.total - (` + pembelianAlokasiEfektif + `)
+		                - (` + pembelianKreditRetur + `))::TEXT
+		FROM pembelian p` + utangSupplierFilter + `
+		ORDER BY p.tanggal, p.id
+		LIMIT $3 OFFSET $4`
+
+	rows, err := db.QueryContext(ctx, query, idSupplier, termasukLunas, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("select utang supplier: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.UtangSupplier, 0, limit)
+
+	for rows.Next() {
+		var utang entity.UtangSupplier
+
+		if err := rows.Scan(
+			&utang.IDPembelian, &utang.Nomor, &utang.Tanggal, &utang.NoFakturSupplier,
+			&utang.TanggalFaktur, &utang.JenisPembayaran, &utang.StatusPembayaran,
+			&utang.Total, &utang.JumlahDialokasikan, &utang.NilaiKreditRetur,
+			&utang.SisaUtang,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan utang supplier: %w", err)
+		}
+
+		list = append(list, utang)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate utang supplier: %w", err)
+	}
+
+	return list, total, nil
 }
 
 // riwayatBeliFilter is shared by the COUNT and the row query, so total_item cannot
@@ -781,5 +1037,6 @@ func scanPembelian(row rowScanner, pembelian *entity.Pembelian) error {
 func scanPembelianRead(row rowScanner, pembelian *entity.Pembelian) error {
 	return row.Scan(append(
 		pembelianFields(pembelian), &pembelian.NamaSupplier, &pembelian.NamaRuang,
+		&pembelian.JumlahDialokasikan, &pembelian.NilaiKreditRetur,
 	)...)
 }
