@@ -34,3 +34,7 @@ Dockerfile
 .dockerignore
 docker-compose.yml
 docker-compose.*.yml
+
+# Lampiran hasil unggahan lokal. Di container tempatnya adalah volume dokumen-data,
+# bukan lapisan image.
+/data

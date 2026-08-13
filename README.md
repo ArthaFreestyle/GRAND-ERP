@@ -2,7 +2,7 @@
 
 Backend ERP dengan fokus pada persediaan, pembelian, dan penjualan. Ditulis dengan Go + Fiber v3 di atas PostgreSQL, tanpa ORM.
 
-> **Status: master data, pengguna, produk, dan siklus barang masuk-keluar dari supplier berjalan.** Sebelas modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, `user`, `product` (beserta `product_satuan` dan `product_harga_jual`), `pembelian`, `penerimaan_susulan`, dan `retur_pembelian`. **`pembelian` adalah dokumen transaksi pertama, dan yang pertama menulis ke `kartu_stok`** — mesin posting dan generator nomor dokumennya dipakai ulang seluruh modul transaksi berikutnya. **Purchase order sengaja tidak ada**; penggantinya adalah [riwayat harga beli](#riwayat-harga-beli-pengganti-purchase-order), yang terkumpul sendiri dari pembelian yang sudah diposting. Penjualan, retur penjualan, mutasi, pemakaian, dan pembayaran skemanya sudah termigrasi tetapi belum punya lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
+> **Status: master data, pengguna, produk, dan siklus barang masuk-keluar dari supplier berjalan.** Dua belas modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, `user`, `product` (beserta `product_satuan` dan `product_harga_jual`), `pembelian`, `penerimaan_susulan`, `retur_pembelian`, dan `dokumen` (lampiran berkas lintas modul, sekaligus **job pertama di `cmd/worker`**). **`pembelian` adalah dokumen transaksi pertama, dan yang pertama menulis ke `kartu_stok`** — mesin posting dan generator nomor dokumennya dipakai ulang seluruh modul transaksi berikutnya. **Purchase order sengaja tidak ada**; penggantinya adalah [riwayat harga beli](#riwayat-harga-beli-pengganti-purchase-order), yang terkumpul sendiri dari pembelian yang sudah diposting. Penjualan, retur penjualan, mutasi, pemakaian, dan pembayaran skemanya sudah termigrasi tetapi belum punya lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
 
 > [!WARNING]
 > Seeder memasang superadmin bawaan **`admin` / `admin12345`**, password yang tercatat di repositori ini. Itu kredensial untuk mesin sendiri. Ganti atau nonaktifkan sebelum server bisa dijangkau orang lain — lihat [Autentikasi](#autentikasi).
@@ -48,7 +48,9 @@ Itu menaikkan PostgreSQL 17, Redis 7, menjalankan migrasi, memasang seeder, lalu
 | `migrate-test` | Sekali jalan: migrasi ke `grand_erp_test` untuk test |
 | `seed` | Sekali jalan setelah `migrate`: memasang `db/seeder_postgres/` |
 | `web` | Server HTTP di `:3000`, dengan healthcheck ke `/health` |
-| `worker` | Worker latar; belum ada job, jadi memang hanya menunggu sinyal |
+| `worker` | Worker latar; menjalankan pembersihan berkas yatim sekali sehari |
+
+Lampiran berkas disimpan di volume `dokumen-data`, yang **dipasang di `web` dan `worker` sekaligus** — `web` yang menulis, `worker` yang menghapus. Kalau hanya salah satunya memasangnya, pembersihannya diam-diam tidak melakukan apa-apa. Tanpa volume sama sekali, isinya hilang setiap `up --build` sementara barisnya di tabel tetap ada.
 
 > [!IMPORTANT]
 > **PostgreSQL dipublikasikan di host port `5433`, bukan `5432`.** Mesin pengembangan biasanya sudah menjalankan PostgreSQL sendiri di 5432, dan memakai port yang sama di sini gagal bind dengan `address already in use`. Di dalam jaringan compose alamatnya tetap `postgres:5432`. Ubah lewat `POSTGRES_HOST_PORT` di `.env` kalau 5432 memang bebas.
@@ -85,7 +87,7 @@ Sesuaikan `postgres:postgres` kalau `POSTGRES_USER`/`POSTGRES_PASSWORD` diubah d
 
 **Konfigurasi di dalam container.** `config.NewViper` panik kalau `config.json` tidak ada, sedangkan `config.json` gitignored karena berisi kredensial. Jadi image menyalin `config.example.json` menjadi `config.json`, lalu compose menimpa kunci yang memang bergantung lingkungan lewat environment variable (`database.host` → `DATABASE_HOST`).
 
-Yang **tidak** ditimpa compose — `app.name`, `captcha.ttl_seconds`, dan ketiga kunci `database.pool.*` — memakai nilai dari `config.example.json` yang terbangun ke dalam image. Kalau salah satunya perlu berbeda per lingkungan, tambahkan ke blok `environment:` service `web` dan `worker`.
+Yang **tidak** ditimpa compose — `app.name`, `captcha.ttl_seconds`, dan ketiga kunci `database.pool.*` — memakai nilai dari `config.example.json` yang terbangun ke dalam image. `dokumen.storage_path` justru ditimpa di kedua service dan harus tetap sama di keduanya; direktorinya dibuat di dalam image dan dimiliki user non-root, karena Docker menyalin kepemilikan itu saat volume bernama pertama kali dibuat. Kalau salah satunya perlu berbeda per lingkungan, tambahkan ke blok `environment:` service `web` dan `worker`.
 
 `.dockerignore` sengaja mengecualikan `config.json` supaya kredensial lokal tidak ikut terbangun ke dalam image.
 
@@ -162,8 +164,10 @@ Seeder ditulis idempoten (`ON CONFLICT DO NOTHING`), aman dijalankan ulang. Targ
 
 ```bash
 go run ./cmd/web      # HTTP server, default :3000
-go run ./cmd/worker   # background worker (belum ada job)
+go run ./cmd/worker   # background worker: pembersihan berkas yatim
 ```
+
+Keduanya membaca `dokumen.storage_path` dari config yang sama, dan **harus menunjuk direktori yang sama** — `web` yang menulis lampiran, `worker` yang menghapus yang tidak pernah tertempel. Direktorinya dibuat sendiri saat boot; kalau tidak bisa ditulisi, prosesnya berhenti di situ, bukan di unggahan pertama.
 
 Cek: `curl http://127.0.0.1:3000/health`, lalu buka <http://127.0.0.1:3000> untuk Swagger UI.
 
@@ -584,6 +588,58 @@ sisa = pembelian.total − Σ alokasi efektif − Σ nilai_kredit_utang retur PO
 - **Alokasi diganti wholesale** lewat `PUT /{id}/alokasi`, tidak diedit satu-satu — alasannya sama dengan baris pembelian.
 - Nomornya seri sendiri, `PU/2026/08/0001`, dari generator yang sama.
 
+## Lampiran berkas: unggah dulu, tempel kemudian
+
+Faktur supplier datang sebagai kertas dan perlu difoto di meja penerimaan. Tapi kebutuhannya **lintas modul** — retur butuh foto barang rusak, penjualan butuh surat jalan bertanda tangan, stok opname butuh berita acara — jadi ini dibangun sekali sebagai infrastruktur, bukan sebagai kolom di salah satu dokumen. Referensinya polimorfik (`ref_table` + `ref_id`), mengikuti pola yang sudah dipakai `kartu_stok`.
+
+Ini juga **job pertama untuk `cmd/worker`**, yang sampai sekarang hanya menunggu sinyal tanpa pekerjaan apa pun.
+
+### Alurnya tidak bisa "unggah ke dokumen X"
+
+Foto diambil **sebelum** dokumennya tersimpan: petugas memotret faktur sambil membongkar box, dan dokumen `pembelian`-nya belum tentu sudah dibuat. Jadi:
+
+```
+1. POST /api/v1/dokumen  (multipart)   → berkas tersimpan, dapat id
+                                          ref_table & ref_id masih NULL  ← yatim
+2. POST /api/v1/pembelian              → dokumen induknya baru ada di sini
+3. POST /api/v1/dokumen/12/tempel      → { ref_table: "pembelian", ref_id: 77 }
+   { formnya ditinggalkan begitu saja } → baris (1) tetap yatim selamanya
+                                          └── ini yang disapu worker
+```
+
+**`ref_id` yang nullable itu justru intinya.** Ia yang membuat berkas yatim mungkin ada, dan sekaligus membuatnya gampang dicari: satu indeks parsial `WHERE ref_id IS NULL` yang tetap kecil berapa pun besarnya tabel, karena isinya hanya yang belum tertempel.
+
+Penempelan lewat satu endpoint di modul ini, bukan lewat field `dokumen_ids` di setiap dokumen. Konsekuensinya: modul yang mulai menerima lampiran cukup ditambahkan satu baris ke whitelist `repository.RefTableDokumen` — tanpa migrasi, tanpa mengubah DTO-nya sendiri, dan tanpa mengulang aturan yang sama di tempat kedua.
+
+### Berkas dari luar adalah permukaan serangan
+
+Hal-hal berikut bukan preferensi:
+
+- **Nama berkas dari klien tidak pernah menyentuh filesystem.** Nama simpan dihasilkan server (UUID + ekstensi), `nama_asli` hanya untuk ditampilkan. Tanpa pemisahan ini, `../../config.json` adalah path yang sah. Lapisan penyimpanan **menolak**, bukan membersihkan, nama yang bukan nama berkas polos — `filepath.Base` akan diam-diam mengubah `../../etc/passwd` jadi `passwd` lalu melanjutkan, dan bug yang tidak bersuara lebih buruk daripada galat.
+- **MIME ditentukan dari isi berkas** (magic bytes), bukan dari header `Content-Type` yang sepenuhnya dikendalikan pemanggil. HTML bernama `faktur.pdf` ditolak 400, dan ekstensi simpannya diturunkan dari hasil deteksi itu — bukan dari nama aslinya.
+- **Batas ukuran ditegakkan saat mengalir** (`io.LimitReader`), bukan setelah berkas utuh masuk memori. Ukuran yang diklaim header multipart hanya dipakai untuk menolak lebih awal; yang mengikat adalah hitungan byte yang benar-benar ditulis.
+- **Unduhan tetap di balik autentikasi**, dan selalu disajikan `Content-Disposition: attachment` dengan `X-Content-Type-Options: nosniff`, sehingga HTML atau SVG yang entah bagaimana tersimpan tidak bisa dieksekusi di origin aplikasi. Foto faktur memuat harga beli dan identitas supplier.
+- **Urutan tulis berkas dulu, baru baris**, dan kalau barisnya gagal berkasnya dihapus lagi. Urutan sebaliknya meninggalkan baris yang menunjuk berkas tidak ada — dan itu tidak bisa diperbaiki siapa pun, karena tidak ada yang tahu isinya seharusnya apa.
+- **Cronjob menghapus berdasarkan baris tabel, tidak pernah dengan memindai direktori.** Memindai direktori berarti ikut menghapus berkas yang barisnya belum sempat ter-commit — yaitu detik-detik antara berkas ditulis dan transaksinya selesai.
+
+### Pembersihan berkas yatim
+
+Job harian di worker, `time.Ticker` dan bukan pustaka cron: satu job harian butuh jeda antar-jalan, bukan spesifikasi jadwal. Naikkan ke `robfig/cron` saat ada job kedua yang jadwalnya benar-benar berbeda.
+
+- Umur sebelum dianggap yatim: `dokumen.orphan_ttl_hours`, default **24 jam** — cukup longgar untuk form yang ditinggal semalam.
+- Jeda antar sapuan: `dokumen.cleanup_interval`, default **24 jam**. Sekali jalan langsung saat proses naik, karena worker yang di-restart harian tidak akan pernah sampai ke tick pertamanya.
+- **Berkasnya dihapus, barisnya bertahan** dengan `deleted_at` terisi. Jejak bahwa pernah ada unggahan lebih berharga daripada satu baris yang dihemat — dan itu pula yang membuat job ini bisa dijalankan ulang tanpa perlu mengingat apa yang sudah dikerjakannya.
+- Aman terhadap worker ganda **dua lapis**: `pg_advisory_lock` menahan worker kedua di luar (pola yang sudah dipakai trigger `kartu_stok`), dan tiap baris dikerjakan dalam transaksinya sendiri di bawah row lock — jadi berkas yang sedang ditempelkan tepat saat disapu akan memblokir, bukan kehilangan isinya.
+
+### Hal lain yang perlu diketahui
+
+- **Yang diterima hanya JPEG, PNG, dan PDF**, maksimal `dokumen.max_size_mb` (default 10 MB — foto dari HP sekarang menembus 5 MB tanpa usaha). Batas body Fiber diturunkan dari kunci itu plus satu MB untuk overhead multipart; default Fiber cuma 4 MB dan akan diam-diam memangkas batas yang dikonfigurasi.
+- **Maksimal 10 lampiran per dokumen.** Cukup untuk faktur berhalaman banyak yang difoto satu per satu; lebih dari itu tandanya retry yang macet.
+- **Penghapusan hanya selama masih yatim atau induknya `DRAFT`.** Setelah dokumennya diajukan, foto faktur yang jadi dasar persetujuan adalah bagian dari rekaman.
+- **Menempel ke dokumen `BATAL` ditolak**, karena lampiran di sana tidak akan pernah bisa dilepas lagi — aturan penghapusan hanya melepaskan induk yang `DRAFT`.
+- `checksum_sha256` dipakai mendeteksi faktur yang sama diunggah dua kali. Hasilnya dilaporkan sebagai `duplikat_dari_id`, **bukan penolakan**: satu hasil scan sah saja ditempel ke dua dokumen berbeda.
+- Penyimpanannya di balik satu interface (`repository.DokumenStorage`), jadi menggantinya dengan S3/MinIO tidak menyentuh usecase. Yang berjalan sekarang disk lokal, dan konsekuensinya **`web` tidak bisa discale lebih dari satu instance** — dua instance dengan volume sendiri-sendiri masing-masing memegang separuh lampiran.
+
 ## Autentikasi
 
 Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`.
@@ -633,11 +689,14 @@ Membaca terbuka untuk siapa pun yang sudah login — operator yang tidak bisa me
 |---|---|---|
 | `product`, `satuan`, `ruang`, `ekspedisi`, `supplier` | semua yang login | `SUPERADMIN`, `INVENTARIS` |
 | `pelanggan` | semua yang login | `SUPERADMIN`, `CASHIER` |
+| `dokumen` (lampiran) | semua yang login | semua yang login |
 | `pembelian`, `penerimaan_susulan`, `retur_pembelian` — input, edit, ajukan | semua yang login | `SUPERADMIN`, `INVENTARIS` |
 | `pembelian`, `penerimaan_susulan`, `retur_pembelian` — posting, tolak, batal | — | `SUPERADMIN` |
 | `role`, `user` | `SUPERADMIN` | `SUPERADMIN` |
 
 `role` dan `user` tertutup termasuk untuk membaca: daftar akun beserta hak aksesnya sensitif, dan bisa menulis di sana adalah jalan eskalasi hak — beri diri sendiri `SUPERADMIN`, sisanya menyusul.
+
+**`dokumen` tidak punya pembagian role sama sekali**, dan itu bukan aturan "baca terbuka" yang dilebarkan diam-diam ke tulis. Lampiran adalah infrastruktur milik banyak modul, jadi tidak ada satu pemilik data yang bisa ditunjuk. Yang menjaganya adalah **statusnya, bukan role pemanggilnya**: unggahan tidak berarti apa-apa sampai ada yang menempelkannya, penempelan ditolak begitu dokumen induknya `BATAL` atau sudah memegang 10 lampiran, dan penghapusan ditolak begitu induknya keluar dari `DRAFT`. Membagi role di sini berarti menentukan siapa yang boleh memotret faktur — pertanyaan yang sudah dijawab oleh siapa yang berdiri di meja penerimaan.
 
 **`pembelian`, `penerimaan_susulan`, dan `retur_pembelian` dibagi menurut tahap alurnya, bukan menurut data yang disentuh** — ketiganya menulis `kartu_stok`, dan itulah alasannya. Pada `retur_pembelian` alasannya paling kuat: ia satu-satunya dokumen sejauh ini yang postingnya **mengeluarkan** barang, jadi yang salah bisa menekan saldo ke angka yang tidak lagi cocok dengan rak. Memposting pembelian bukan penyuntingan: ia menambah baris ke `kartu_stok` yang bersifat append-only, jadi posting yang salah tidak bisa diperbaiki, hanya dibalik — dan pembalikannya dinilai pada rata-rata bergerak yang sudah berubah. Karena itu meja yang membaca faktur kertas dan menghitung isi box bukan meja yang memutuskan angka-angka itu boleh masuk buku stok. Pembagiannya ada pada transisinya, bukan pada recordnya: di kantor kecil satu orang bisa saja memegang kedua role, dan baginya tidak ada yang berubah.
 
@@ -714,6 +773,11 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `GET` | `/health` | Liveness probe |
 | `POST` | `/api/v1/auth/login` | Tukar kredensial dengan token — satu-satunya `/api/v1` tanpa token |
 | `GET` | `/api/v1/auth/me` | Sesi yang sedang berlaku menurut token |
+| `POST` | `/api/v1/dokumen` | Unggah lampiran (`multipart/form-data`, field `berkas`); barisnya lahir yatim |
+| `GET` | `/api/v1/dokumen` | Lampiran satu dokumen (`ref_table` + `ref_id`), atau berkas yatim milik sendiri |
+| `GET` | `/api/v1/dokumen/{id}` | Unduh isinya — selalu `attachment`, tetap butuh token |
+| `POST` | `/api/v1/dokumen/{id}/tempel` | Tempelkan ke dokumen induk — `ref_table`, `ref_id` |
+| `DELETE` | `/api/v1/dokumen/{id}` | Soft delete — hanya selama yatim atau induknya `DRAFT` |
 | `GET` | `/api/v1/product` | List — `page`, `size`, `search`, `is_aktif` |
 | `POST` | `/api/v1/product` | Create, sekalian satuan konversinya |
 | `GET` | `/api/v1/product/{id}` | Detail, dengan satuan dan riwayat harga jual |
@@ -788,7 +852,7 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `GET` | `/api/v1/user/{id}` | Get by id |
 | `PATCH` | `/api/v1/user/{id}` | Update parsial, termasuk mengatur ulang role |
 
-`ruang` belum punya PATCH. `page` default 1, `size` default 20 dengan batas 100. Tidak ada `DELETE` di mana pun — master data dipensiunkan dengan `is_aktif = false`, dokumen yang sudah diposting dibatalkan dengan baris pembalik.
+`ruang` belum punya PATCH. `page` default 1, `size` default 20 dengan batas 100. **Satu-satunya `DELETE` ada di `dokumen`, dan itu pun soft delete** — barisnya bertahan dengan `deleted_at` terisi, yang hilang cuma berkasnya. Selebihnya tidak ada penghapusan: master data dipensiunkan dengan `is_aktif = false`, dokumen yang sudah diposting dibatalkan dengan baris pembalik.
 
 Semua respons memakai satu amplop, `model.WebResponse[T]`:
 
@@ -816,6 +880,7 @@ Sudah ada:
 - **Modul `pembayaran_utang` beserta alokasinya** — fase terakhir isu #4: satu pembayaran menutup banyak faktur dan sebaliknya, giro yang baru mengurangi utang saat cair, kelebihan bayar yang mengendap jadi kredit, dan `status_pembayaran` yang dihitung ulang dari alokasi efektif serta kredit retur
 - **Pengurangan utang oleh retur**, lewat `nilai_kredit_utang` yang dibekukan saat posting — diskalakan terhadap `pembelian.total` supaya diskon nota tidak ikut dikreditkan dua kali, dan tidak memakai `retur_pembelian.total` yang sudah memuat porsi ongkir
 - **Daftar utang per supplier** (`GET /supplier/{id}/utang`) — query, bukan modul, seperti riwayat harga beli
+- **Subsistem lampiran berkas** (isu #5): unggah dengan MIME dari isi berkas, penyimpanan di balik interface, unduhan yang selalu `attachment` di balik token, penempelan polimorfik ke dokumen mana pun yang terdaftar, dan **job pertama di `cmd/worker`** — sapuan berkas yatim di bawah advisory lock, menghapus berdasarkan baris tabel dan tidak pernah dengan memindai direktori
 - Tujuh modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `role`, `user` (create/get/list/patch) dan `ruang` (create/get/list)
 - User dengan banyak role, `role_ids` yang mengganti seluruh himpunan dalam satu transaksi, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
@@ -832,6 +897,6 @@ Belum ada:
 - Captcha (Redis sudah terhubung tapi belum dipakai)
 - Modul `periode`. Trigger `kartu_stok` sudah menolak posting ke periode `TUTUP`, tapi tanpa lapisan Go tidak ada tutup buku — dan bulan tanpa baris `periode` dihitung terbuka
 - Lapisan Go untuk penjualan, piutang, retur penjualan, pemakaian, mutasi, dan stok opname
-- Lampiran foto faktur (isu #5) — job pertama untuk `cmd/worker`
+- **Penyimpanan lampiran di object storage.** Yang berjalan disk lokal di balik `repository.DokumenStorage`, jadi `web` belum bisa discale lebih dari satu instance
 - Validasi tingkat aplikasi yang tersisa, semuanya di sisi penjualan: kuota retur penjualan, batas alokasi penerimaan pembayaran, plafon kredit, dan penghitungan ulang `penjualan.status_pembayaran` — sisi utang sudah selesai di fase 6, dan cerminnya tinggal ditiru. Didaftar lengkap di CLAUDE.md
 - Job rekonsiliasi harian rantai saldo kartu stok

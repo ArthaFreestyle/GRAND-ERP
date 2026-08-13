@@ -172,6 +172,13 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD: ""
       REDIS_DB: 0
+      # Harus sama persis dengan milik worker: web yang menulis lampiran, worker yang
+      # menghapus yang tidak pernah tertempel. Kalau keduanya menunjuk direktori
+      # berbeda, pembersihannya diam-diam tidak melakukan apa-apa.
+      DOKUMEN_STORAGE_PATH: /app/data/dokumen
+      DOKUMEN_MAX_SIZE_MB: ${DOKUMEN_MAX_SIZE_MB:-10}
+    volumes:
+      - dokumen-data:/app/data/dokumen
     ports:
       - "${WEB_HOST_PORT:-3000}:3000"
 
@@ -199,6 +206,25 @@ services:
       REDIS_PORT: 6379
       REDIS_PASSWORD: ""
       REDIS_DB: 0
+      # Volume yang sama dengan web. Worker hanya menghapus, tetapi ia menghapus
+      # berdasarkan baris tabel -- jadi tanpa direktori ini terpasang, ia menemukan
+      # barisnya, tidak menemukan berkasnya, dan menandai baris itu terhapus sementara
+      # berkas aslinya menumpuk di tempat lain.
+      DOKUMEN_STORAGE_PATH: /app/data/dokumen
+      DOKUMEN_ORPHAN_TTL_HOURS: ${DOKUMEN_ORPHAN_TTL_HOURS:-24}
+      DOKUMEN_CLEANUP_INTERVAL: ${DOKUMEN_CLEANUP_INTERVAL:-24h}
+    volumes:
+      - dokumen-data:/app/data/dokumen
 
 volumes:
   postgres-data:
+  # Lampiran berkas. Tanpa volume, isinya hilang setiap `up --build`, dan setiap
+  # baris dokumen menunjuk berkas yang tidak ada lagi -- tabelnya awet, berkasnya
+  # tidak. Dipasang di web dan worker sekaligus.
+  #
+  # Konsekuensi yang perlu diketahui: ini satu volume lokal, jadi `web` tidak bisa
+  # discale lebih dari satu instance. Dua instance dengan volume sendiri-sendiri
+  # masing-masing memegang separuh lampiran dan menjawab 404 untuk separuh lainnya.
+  # Itulah harga belum memakai object storage, dan repository.DokumenStorage ada
+  # supaya penggantinya nanti tidak menyentuh usecase.
+  dokumen-data:

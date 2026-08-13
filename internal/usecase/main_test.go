@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"Arthafreestyle/ERP/internal/config"
 	"Arthafreestyle/ERP/internal/repository"
@@ -73,7 +74,20 @@ type app struct {
 	susulan    *usecase.PenerimaanSusulanUseCase
 	retur      *usecase.ReturPembelianUseCase
 	pembayaran *usecase.PembayaranUtangUseCase
+	dokumen    *usecase.DokumenUseCase
+	// dokumenDir is where this test's attachments land, so a test can check that a
+	// file really was written — or really was removed — rather than trusting the row.
+	dokumenDir string
 }
+
+// Attachment limits used by the tests. Deliberately not the production defaults:
+// the size limit has to be small enough that a test can exceed it without allocating
+// ten megabytes, and what is being proved is that the limit holds, not what it is
+// set to.
+const (
+	testMaxUkuranDokumen = 64 * 1024
+	testOrphanTTL        = 24 * time.Hour
+)
 
 // newApp wires the same graph config.Bootstrap does, minus Fiber, and empties the
 // master tables so each test starts from a known state.
@@ -92,7 +106,21 @@ func newApp(t *testing.T) *app {
 	kartuStokRepository := repository.NewKartuStokRepository()
 	counterRepository := repository.NewDocumentCounterRepository()
 
+	// t.TempDir is removed when the test ends, so attachments never land in the
+	// developer's real dokumen.storage_path and one test cannot see another's files.
+	dokumenDir := t.TempDir()
+
+	dokumenStorage, err := repository.NewLocalDokumenStorage(dokumenDir)
+	if err != nil {
+		t.Fatalf("dokumen storage: %v", err)
+	}
+
 	return &app{
+		dokumenDir: dokumenDir,
+		dokumen: usecase.NewDokumenUseCase(
+			testDB, log, validate, repository.NewDokumenRepository(), dokumenStorage,
+			testMaxUkuranDokumen, testOrphanTTL,
+		),
 		satuan: usecase.NewSatuanUseCase(
 			testDB, log, validate, repository.NewSatuanRepository(),
 		),
@@ -184,6 +212,9 @@ func truncateMaster(t *testing.T) {
 		// supplier and users, so both come before pembelian.
 		"pembayaran_utang_alokasi", "pembayaran_utang",
 		"pembelian_detail", "pembelian", "document_counter",
+		// dokumen references users through created_by, and its ref_table/ref_id pair
+		// is polymorphic — no foreign key — so nothing else constrains where it sits.
+		"dokumen",
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.
 		"product_harga_jual", "product_satuan", "product",
