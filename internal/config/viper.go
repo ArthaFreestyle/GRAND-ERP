@@ -38,6 +38,20 @@ func NewViper() *viper.Viper {
 	cfg.SetDefault("jwt.ttl_minutes", 60)
 	cfg.SetDefault("jwt.issuer", "grand-erp")
 
+	// Attachment settings, defaulted for the same reason web.swagger is: a
+	// config.json written before this feature existed must still boot, and an absent
+	// key would otherwise read as zero — a size limit of 0 MB accepts nothing and an
+	// interval of 0 panics the ticker.
+	//
+	// 10 MB because a photo from a current phone clears 5 MB without trying. 24 hours
+	// before an unattached upload is considered abandoned, which covers a form left
+	// open overnight, and one sweep a day to collect them: a file nobody claimed costs
+	// disk and nothing else, so there is no hurry.
+	cfg.SetDefault("dokumen.storage_path", "./data/dokumen")
+	cfg.SetDefault("dokumen.max_size_mb", 10)
+	cfg.SetDefault("dokumen.orphan_ttl_hours", 24)
+	cfg.SetDefault("dokumen.cleanup_interval", "24h")
+
 	if err := cfg.ReadInConfig(); err != nil {
 		panic(fmt.Errorf("config: cannot read config.json: %w", err))
 	}

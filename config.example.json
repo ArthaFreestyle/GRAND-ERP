@@ -32,6 +32,12 @@
   "captcha": {
     "ttl_seconds": 300
   },
+  "dokumen": {
+    "storage_path": "./data/dokumen",
+    "max_size_mb": 10,
+    "orphan_ttl_hours": 24,
+    "cleanup_interval": "24h"
+  },
   "jwt": {
     "secret": "",
     "ttl_minutes": 60,

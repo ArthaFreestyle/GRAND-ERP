@@ -8,3 +8,7 @@ config.json
 config.local.json
 .env
 .env.local
+
+# Lampiran berkas hasil unggahan saat dijalankan di mesin sendiri
+# (dokumen.storage_path defaultnya ./data/dokumen). Isinya data pengguna, bukan kode.
+/data/

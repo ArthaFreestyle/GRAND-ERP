@@ -38,9 +38,18 @@ FROM alpine:3.21 AS base
 # even though every stored instant is TIMESTAMPTZ.
 RUN apk add --no-cache ca-certificates tzdata
 
-# Runs unprivileged. Nothing here writes to disk — logs go to stdout — so the
-# user needs no writable directory.
+# Runs unprivileged. The one thing this user writes is /app/data/dokumen — uploaded
+# attachments — so that directory is created here and given to it. Logs still go to
+# stdout.
 RUN addgroup -S app && adduser -S -G app -h /app app
+
+# Created in the image, not left to the volume: Docker seeds a named volume from
+# whatever the image has at the mount point, ownership included. Without this the
+# volume is created owned by root and the unprivileged process cannot write into it —
+# and the failure surfaces at the first upload, not at boot.
+#
+# 0700 because attachments carry purchase prices and supplier identities.
+RUN mkdir -p /app/data/dokumen && chown -R app:app /app/data && chmod 700 /app/data/dokumen
 
 WORKDIR /app
 
@@ -69,6 +78,7 @@ CMD ["/app/web"]
 
 FROM base AS worker
 
-# No healthcheck: the worker serves no HTTP. It currently registers no jobs and
-# simply waits for a signal, so a running container doing nothing is expected.
+# No healthcheck: the worker serves no HTTP. It runs its jobs on a ticker and is
+# idle in between, so a container sitting quiet is the expected state — check the
+# logs for "worker: job selesai" rather than the process.
 CMD ["/app/worker"]

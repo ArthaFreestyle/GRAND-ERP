@@ -46,6 +46,7 @@ func Bootstrap(config *BootstrapConfig) {
 	susulanRepository := repository.NewPenerimaanSusulanRepository()
 	returRepository := repository.NewReturPembelianRepository()
 	pembayaranRepository := repository.NewPembayaranUtangRepository()
+	dokumenRepository := repository.NewDokumenRepository()
 
 	ruangUseCase := usecase.NewRuangUseCase(
 		config.DB, config.Log, config.Validate, ruangRepository,
@@ -111,6 +112,23 @@ func Bootstrap(config *BootstrapConfig) {
 		config.DB, config.Log, config.Validate,
 		pembayaranRepository, pembelianRepository, counterRepository,
 	)
+	// DokumenUseCase is the first usecase holding a store that is not the database.
+	// The storage interface is what keeps that fact from spreading: swapping local
+	// disk for S3 changes this line and nothing above it.
+	//
+	// Both constructors fail the process at boot rather than at the first upload —
+	// an unwritable storage directory is a deployment mistake, and discovering it at
+	// the receiving desk in the middle of a delivery is the wrong place.
+	dokumenConfig := NewDokumenConfig(config.Config, config.Log)
+	dokumenStorage, err := repository.NewLocalDokumenStorage(dokumenConfig.StoragePath)
+	if err != nil {
+		config.Log.WithError(err).Fatal("dokumen: storage tidak siap")
+	}
+
+	dokumenUseCase := usecase.NewDokumenUseCase(
+		config.DB, config.Log, config.Validate, dokumenRepository, dokumenStorage,
+		dokumenConfig.MaxUkuranByte, dokumenConfig.OrphanTTL,
+	)
 	// Fails the process at boot when jwt.secret is missing or too short, rather than
 	// at the first login attempt.
 	authConfig := NewAuthConfig(config.Config, config.Log)
@@ -130,6 +148,7 @@ func Bootstrap(config *BootstrapConfig) {
 	supplierController := deliveryhttp.NewSupplierController(config.Log, supplierUseCase)
 	pelangganController := deliveryhttp.NewPelangganController(config.Log, pelangganUseCase)
 	authController := deliveryhttp.NewAuthController(config.Log, authUseCase)
+	dokumenController := deliveryhttp.NewDokumenController(config.Log, dokumenUseCase)
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
 	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
 	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
@@ -151,6 +170,7 @@ func Bootstrap(config *BootstrapConfig) {
 		AuthUseCase:          authUseCase,
 		DocsController:       docsController,
 		AuthController:       authController,
+		DokumenController:    dokumenController,
 		PembelianController:  pembelianController,
 		SusulanController:    susulanController,
 		ReturController:      returController,

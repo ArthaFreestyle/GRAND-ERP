@@ -16,8 +16,31 @@ import (
 func NewFiber(cfg *viper.Viper, log *logrus.Logger) *fiber.App {
 	return fiber.New(fiber.Config{
 		AppName:      cfg.GetString("app.name"),
+		BodyLimit:    bodyLimit(cfg),
 		ErrorHandler: newErrorHandler(log),
 	})
+}
+
+// bodyLimit sizes the request body Fiber will accept at all.
+//
+// It has to be derived from dokumen.max_size_mb rather than left alone: Fiber's
+// default is 4 MB, and fasthttp refuses an oversized body before any handler runs —
+// so a 10 MB limit configured for attachments would be silently capped at 4 MB, with
+// the rejection arriving as a bare 413 that no usecase rule produced and no message
+// explains.
+//
+// The extra megabyte is multipart's own overhead: the part headers, the boundaries,
+// and any other field in the form all count towards this limit, while
+// dokumen.max_size_mb is about the file's own bytes. Without the slack a file exactly
+// at the limit is rejected by the transport instead of accepted by the rule that was
+// supposed to decide.
+func bodyLimit(cfg *viper.Viper) int {
+	maxMB := cfg.GetInt("dokumen.max_size_mb")
+	if maxMB <= 0 {
+		return fiber.DefaultBodyLimit
+	}
+
+	return (maxMB + 1) * 1024 * 1024
 }
 
 // newErrorHandler turns anything a handler returns into the standard envelope.

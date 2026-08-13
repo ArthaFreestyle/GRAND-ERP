@@ -32,6 +32,7 @@ type RouteConfig struct {
 	DocsController *deliveryhttp.DocsController
 
 	AuthController       *deliveryhttp.AuthController
+	DokumenController    *deliveryhttp.DokumenController
 	PembelianController  *deliveryhttp.PembelianController
 	SusulanController    *deliveryhttp.PenerimaanSusulanController
 	ReturController      *deliveryhttp.ReturPembelianController
@@ -110,6 +111,29 @@ func (c *RouteConfig) setupAuthRoute() {
 	inventaris := middleware.RequireRole(RoleSuperadmin, RoleInventaris)
 	cashier := middleware.RequireRole(RoleSuperadmin, RoleCashier)
 	superadmin := middleware.RequireRole(RoleSuperadmin)
+
+	// dokumen is infrastructure rather than a module: attachments are needed by
+	// receiving, by returns, by delivery notes, and by stock counts, so it belongs to
+	// none of them and carries no role guard of its own beyond being authenticated.
+	//
+	// That is not the reads-are-open rule being stretched to cover writes. What
+	// protects an attachment is its state, not the caller's role: an upload is inert
+	// until something claims it, attaching is refused once a document is voided or
+	// already carries ten files, and removal is refused the moment the parent leaves
+	// DRAFT. A role split would say who may photograph an invoice, which is a question
+	// the receiving desk answers by standing there.
+	//
+	// Downloads stay behind the token like everything else. A photographed invoice
+	// carries purchase prices and a supplier's identity, which is exactly what an API
+	// should not hand out to an unauthenticated caller with a guessable id.
+	api.Post("/dokumen", c.DokumenController.Upload)
+	api.Get("/dokumen", c.DokumenController.List)
+	api.Get("/dokumen/:id", c.DokumenController.Isi)
+	api.Post("/dokumen/:id/tempel", c.DokumenController.Tempel)
+	// The only DELETE in the API. Master data has none by design, and this one is a
+	// soft delete: the row survives with deleted_at set, so the trace of an upload
+	// outlives the file.
+	api.Delete("/dokumen/:id", c.DokumenController.Delete)
 
 	api.Get("/ruang", c.RuangController.List)
 	api.Get("/ruang/:id", c.RuangController.Get)

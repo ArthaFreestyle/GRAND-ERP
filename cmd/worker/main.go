@@ -1,9 +1,13 @@
-// Command worker is the background job entrypoint. It shares the same config
-// and repository layers as cmd/web; only the trigger differs (schedule or
-// queue instead of HTTP). No jobs are registered yet.
+// Command worker is the background job entrypoint. It shares the same config,
+// repository, and usecase layers as cmd/web; only the trigger differs — a schedule
+// instead of an HTTP request.
+//
+// One job is registered: sweeping up uploaded files that were never attached to a
+// document. See internal/config/worker.go.
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -26,11 +30,22 @@ func main() {
 		}
 	}()
 
-	log.Info("worker: started (no jobs registered)")
+	scheduler := config.BootstrapWorker(&config.WorkerBootstrapConfig{
+		DB:       db,
+		Log:      log,
+		Validate: config.NewValidator(),
+		Config:   viperConfig,
+	})
 
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, os.Interrupt, syscall.SIGTERM)
-	<-quit
+	// Cancelled on the first signal, which is what stops the jobs. Run blocks until
+	// every one of them has returned, so a sweep in progress finishes its current
+	// file rather than being cut off between deleting one and marking its row.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	log.Info("worker: started")
+
+	scheduler.Run(ctx)
 
 	log.Info("worker: stopped")
 }

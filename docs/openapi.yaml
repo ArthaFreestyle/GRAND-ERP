@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: GRAND-ERP API
-  version: 0.8.0
+  version: 0.9.0
   description: >
     Backend kontrak API untuk GRAND-ERP. Setiap perubahan route, request, atau
     response di internal/delivery dan internal/model harus tercermin di sini
@@ -69,6 +69,20 @@ info:
     kali, dan dibekukan saat posting.
 
 
+    `dokumen` adalah lampiran berkas, dan ia infrastruktur lintas modul — bukan milik
+    salah satu dokumen. Alurnya **unggah dulu, tempel kemudian**: foto faktur diambil
+    saat box dibongkar, ketika dokumen pembeliannya belum tentu sudah dibuat, jadi
+    berkas yang baru diunggah berstatus yatim (`ref_table` dan `ref_id` masih null)
+    sampai ada yang mengklaimnya lewat `POST /api/v1/dokumen/{id}/tempel`. Yang tidak
+    pernah diklaim disapu worker setelah `dokumen.orphan_ttl_hours`.
+
+
+    Jenis berkas ditentukan dari **isi berkasnya**, bukan dari header `Content-Type`
+    maupun ekstensi nama yang dikirim klien; nama simpannya dihasilkan server, dan
+    `nama_asli` hanya untuk ditampilkan. Unduhan tetap di balik autentikasi dan selalu
+    disajikan sebagai lampiran — foto faktur memuat harga beli dan identitas supplier.
+
+
     Uang dan kuantitas pada modul pembelian dikirim dan diterima sebagai **string
     desimal**, bukan angka JSON. `NUMERIC(20,2)` yang lewat float JSON kehilangan
     sen, dan angka-angka ini menjadi utang ke supplier sekaligus nilai persediaan.
@@ -104,6 +118,7 @@ security:
 
 tags:
   - name: auth
+  - name: dokumen
   - name: pembelian
   - name: penerimaan-susulan
   - name: retur-pembelian
@@ -243,6 +258,230 @@ paths:
                   status:
                     type: string
                     example: ok
+
+  /api/v1/dokumen:
+    post:
+      tags: [dokumen]
+      summary: Unggah satu lampiran berkas
+      operationId: uploadDokumen
+      description: >
+        Menyimpan satu berkas dan mengembalikan metadatanya. Barisnya lahir **yatim**:
+        `ref_table` dan `ref_id` masih null sampai ada yang menempelkannya lewat
+        `POST /api/v1/dokumen/{id}/tempel`. Itu memang alurnya — foto faktur diambil
+        sebelum dokumen pembeliannya tentu sudah ada.
+
+
+        Yang diterima hanya JPEG, PNG, dan PDF, dan **jenisnya ditentukan dari isi
+        berkas** (magic bytes), bukan dari header `Content-Type` atau ekstensi nama
+        yang dikirim klien — keduanya sepenuhnya dikendalikan pemanggil. Berkas HTML
+        yang diberi nama `faktur.pdf` ditolak 400.
+
+
+        `nama_asli` disimpan apa adanya untuk ditampilkan dan **tidak pernah menjadi
+        path**; nama simpan di server dihasilkan sendiri (UUID + ekstensi hasil
+        deteksi). Batas ukuran (`dokumen.max_size_mb`, default 10 MB) ditegakkan saat
+        berkasnya mengalir, bukan setelah utuh masuk memori.
+
+
+        `created_by` diambil dari token, tidak pernah dari body.
+
+
+        `duplikat_dari_id` terisi ketika sudah ada lampiran hidup dengan checksum yang
+        sama. Itu peringatan, bukan penolakan: satu hasil scan sah saja ditempel ke dua
+        dokumen berbeda.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [berkas]
+              properties:
+                berkas:
+                  type: string
+                  format: binary
+                  description: JPEG, PNG, atau PDF. Maksimal `dokumen.max_size_mb`.
+      responses:
+        "201":
+          description: Berkas tersimpan, masih yatim
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Dokumen" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Error" }
+        "413":
+          description: >
+            Body melebihi batas transport. Batas Fiber diturunkan dari
+            `dokumen.max_size_mb` plus satu MB untuk overhead multipart, jadi berkas
+            yang hanya sedikit melewati batas tetap ditolak 400 dengan pesan yang
+            menjelaskan — 413 berarti jauh lebih besar dari itu.
+
+    get:
+      tags: [dokumen]
+      summary: Daftar lampiran satu dokumen, atau berkas yatim milik sendiri
+      operationId: listDokumen
+      description: >
+        Dua mode, dipilih dari ada tidaknya referensi:
+
+
+        - `ref_table` + `ref_id` diisi — lampiran dokumen itu.
+
+        - keduanya kosong — berkas yang **pemanggil sendiri** unggah dan belum
+          ditempelkan ke mana pun. Itulah yang dibutuhkan layar penerimaan untuk
+          menawarkan foto yang baru diambil beberapa menit lalu.
+
+
+        Mengisi salah satunya saja ditolak 400: setengah referensi menunjuk satu tabel
+        utuh atau tidak menunjuk apa pun. Baris yang sudah dihapus tidak pernah ikut.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: ref_table
+          in: query
+          description: Harus salah satu jenis dokumen yang dikenal; selain itu 400.
+          schema:
+            type: string
+            enum: [pembelian, penerimaan_susulan, retur_pembelian, pembayaran_utang]
+        - name: ref_id
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Halaman hasil, terbaru dulu
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Dokumen" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/dokumen/{id}:
+    get:
+      tags: [dokumen]
+      summary: Unduh isi berkas
+      operationId: getDokumenIsi
+      description: >
+        Mengalirkan isi berkasnya, bukan JSON. Tetap di balik autentikasi seperti
+        endpoint lain — foto faktur memuat harga beli dan identitas supplier.
+
+
+        Selalu disajikan sebagai unduhan: `Content-Disposition: attachment` dan
+        `X-Content-Type-Options: nosniff`, sehingga HTML atau SVG yang entah bagaimana
+        tersimpan tidak bisa dieksekusi di origin aplikasi. `Cache-Control:
+        private, no-store` menjaganya tidak mengendap di cache bersama.
+
+
+        Lampiran yang sudah dihapus menjawab 404: barisnya masih ada sebagai jejak,
+        berkasnya tidak.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Isi berkas
+          headers:
+            Content-Disposition:
+              schema: { type: string }
+              description: >
+                Selalu `attachment`. Nama asli dibawa di parameter `filename*`
+                (RFC 5987); bentuk berkutip hanya ASCII aman, karena `nama_asli`
+                berasal dari klien dan kutip atau baris baru di header adalah
+                penyuntikan header.
+            X-Content-Type-Options:
+              schema: { type: string, example: nosniff }
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    delete:
+      tags: [dokumen]
+      summary: Hapus lampiran (soft delete)
+      operationId: deleteDokumen
+      description: >
+        Satu-satunya DELETE di API ini, dan ia **soft delete**: berkasnya dihapus dari
+        disk, barisnya bertahan dengan `deleted_at` terisi. Jejak bahwa pernah ada
+        unggahan lebih berharga daripada satu baris yang dihemat.
+
+
+        Hanya boleh selama berkasnya **masih yatim atau dokumen induknya `DRAFT`**.
+        Setelah dokumennya diajukan, foto faktur yang jadi dasar persetujuan adalah
+        bagian dari rekaman, bukan milik pengunggah untuk ditarik kembali — 409.
+
+
+        Menghapus dua kali menjawab 409, bukan 200: barisnya masih ada dan sudah
+        ditandai.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Berkas terhapus
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Dokumen" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/dokumen/{id}/tempel:
+    post:
+      tags: [dokumen]
+      summary: Tempelkan lampiran ke dokumen induknya
+      operationId: tempelDokumen
+      description: >
+        Paruh kedua dari "unggah dulu, tempel kemudian", dan satu-satunya cara sebuah
+        baris berhenti menjadi calon sapuan cronjob.
+
+
+        Satu endpoint di modul ini, bukan field di setiap dokumen: modul yang mulai
+        menerima lampiran cukup ditambahkan ke whitelist `ref_table` dan tidak perlu
+        mengubah DTO-nya sendiri. Tidak ada foreign key di balik referensi polimorfik,
+        jadi whitelist itulah yang memastikan `ref_table` menyebut dokumen sungguhan —
+        nilai di luar daftar menjawab 400, dan `ref_id` yang tidak menunjuk baris mana
+        pun juga 400.
+
+
+        Ditolak 409 kalau lampirannya sudah tertempel ke dokumen lain (memindahkannya
+        berarti diam-diam mencabut bukti dari dokumen yang memilikinya), kalau dokumen
+        induknya sudah `BATAL`, atau kalau induknya sudah memegang 10 lampiran.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [ref_table, ref_id]
+              properties:
+                ref_table:
+                  type: string
+                  enum: [pembelian, penerimaan_susulan, retur_pembelian, pembayaran_utang]
+                ref_id: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Lampiran tertempel
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Dokumen" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/product:
     get:
@@ -3028,6 +3267,60 @@ components:
       schema: { type: boolean }
 
   schemas:
+    Dokumen:
+      type: object
+      description: >
+        Metadata satu lampiran. Isinya diambil lewat `GET /api/v1/dokumen/{id}`, tidak
+        pernah disisipkan di sini.
+
+
+        `path_simpan` sengaja tidak ada di respons: itu letak berkasnya di disk server,
+        dan klien tidak mendapat apa pun darinya yang tidak sudah didapat dari endpoint
+        unduhan.
+      properties:
+        id: { type: integer, format: int64 }
+        nama_asli:
+          type: string
+          description: >
+            Nama dari klien, disimpan apa adanya **hanya untuk ditampilkan**. Tidak
+            pernah dipakai sebagai path.
+          example: faktur-sumber-jaya.jpg
+        mime:
+          type: string
+          description: Hasil deteksi isi berkas, bukan header dari klien.
+          enum: [image/jpeg, image/png, application/pdf]
+        ukuran_byte:
+          type: integer
+          format: int64
+          description: Yang benar-benar terhitung saat ditulis, bukan yang diklaim klien.
+        checksum_sha256: { type: string, nullable: true, minLength: 64, maxLength: 64 }
+        ref_table:
+          type: string
+          nullable: true
+          description: Null selama masih yatim. Terisi bersamaan dengan `ref_id`.
+          enum: [pembelian, penerimaan_susulan, retur_pembelian, pembayaran_utang]
+        ref_id: { type: integer, format: int64, nullable: true }
+        created_by: { type: integer, format: int64 }
+        nama_pembuat: { type: string, nullable: true }
+        created_at:
+          type: string
+          format: date-time
+          description: Dasar penentuan umur berkas yatim.
+        deleted_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Terisi berarti berkasnya sudah tidak ada di disk — dihapus operator atau
+            disapu worker. Barisnya sengaja dipertahankan sebagai jejak.
+        duplikat_dari_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            Hanya muncul pada respons unggah, dan hanya kalau sudah ada lampiran hidup
+            dengan checksum yang sama. Peringatan, bukan penolakan.
+
     Ruang:
       type: object
       properties:
