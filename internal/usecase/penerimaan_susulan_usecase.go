@@ -35,6 +35,9 @@ type PenerimaanSusulanUseCase struct {
 	ProductRepository   *repository.ProductRepository
 	KartuStokRepository *repository.KartuStokRepository
 	CounterRepository   *repository.DocumentCounterRepository
+	// Read for the error message only; the kartu_stok trigger is the guard. See
+	// PembelianUseCase.
+	PeriodeRepository *repository.PeriodeRepository
 }
 
 func NewPenerimaanSusulanUseCase(
@@ -46,6 +49,7 @@ func NewPenerimaanSusulanUseCase(
 	productRepository *repository.ProductRepository,
 	kartuStokRepository *repository.KartuStokRepository,
 	counterRepository *repository.DocumentCounterRepository,
+	periodeRepository *repository.PeriodeRepository,
 ) *PenerimaanSusulanUseCase {
 	return &PenerimaanSusulanUseCase{
 		DB:                  db,
@@ -56,6 +60,7 @@ func NewPenerimaanSusulanUseCase(
 		ProductRepository:   productRepository,
 		KartuStokRepository: kartuStokRepository,
 		CounterRepository:   counterRepository,
+		PeriodeRepository:   periodeRepository,
 	}
 }
 
@@ -356,6 +361,11 @@ func (c *PenerimaanSusulanUseCase) Posting(ctx context.Context, request *model.P
 		return nil, model.Conflict("penerimaan susulan ini sudah punya baris kartu stok")
 	}
 
+	// Checked here so the refusal can name the period; the trigger stays the guard.
+	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, susulan.Tanggal); err != nil {
+		return nil, err
+	}
+
 	detail, err := c.SusulanRepository.FindDetail(ctx, tx, request.ID)
 	if err != nil {
 		return nil, err
@@ -416,9 +426,11 @@ func (c *PenerimaanSusulanUseCase) Posting(ctx context.Context, request *model.P
 // Batal voids a posted follow-up receipt by appending a reversing row for every
 // movement it made, and hands the outstanding quantity back to the purchase.
 //
-// The same caveat as cancelling a purchase applies: the reversal is valued at the
-// current moving average, not at the cost the original row carried, because the
-// trigger overwrites the cost on every outgoing row. See PembelianUseCase.Batal.
+// The same two caveats as cancelling a purchase apply, and both are explained at
+// PembelianUseCase.Batal: the reversal is valued at the current moving average rather
+// than at the cost the original row carried, and it is dated today, so voiding a
+// document whose period has since closed books the correction into the current period
+// instead of reopening the closed one.
 func (c *PenerimaanSusulanUseCase) Batal(ctx context.Context, request *model.BatalPenerimaanSusulanRequest) (*model.PenerimaanSusulanResponse, error) {
 	if err := c.Validate.Struct(request); err != nil {
 		return nil, err
@@ -434,6 +446,13 @@ func (c *PenerimaanSusulanUseCase) Batal(ctx context.Context, request *model.Bat
 
 	susulan, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusSusulanPosted)
 	if err != nil {
+		return nil, err
+	}
+
+	// The reversal is dated now, so the period that has to be open is the current one,
+	// not the document's.
+	tanggalPembalik := time.Now()
+	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, tanggalPembalik); err != nil {
 		return nil, err
 	}
 
@@ -455,7 +474,7 @@ func (c *PenerimaanSusulanUseCase) Batal(ctx context.Context, request *model.Bat
 		pembalik := &entity.KartuStok{
 			IDBarang:         asal[i].IDBarang,
 			IDRuang:          asal[i].IDRuang,
-			TanggalTransaksi: time.Now(),
+			TanggalTransaksi: tanggalPembalik,
 			JenisTransaksi:   entity.JenisTransaksiPembatalanTransaksi,
 			StokMasuk:        asal[i].StokKeluar,
 			StokKeluar:       asal[i].StokMasuk,

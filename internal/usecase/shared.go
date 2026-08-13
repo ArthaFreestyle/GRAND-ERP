@@ -84,6 +84,35 @@ func invalidOnCheck(err error, message string) error {
 	return err
 }
 
+// periksaPeriode refuses a movement dated inside a closed month, before the
+// kartu_stok trigger has to.
+//
+// This is not the guard and must not be mistaken for one — the trigger is, and it
+// decides under an advisory lock that no reader can get in front of. What this buys
+// is a message naming one cause. A trigger's RAISE carries no constraint name, so
+// invalidOnCheck cannot tell a closed period from insufficient stock, and every call
+// site has to say "periode sudah TUTUP atau saldo tidak mencukupi" — an operator
+// reading that learns nothing about which of the two to go and fix. Same relationship
+// as ExistsByKode has to a unique index.
+//
+// It answers 400 rather than 409, matching what the trigger's rejection maps to. The
+// two paths describe the same refusal and should not arrive as different statuses
+// depending on who noticed first.
+func periksaPeriode(ctx context.Context, db repository.DBTX, periode *repository.PeriodeRepository, tanggal time.Time) error {
+	tutup, err := periode.IsTutup(ctx, db, tanggal)
+	if err != nil {
+		return err
+	}
+
+	if tutup {
+		return model.Invalid(fmt.Sprintf(
+			"periode %04d-%02d sudah TUTUP", tanggal.Year(), int(tanggal.Month()),
+		))
+	}
+
+	return nil
+}
+
 // conflictOnTransisi maps a guarded status change that matched no row to a 409.
 //
 // The document moved between the read and the write. Nothing failed — the guard is

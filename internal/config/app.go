@@ -47,6 +47,7 @@ func Bootstrap(config *BootstrapConfig) {
 	returRepository := repository.NewReturPembelianRepository()
 	pembayaranRepository := repository.NewPembayaranUtangRepository()
 	dokumenRepository := repository.NewDokumenRepository()
+	periodeRepository := repository.NewPeriodeRepository()
 
 	ruangUseCase := usecase.NewRuangUseCase(
 		config.DB, config.Log, config.Validate, ruangRepository,
@@ -75,13 +76,27 @@ func Bootstrap(config *BootstrapConfig) {
 	productUseCase := usecase.NewProductUseCase(
 		config.DB, config.Log, config.Validate, productRepository, pembelianRepository,
 	)
-	// PembelianUseCase takes four repositories: posting a purchase writes the
+	// PeriodeUseCase is book closing. It is the module closest to master data — no
+	// number, no lines, no posting — and it holds one repository, because closing a
+	// month writes one row. What that row does is felt everywhere else: the kartu_stok
+	// trigger reads it on every insert, so every module that writes stock inherits the
+	// refusal without a line of code of its own.
+	periodeUseCase := usecase.NewPeriodeUseCase(
+		config.DB, config.Log, config.Validate, periodeRepository,
+	)
+	// PembelianUseCase takes five repositories: posting a purchase writes the
 	// header, its lines, a reserved document number, and one kartu_stok row per
 	// received line — all in one transaction, because a partial posting would leave
 	// stock that no document explains and kartu_stok cannot be edited afterwards.
+	//
+	// PeriodeRepository is the fifth and is only there for the error message: the
+	// kartu_stok trigger is what actually refuses a closed month, but its RAISE carries
+	// no constraint name, so without a read of its own this module could only tell an
+	// operator that either the period is closed or the stock is short.
 	pembelianUseCase := usecase.NewPembelianUseCase(
 		config.DB, config.Log, config.Validate,
 		pembelianRepository, productRepository, kartuStokRepository, counterRepository,
+		periodeRepository,
 	)
 	// PenerimaanSusulanUseCase reaches into pembelian on purpose: a follow-up
 	// receipt is defined as the remainder of a purchase, so it reads that document's
@@ -91,7 +106,7 @@ func Bootstrap(config *BootstrapConfig) {
 	susulanUseCase := usecase.NewPenerimaanSusulanUseCase(
 		config.DB, config.Log, config.Validate,
 		susulanRepository, pembelianRepository, productRepository,
-		kartuStokRepository, counterRepository,
+		kartuStokRepository, counterRepository, periodeRepository,
 	)
 	// ReturPembelianUseCase takes the same five as the follow-up receipt above, and for
 	// the same reasons — it is the mirror document. It reads the purchase's lines for
@@ -101,7 +116,7 @@ func Bootstrap(config *BootstrapConfig) {
 	returUseCase := usecase.NewReturPembelianUseCase(
 		config.DB, config.Log, config.Validate,
 		returRepository, pembelianRepository, productRepository,
-		kartuStokRepository, counterRepository,
+		kartuStokRepository, counterRepository, periodeRepository,
 	)
 	// PembayaranUtangUseCase is the first transaction usecase that needs no
 	// KartuStokRepository at all: money moving to a supplier changes no stock. It reaches
@@ -149,6 +164,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pelangganController := deliveryhttp.NewPelangganController(config.Log, pelangganUseCase)
 	authController := deliveryhttp.NewAuthController(config.Log, authUseCase)
 	dokumenController := deliveryhttp.NewDokumenController(config.Log, dokumenUseCase)
+	periodeController := deliveryhttp.NewPeriodeController(config.Log, periodeUseCase)
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
 	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
 	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
@@ -171,6 +187,7 @@ func Bootstrap(config *BootstrapConfig) {
 		DocsController:       docsController,
 		AuthController:       authController,
 		DokumenController:    dokumenController,
+		PeriodeController:    periodeController,
 		PembelianController:  pembelianController,
 		SusulanController:    susulanController,
 		ReturController:      returController,

@@ -640,6 +640,50 @@ Job harian di worker, `time.Ticker` dan bukan pustaka cron: satu job harian butu
 - `checksum_sha256` dipakai mendeteksi faktur yang sama diunggah dua kali. Hasilnya dilaporkan sebagai `duplikat_dari_id`, **bukan penolakan**: satu hasil scan sah saja ditempel ke dua dokumen berbeda.
 - Penyimpanannya di balik satu interface (`repository.DokumenStorage`), jadi menggantinya dengan S3/MinIO tidak menyentuh usecase. Yang berjalan sekarang disk lokal, dan konsekuensinya **`web` tidak bisa discale lebih dari satu instance** — dua instance dengan volume sendiri-sendiri masing-masing memegang separuh lampiran.
 
+## Tutup buku: periode yang menolak posting
+
+Tabel `periode` sudah ada sejak migrasi `000002` dan trigger `kartu_stok` sudah menghormatinya sejak `000004` — tapi sampai isu #6 tidak ada satu baris Go pun yang menyentuhnya, jadi tidak ada tutup buku: setiap bulan terbuka selamanya.
+
+Modul ini yang paling mendekati master data, bukan dokumen transaksi: tidak ada nomor, tidak ada baris detail, tidak ada posting. Yang membuatnya berbeda dari `supplier` cuma dua hal — endpoint aksinya (`POST /{...}/tutup`) dan row lock yang diambil sebelum memutuskan.
+
+**Menutup satu bulan menyentuh setiap modul yang menulis `kartu_stok`, sekarang maupun nanti.** Penjualan, mutasi, pemakaian, dan stok opname akan mewarisi perilakunya tanpa satu baris kode, karena penegakannya di trigger.
+
+### Bulan tanpa baris dihitung terbuka
+
+Ini keputusan `000004`, supaya database baru tidak macet sebelum ada data — dan konsekuensinya menentukan bentuk seluruh modul:
+
+- Menutup sebuah bulan berarti **membuat** barisnya, bukan mengubah baris yang sudah ada. Karena itu `Tutup` adalah upsert.
+- `GET /api/v1/periode/{tahun}/{bulan}` menjawab **`BUKA` sintetis** untuk bulan tanpa baris, bukan 404. "Tidak ada barisnya" dan "terbuka" adalah fakta yang sama; 404 malah mengundang klien menyimpulkan bulannya tidak ada.
+- `GET /api/v1/periode` hanya memuat baris yang tersimpan, jadi bulan yang tidak pernah ditutup tidak muncul di sana betapapun terbukanya. Tabelnya mencatat penutupan, bukan kalender.
+- Rutenya dikunci `(tahun, bulan)`, bukan `/{id}` seperti modul lain. Pasangan itulah identitas sebenarnya — `periode_tahun_bulan_uidx` sudah menyatakannya — dan rute ber-id justru tidak bisa menyebut kasus yang paling sering terjadi, karena bulan yang belum ditutup tidak punya id. Responsnya juga tidak memuat `id` sama sekali, sehingga bulan yang belum pernah ditutup punya bentuk yang sama persis dengan yang sudah.
+
+### Pembalikan masuk periode berjalan, bukan periode dokumennya
+
+Baris pembalik bertanggal **hari ini**, sedangkan posting bertanggal tanggal dokumen. Asimetri itu sudah ada di kode sejak `pembelian`; isu #6 yang memutuskannya secara eksplisit dan memakukannya dengan test.
+
+Akibatnya **membatalkan dokumen yang periodenya sudah ditutup tetap berhasil**: pembaliknya jatuh di bulan berjalan yang masih terbuka, dan angka bulan tertutupnya tidak bergeser sedikit pun. Itu perlakuan akuntansi yang lazim — koreksi atas periode tertutup dibukukan di periode berjalan, bukan dengan membongkar yang sudah ditutup. Alternatifnya membuat dokumen salah ketik dari bulan lalu tidak punya jalan keluar sama sekali.
+
+Yang perlu diketahui, karena tidak gratis: **status dokumen jadi tidak sinkron dengan buku bulan itu.** Dokumennya `BATAL`, sementara kartu stok bulan tertutup masih memuat pergerakannya, diimbangi baris pembalik di bulan lain. Laporan per periode harus membaca `kartu_stok`, bukan status dokumen.
+
+Yang justru bisa menghalangi pembatalan adalah periode **berjalan** yang sedang `TUTUP` — tidak ada tempat membukukan koreksinya sampai ada yang membukanya kembali.
+
+### Menutup dan memposting tidak bisa saling menyalip
+
+Trigger membaca `periode` tanpa lock, dan di READ COMMITTED itu jendela nyata: transaksi posting membaca `BUKA`, penutupan commit, lalu postingnya commit — mendarat di bulan yang bukunya sudah tutup, tanpa ada yang melaporkannya. Bukan skenario khayalan kalau tutup buku dijalankan sore hari selagi orang masih menginput.
+
+Migrasi `000017` menutupnya dengan **advisory lock**: trigger mengambil sisi *shared* atas `(tahun, bulan)` sebelum membaca statusnya, penutupan mengambil sisi *eksklusif*. Jadi penutupan menunggu setiap posting yang sedang berjalan untuk bulan itu, dan setiap posting yang mulai sesudahnya menunggu penutupan.
+
+`SELECT ... FOR SHARE` atas barisnya tidak dipakai karena tidak bisa: bulan yang belum pernah ditutup **tidak punya baris**, dan menutup bulan berarti membuatnya — persis pada kasus yang paling sering terjadi, tidak ada apa pun untuk dikunci.
+
+### Hal lain yang perlu diketahui
+
+- **Boleh dibuka kembali, `SUPERADMIN` saja.** Bulan yang bisa dibuka siapa saja tidak pernah benar-benar tertutup, jadi tutup dan buka adalah satu kendali yang sama. `000017` menambah `dibuka_oleh` dan `ts_buka` supaya pembukaan meninggalkan jejak — tanpa itu, membuka lalu menutup lagi menimpa `ditutup_oleh`/`ts_tutup` tanpa sisa dan tidak ada yang tahu bulan itu pernah dibuka. Sepasang kolom, bukan tabel audit tersendiri: riwayat lengkap setiap penutupan adalah pertanyaan lain, dan tabelnya bisa ditambahkan kalau memang ditanyakan.
+- **Menutup tidak harus berurutan.** Agustus boleh ditutup selagi Juli masih terbuka. Menuntut urutan berarti memaksa menutup bulan-bulan yang tidak pernah dipakai lebih dulu, dan tidak ada yang bisa rusak karena selanya — penegakannya per bulan di trigger, bukan saldo berjalan yang bulan terlewat merusaknya.
+- **Menutup bulan yang sudah `TUTUP` menjawab 409**, begitu juga membuka bulan yang tidak sedang `TUTUP`. Keduanya tidak mengubah apa pun, dan 200 akan membuat pemanggil mengira ada yang berubah.
+- **Tidak ada `DELETE`**, seperti seluruh proyek ini. Periode yang keliru ditutup dibuka kembali, tidak dihapus — menghapus barisnya juga menghapus satu-satunya catatan bahwa bulan itu pernah ditutup.
+- **Pesan errornya sekarang menyebut satu sebab.** `RAISE` dari trigger tidak membawa nama constraint, jadi `invalidOnCheck` tidak bisa membedakan periode tertutup dari stok kurang, dan setiap pemanggil terpaksa bilang "periode sudah TUTUP **atau** saldo tidak mencukupi". Sekarang periode diperiksa lebih dulu di usecase sehingga pesannya berbunyi "periode 2026-07 sudah TUTUP". Yang menegakkan tetap trigger — pemeriksaan di Go hanya untuk pesan, persis seperti `ExistsByKode` terhadap unique index.
+- Tabelnya tidak punya `created_at`/`updated_at` dan tidak ikut trigger `set_updated_at()`. Tidak ditambahkan: `ts_tutup` dan `ts_buka` sudah menjawab pertanyaan yang berguna, dan baris ini tidak berubah karena hal lain.
+
 ## Autentikasi
 
 Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`.
@@ -692,6 +736,7 @@ Membaca terbuka untuk siapa pun yang sudah login — operator yang tidak bisa me
 | `dokumen` (lampiran) | semua yang login | semua yang login |
 | `pembelian`, `penerimaan_susulan`, `retur_pembelian` — input, edit, ajukan | semua yang login | `SUPERADMIN`, `INVENTARIS` |
 | `pembelian`, `penerimaan_susulan`, `retur_pembelian` — posting, tolak, batal | — | `SUPERADMIN` |
+| `periode` (tutup buku) | semua yang login | `SUPERADMIN` |
 | `role`, `user` | `SUPERADMIN` | `SUPERADMIN` |
 
 `role` dan `user` tertutup termasuk untuk membaca: daftar akun beserta hak aksesnya sensitif, dan bisa menulis di sana adalah jalan eskalasi hak — beri diri sendiri `SUPERADMIN`, sisanya menyusul.
@@ -699,6 +744,8 @@ Membaca terbuka untuk siapa pun yang sudah login — operator yang tidak bisa me
 **`dokumen` tidak punya pembagian role sama sekali**, dan itu bukan aturan "baca terbuka" yang dilebarkan diam-diam ke tulis. Lampiran adalah infrastruktur milik banyak modul, jadi tidak ada satu pemilik data yang bisa ditunjuk. Yang menjaganya adalah **statusnya, bukan role pemanggilnya**: unggahan tidak berarti apa-apa sampai ada yang menempelkannya, penempelan ditolak begitu dokumen induknya `BATAL` atau sudah memegang 10 lampiran, dan penghapusan ditolak begitu induknya keluar dari `DRAFT`. Membagi role di sini berarti menentukan siapa yang boleh memotret faktur — pertanyaan yang sudah dijawab oleh siapa yang berdiri di meja penerimaan.
 
 **`pembelian`, `penerimaan_susulan`, dan `retur_pembelian` dibagi menurut tahap alurnya, bukan menurut data yang disentuh** — ketiganya menulis `kartu_stok`, dan itulah alasannya. Pada `retur_pembelian` alasannya paling kuat: ia satu-satunya dokumen sejauh ini yang postingnya **mengeluarkan** barang, jadi yang salah bisa menekan saldo ke angka yang tidak lagi cocok dengan rak. Memposting pembelian bukan penyuntingan: ia menambah baris ke `kartu_stok` yang bersifat append-only, jadi posting yang salah tidak bisa diperbaiki, hanya dibalik — dan pembalikannya dinilai pada rata-rata bergerak yang sudah berubah. Karena itu meja yang membaca faktur kertas dan menghitung isi box bukan meja yang memutuskan angka-angka itu boleh masuk buku stok. Pembagiannya ada pada transisinya, bukan pada recordnya: di kantor kecil satu orang bisa saja memegang kedua role, dan baginya tidak ada yang berubah.
+
+**Menulis `periode` hanya `SUPERADMIN`, dan itu penjagaan paling ketat di tabel ini.** Yang berubah saat sebuah bulan ditutup bukan data modul ini sendiri, melainkan kemampuan **setiap modul lain** memposting ke dalamnya. Membacanya tetap terbuka seperti pembacaan yang lain — apakah bulan lalu masih terbuka justru yang perlu diketahui operator sebelum mengetik faktur yang terlambat.
 
 > [!NOTE]
 > Pembagian di atas adalah **asumsi awal** yang ditarik dari tiga nama role, bukan hasil dari spesifikasi. Sesuaikan `setupAuthRoute` di `internal/delivery/http/route/route.go` begitu pembagian kerja sebenarnya jelas — seluruh kebijakannya ada di satu fungsi itu supaya bisa dibaca sekaligus.
@@ -744,7 +791,7 @@ Skema lengkap ada di migrasi `000002`–`000008`. **`pembelian`, `penerimaan_sus
 - **Trigger yang menghitung saldo, bukan aplikasi.** `stok_awal`, `stok_akhir`, `harga_pokok_satuan`, `nilai_keluar`, dan `nilai_akhir` ditimpa saat insert. Aplikasi hanya mengirim arah pergerakan (`stok_masuk` **atau** `stok_keluar`, tidak keduanya), `nilai_masuk`, dan kolom referensi.
 - **Rata-rata bergerak**: barang masuk menggeser harga pokok, barang keluar tidak pernah. Stok nol memaksa nilai persediaan tepat nol supaya sisa pembulatan tidak menumpuk.
 - Saldo dipartisi per `(id_barang, id_ruang)` dan diurutkan pakai `id`, bukan tanggal. Insert mengambil `pg_advisory_xact_lock` pada pasangan itu.
-- Trigger menolak stok negatif dan posting ke `periode` berstatus `TUTUP`. Bulan tanpa baris `periode` dihitung terbuka.
+- Trigger menolak stok negatif dan posting ke `periode` berstatus `TUTUP`. Bulan tanpa baris `periode` dihitung terbuka. Sejak `000017` trigger juga mengambil advisory lock *shared* atas `(tahun, bulan)` sebelum membaca statusnya, supaya penutupan buku tidak bisa menyalip posting yang sedang berjalan — lihat [Tutup buku](#tutup-buku-periode-yang-menolak-posting).
 - Kuantitas di `kartu_stok` selalu dalam satuan dasar; `qty_input`/`id_satuan_input` hanya jejak audit apa yang diketik operator.
 - Dokumen menyimpan snapshot (harga, faktor konversi, HPP); master menyimpan aturan berjalan. Retur menyalin harga pokok dari baris dokumen asal, bukan dari rata-rata berjalan.
 - Stok hanya bergerak saat posting, tidak saat draft.
@@ -840,6 +887,10 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `POST` | `/api/v1/pelanggan` | Create |
 | `GET` | `/api/v1/pelanggan/{id}` | Get by id |
 | `PATCH` | `/api/v1/pelanggan/{id}` | Update parsial |
+| `GET` | `/api/v1/periode` | List baris tersimpan — `page`, `size`, `tahun`, `status` |
+| `GET` | `/api/v1/periode/{tahun}/{bulan}` | Status satu bulan; bulan tanpa baris menjawab `BUKA` sintetis |
+| `POST` | `/api/v1/periode/{tahun}/{bulan}/tutup` | Tutup buku bulan itu |
+| `POST` | `/api/v1/periode/{tahun}/{bulan}/buka` | Buka kembali |
 | `GET` | `/api/v1/ruang` | List — `page`, `size`, `search`, `is_aktif` |
 | `POST` | `/api/v1/ruang` | Create |
 | `GET` | `/api/v1/ruang/{id}` | Get by id |
@@ -881,6 +932,7 @@ Sudah ada:
 - **Pengurangan utang oleh retur**, lewat `nilai_kredit_utang` yang dibekukan saat posting — diskalakan terhadap `pembelian.total` supaya diskon nota tidak ikut dikreditkan dua kali, dan tidak memakai `retur_pembelian.total` yang sudah memuat porsi ongkir
 - **Daftar utang per supplier** (`GET /supplier/{id}/utang`) — query, bukan modul, seperti riwayat harga beli
 - **Subsistem lampiran berkas** (isu #5): unggah dengan MIME dari isi berkas, penyimpanan di balik interface, unduhan yang selalu `attachment` di balik token, penempelan polimorfik ke dokumen mana pun yang terdaftar, dan **job pertama di `cmd/worker`** — sapuan berkas yatim di bawah advisory lock, menghapus berdasarkan baris tabel dan tidak pernah dengan memindai direktori
+- **Modul `periode`** (isu #6): tutup buku bulanan yang menolak posting ke bulan tertutup untuk setiap modul yang menulis `kartu_stok`, sekarang maupun nanti — dengan advisory lock yang membuat menutup dan memposting tidak bisa saling menyalip, pembukaan kembali yang meninggalkan jejaknya sendiri, dan pembalikan yang tetap bisa dibukukan di periode berjalan
 - Tujuh modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `role`, `user` (create/get/list/patch) dan `ruang` (create/get/list)
 - User dengan banyak role, `role_ids` yang mengganti seluruh himpunan dalam satu transaksi, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
@@ -895,7 +947,6 @@ Belum ada:
 - **Pencabutan sesi.** Token stateless tidak bisa dicabut sebelum kedaluwarsa
 - **Logout dan refresh token**
 - Captcha (Redis sudah terhubung tapi belum dipakai)
-- Modul `periode`. Trigger `kartu_stok` sudah menolak posting ke periode `TUTUP`, tapi tanpa lapisan Go tidak ada tutup buku — dan bulan tanpa baris `periode` dihitung terbuka
 - Lapisan Go untuk penjualan, piutang, retur penjualan, pemakaian, mutasi, dan stok opname
 - **Penyimpanan lampiran di object storage.** Yang berjalan disk lokal di balik `repository.DokumenStorage`, jadi `web` belum bisa discale lebih dari satu instance
 - Validasi tingkat aplikasi yang tersisa, semuanya di sisi penjualan: kuota retur penjualan, batas alokasi penerimaan pembayaran, plafon kredit, dan penghitungan ulang `penjualan.status_pembayaran` — sisi utang sudah selesai di fase 6, dan cerminnya tinggal ditiru. Didaftar lengkap di CLAUDE.md
