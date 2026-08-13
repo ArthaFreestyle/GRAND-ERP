@@ -649,8 +649,15 @@ func TestKartuStokMenolakPerubahan(t *testing.T) {
 	}
 }
 
-// The trigger refuses a posting dated inside a closed period, and a month with no
-// periode row counts as open.
+// A posting dated inside a closed period is refused, and a month with no periode row
+// counts as open.
+//
+// The row is inserted with raw SQL rather than through PeriodeUseCase.Tutup, which is
+// what makes this still worth having next to the periode tests: it proves the refusal
+// does not depend on the closing having gone through this application at all. Since
+// isu #6 the message comes from the Go pre-check rather than the trigger — see
+// TestPostingKePeriodeTutupMenyebutPeriodenya for that half — but the trigger is still
+// what a closing racing a posting runs into.
 func TestPostingKePeriodeTutupDitolak(t *testing.T) {
 	testApp := newApp(t)
 	f := pembelianFixture(t, testApp)

@@ -123,6 +123,7 @@ tags:
   - name: penerimaan-susulan
   - name: retur-pembelian
   - name: product
+  - name: periode
   - name: docs
   - name: ruang
   - name: satuan
@@ -1182,6 +1183,12 @@ paths:
         `periode` dihitung terbuka.
 
 
+        Periode yang tertutup diperiksa lebih dulu di Go supaya pesannya menyebut
+        bulannya — "periode 2026-07 sudah TUTUP". Yang menegakkannya tetap trigger
+        `kartu_stok`, dan penutupan yang commit di sela pemeriksaan dan penulisan tetap
+        tertangkap di sana, hanya dengan pesan yang lebih kabur.
+
+
         Role: `SUPERADMIN`.
       parameters:
         - $ref: "#/components/parameters/ID"
@@ -1221,7 +1228,26 @@ paths:
         bukan jalan pintas di sini.
 
 
-        Ditolak 400 kalau stok sudah terpakai sehingga saldo akan negatif.
+        **Catatan penting soal tanggalnya:** baris pembalik bertanggal **hari ini**,
+        bukan tanggal dokumennya. Akibatnya membatalkan dokumen yang periodenya sudah
+        ditutup tetap berhasil — pembaliknya jatuh di periode berjalan yang masih
+        terbuka, dan angka bulan tertutupnya tidak bergeser sedikit pun. Itu perlakuan
+        akuntansi yang lazim: koreksi atas periode tertutup dibukukan di periode
+        berjalan, bukan dengan membongkar yang sudah ditutup, dan sebaliknya akan
+        membuat dokumen salah ketik dari bulan tertutup tidak punya jalan keluar sama
+        sekali.
+
+
+        Yang perlu diketahui klien: setelah itu **status dokumen tidak lagi sinkron
+        dengan buku bulan tersebut**. Dokumennya `BATAL`, sementara kartu stok bulan
+        tertutup masih memuat pergerakannya, diimbangi baris pembalik di bulan lain.
+        Laporan per periode harus membaca `kartu_stok`, bukan status dokumen.
+
+
+        Ditolak 400 kalau stok sudah terpakai sehingga saldo akan negatif, atau kalau
+        **periode berjalan** yang sedang `TUTUP` — bukan periode dokumennya. Kalau itu
+        terjadi, tidak ada tempat membukukan koreksinya sampai ada yang membuka bulan
+        berjalan kembali.
 
 
         Role: `SUPERADMIN`.
@@ -1541,6 +1567,10 @@ paths:
         lain untuk pembelian yang sama bisa lebih dulu menghabiskan sisanya.
 
 
+        Ditolak 400 kalau periode dokumen berstatus `TUTUP`; pesannya menyebut bulannya.
+        Bulan tanpa baris `periode` dihitung terbuka.
+
+
         Role: `SUPERADMIN`.
       parameters:
         - $ref: "#/components/parameters/ID"
@@ -1568,9 +1598,12 @@ paths:
         dengan menghitung ulang `status_penerimaan`.
 
 
-        Berlaku catatan yang sama seperti pembatalan pembelian: baris pembalik
+        Berlaku dua catatan yang sama seperti pembatalan pembelian. Baris pembalik
         dinilai pada rata-rata bergerak yang berlaku sekarang, bukan pada harga pokok
-        baris aslinya, karena trigger menimpa harga pokok setiap baris keluar.
+        baris aslinya, karena trigger menimpa harga pokok setiap baris keluar. Dan
+        bertanggal hari ini, jadi dokumen yang periodenya sudah ditutup tetap bisa
+        dibatalkan — koreksinya masuk periode berjalan. Yang bisa menghalangi justru
+        periode **berjalan** yang sedang `TUTUP`.
 
 
         **Membatalkan pembelian yang punya susulan POSTED ditolak 409** — batalkan
@@ -1889,7 +1922,8 @@ paths:
 
         Ditolak 400 kalau kuantitasnya melebihi yang bisa diretur, kalau saldo stok di
         ruang itu tidak mencukupi, atau kalau periode dokumen berstatus `TUTUP`. Bulan
-        tanpa baris `periode` dihitung terbuka.
+        tanpa baris `periode` dihitung terbuka, dan periode tertutup diperiksa lebih
+        dulu di Go supaya pesannya menyebut bulannya.
 
 
         Role: `SUPERADMIN`.
@@ -1918,6 +1952,12 @@ paths:
         pergerakan yang dibuat dokumen ini: barangnya kembali masuk, dinilai persis
         sebesar yang tercatat saat ia keluar — satu-satunya angka yang membuat
         pasangannya berjumlah nol.
+
+
+        Seperti setiap pembalikan di sistem ini, barisnya bertanggal hari ini. Retur
+        yang periodenya sudah ditutup tetap bisa dibatalkan — pembaliknya masuk periode
+        berjalan — dan yang bisa menghalangi justru periode **berjalan** yang sedang
+        `TUTUP`.
 
 
         **Membatalkan pembelian yang punya retur POSTED ditolak 409** — batalkan
@@ -2376,6 +2416,152 @@ paths:
                   data: { $ref: "#/components/schemas/PembayaranUtang" }
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/periode:
+    get:
+      tags: [periode]
+      summary: List periode
+      description: >
+        Halaman baris `periode` yang tersimpan, bulan terbaru lebih dulu.
+
+
+        Perhatikan apa yang **tidak** muncul di sini: bulan yang belum pernah ditutup
+        tidak punya baris sama sekali, jadi ia tidak ada di daftar ini betapapun
+        terbukanya. Itu bukan kekurangan — tabelnya mencatat penutupan, bukan
+        kalender. Untuk menanyakan satu bulan tertentu pakai
+        `GET /api/v1/periode/{tahun}/{bulan}`, yang menjawab untuk bulan mana pun.
+      operationId: listPeriode
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: tahun
+          in: query
+          description: Kosongkan untuk seluruh tahun.
+          schema: { type: integer, minimum: 2000, maximum: 9999 }
+        - name: status
+          in: query
+          description: Kosongkan untuk kedua status.
+          schema: { type: string, enum: [BUKA, TUTUP] }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Periode" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /api/v1/periode/{tahun}/{bulan}:
+    get:
+      tags: [periode]
+      summary: Status tutup buku satu bulan
+      description: >
+        Menjawab untuk bulan mana pun, ada barisnya atau tidak.
+
+
+        Bulan yang belum pernah ditutup menjawab **`BUKA` sintetis**, bukan 404: baris
+        `periode` yang tidak ada memang berarti bulannya terbuka — itu keputusan
+        migrasi `000004`, supaya database baru tidak macet sebelum ada data. Menjawab
+        404 akan mengundang klien menyimpulkan bulannya tidak ada.
+
+
+        Responsnya tidak memuat `id`. Identitas sebuah periode adalah pasangan
+        `(tahun, bulan)`, dan dengan begitu bulan yang belum pernah ditutup punya
+        bentuk respons yang sama persis dengan yang sudah.
+      operationId: getPeriode
+      parameters:
+        - $ref: "#/components/parameters/Tahun"
+        - $ref: "#/components/parameters/Bulan"
+      responses:
+        "200":
+          description: Status bulan itu
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Periode" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /api/v1/periode/{tahun}/{bulan}/tutup:
+    post:
+      tags: [periode]
+      summary: Tutup buku satu bulan
+      description: >
+        Menutup buku bulan itu: sejak commit, setiap dokumen yang menulis `kartu_stok`
+        dengan `tanggal_transaksi` di dalamnya ditolak. Penegakannya di trigger, jadi
+        modul yang belum ditulis pun mewarisinya tanpa satu baris kode.
+
+
+        Tidak ada body. Yang ditanyakan seluruhnya ada di path, dan pelakunya diambil
+        dari token — `ditutup_oleh` tidak pernah datang dari request.
+
+
+        Bulan yang belum punya baris akan **dibuatkan** barisnya, bukan diubah.
+        Jejak pembukaan sebelumnya (`dibuka_oleh`, `ts_buka`) sengaja tidak dihapus:
+        itu satu-satunya catatan bahwa bulan ini pernah dibuka kembali.
+
+
+        Menutup **tidak harus berurutan** — Agustus boleh ditutup selagi Juli masih
+        terbuka. Menuntut urutan berarti memaksa menutup bulan-bulan yang tidak pernah
+        dipakai lebih dulu, dan tidak ada yang bisa rusak karena selanya.
+      operationId: tutupPeriode
+      parameters:
+        - $ref: "#/components/parameters/Tahun"
+        - $ref: "#/components/parameters/Bulan"
+      responses:
+        "200":
+          description: Bulan itu sekarang TUTUP
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Periode" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+        # Bulan itu memang sudah TUTUP.
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/periode/{tahun}/{bulan}/buka:
+    post:
+      tags: [periode]
+      summary: Buka kembali bulan yang sudah ditutup
+      description: >
+        Kebalikan dari `tutup`, dan `SUPERADMIN` juga — bulan yang bisa dibuka siapa
+        saja tidak pernah benar-benar tertutup. Mengisi `dibuka_oleh` dan `ts_buka`
+        tanpa menyentuh `ditutup_oleh`/`ts_tutup`, sehingga riwayat penutupan yang
+        dibatalkan tetap terbaca.
+
+
+        Bulan yang tidak sedang `TUTUP` ditolak **409**, termasuk bulan yang tidak
+        punya baris sama sekali. Keduanya sudah terbuka, dan menjawab 200 untuk
+        "bukalah ini" akan membuat pemanggil mengira ada yang berubah.
+
+
+        Tidak ada `DELETE`. Bulan yang keliru ditutup dibuka kembali, tidak dihapus.
+      operationId: bukaPeriode
+      parameters:
+        - $ref: "#/components/parameters/Tahun"
+        - $ref: "#/components/parameters/Bulan"
+      responses:
+        "200":
+          description: Bulan itu sekarang BUKA
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Periode" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+        # Bulan itu tidak sedang TUTUP, termasuk kalau barisnya belum pernah ada.
         "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/ruang:
@@ -3250,6 +3436,23 @@ components:
       required: true
       schema: { type: integer, format: int64 }
 
+    # periode dikunci (tahun, bulan) dan bukan id, menyimpang dari pola /{id} di modul
+    # lain dengan sengaja: pasangan itulah identitas sebenarnya sebuah periode, seperti
+    # yang sudah dinyatakan periode_tahun_bulan_uidx. Rute ber-id malah tidak bisa
+    # menyebut kasus yang paling sering terjadi — bulan yang belum pernah ditutup tidak
+    # punya baris, jadi tidak punya id.
+    Tahun:
+      name: tahun
+      in: path
+      required: true
+      schema: { type: integer, minimum: 2000, maximum: 9999 }
+
+    Bulan:
+      name: bulan
+      in: path
+      required: true
+      schema: { type: integer, minimum: 1, maximum: 12 }
+
     Page:
       name: page
       in: query
@@ -3320,6 +3523,42 @@ components:
           description: >
             Hanya muncul pada respons unggah, dan hanya kalau sudah ada lampiran hidup
             dengan checksum yang sama. Peringatan, bukan penolakan.
+
+    Periode:
+      type: object
+      description: >
+        Status tutup buku satu bulan.
+
+
+        Tidak ada `id`, dan itu disengaja: identitas sebuah periode adalah pasangan
+        `(tahun, bulan)`. Menghilangkan kunci penggantinya membuat bulan yang belum
+        pernah ditutup — yang memang tidak punya baris — bisa dijawab dengan bentuk
+        yang sama persis, tanpa id null atau nol karangan.
+      properties:
+        tahun: { type: integer, example: 2026 }
+        bulan: { type: integer, minimum: 1, maximum: 12, example: 7 }
+        status:
+          type: string
+          enum: [BUKA, TUTUP]
+          description: >
+            `TUTUP` menolak setiap penulisan `kartu_stok` bertanggal di bulan ini.
+            Bulan tanpa baris menjawab `BUKA`.
+        ditutup_oleh: { type: integer, format: int64, nullable: true }
+        nama_penutup: { type: string, nullable: true }
+        ts_tutup:
+          type: string
+          format: date-time
+          nullable: true
+          description: Penutupan **terakhir**, bukan yang pertama.
+        dibuka_oleh: { type: integer, format: int64, nullable: true }
+        nama_pembuka: { type: string, nullable: true }
+        ts_buka:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Terisi berarti bulan ini pernah dibuka kembali setelah ditutup. Muncul
+            bersama `ts_tutup` berarti ditutup, dibuka, lalu ditutup lagi.
 
     Ruang:
       type: object

@@ -33,6 +33,7 @@ type RouteConfig struct {
 
 	AuthController       *deliveryhttp.AuthController
 	DokumenController    *deliveryhttp.DokumenController
+	PeriodeController    *deliveryhttp.PeriodeController
 	PembelianController  *deliveryhttp.PembelianController
 	SusulanController    *deliveryhttp.PenerimaanSusulanController
 	ReturController      *deliveryhttp.ReturPembelianController
@@ -93,6 +94,8 @@ func (c *RouteConfig) setupGuestRoute() {
 //     escalation path: grant yourself SUPERADMIN and the rest follows.
 //   - pembelian, penerimaan-susulan, and retur-pembelian split along their approval
 //     flow rather than by module: see the comment above those routes.
+//   - periode writes are SUPERADMIN-only. Closing a month is not this module's own
+//     data changing — it is every other module losing the ability to post into it.
 //
 // This split is a starting assumption drawn from the three role names, not something
 // derived from a spec. Adjust the guards as the real division of work becomes clear.
@@ -134,6 +137,24 @@ func (c *RouteConfig) setupAuthRoute() {
 	// soft delete: the row survives with deleted_at set, so the trace of an upload
 	// outlives the file.
 	api.Delete("/dokumen/:id", c.DokumenController.Delete)
+
+	// periode is book closing, and its guard is the strictest in this table: closing a
+	// month is what stops every document type from posting into it, now and for every
+	// module that writes kartu_stok later. Reopening is SUPERADMIN too — a month anyone
+	// can reopen was never really closed, and the two act as one control.
+	//
+	// Reads stay open like every other read. Whether last month is still open is
+	// exactly what an operator needs to know before typing a late invoice.
+	//
+	// Keyed on (tahun, bulan) instead of /{id}, unlike every other module. That pair is
+	// the real identity — periode_tahun_bulan_uidx says so — and an id-keyed route could
+	// not address the ordinary case at all, since a month nobody has closed has no row
+	// and so no id. The action endpoints still follow the documents' POST /{...}/aksi
+	// shape.
+	api.Get("/periode", c.PeriodeController.List)
+	api.Get("/periode/:tahun/:bulan", c.PeriodeController.Get)
+	api.Post("/periode/:tahun/:bulan/tutup", superadmin, c.PeriodeController.Tutup)
+	api.Post("/periode/:tahun/:bulan/buka", superadmin, c.PeriodeController.Buka)
 
 	api.Get("/ruang", c.RuangController.List)
 	api.Get("/ruang/:id", c.RuangController.Get)

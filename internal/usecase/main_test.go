@@ -75,6 +75,7 @@ type app struct {
 	retur      *usecase.ReturPembelianUseCase
 	pembayaran *usecase.PembayaranUtangUseCase
 	dokumen    *usecase.DokumenUseCase
+	periode    *usecase.PeriodeUseCase
 	// dokumenDir is where this test's attachments land, so a test can check that a
 	// file really was written — or really was removed — rather than trusting the row.
 	dokumenDir string
@@ -105,6 +106,7 @@ func newApp(t *testing.T) *app {
 	pembelianRepository := repository.NewPembelianRepository()
 	kartuStokRepository := repository.NewKartuStokRepository()
 	counterRepository := repository.NewDocumentCounterRepository()
+	periodeRepository := repository.NewPeriodeRepository()
 
 	// t.TempDir is removed when the test ends, so attachments never land in the
 	// developer's real dokumen.storage_path and one test cannot see another's files.
@@ -145,20 +147,23 @@ func newApp(t *testing.T) *app {
 		user: usecase.NewUserUseCase(
 			testDB, log, validate, repository.NewUserRepository(), roleRepository,
 		),
+		periode: usecase.NewPeriodeUseCase(
+			testDB, log, validate, periodeRepository,
+		),
 		pembelian: usecase.NewPembelianUseCase(
 			testDB, log, validate,
 			pembelianRepository, productRepository,
-			kartuStokRepository, counterRepository,
+			kartuStokRepository, counterRepository, periodeRepository,
 		),
 		susulan: usecase.NewPenerimaanSusulanUseCase(
 			testDB, log, validate,
 			repository.NewPenerimaanSusulanRepository(), pembelianRepository,
-			productRepository, kartuStokRepository, counterRepository,
+			productRepository, kartuStokRepository, counterRepository, periodeRepository,
 		),
 		retur: usecase.NewReturPembelianUseCase(
 			testDB, log, validate,
 			repository.NewReturPembelianRepository(), pembelianRepository,
-			productRepository, kartuStokRepository, counterRepository,
+			productRepository, kartuStokRepository, counterRepository, periodeRepository,
 		),
 		pembayaran: usecase.NewPembayaranUtangUseCase(
 			testDB, log, validate,
@@ -215,6 +220,12 @@ func truncateMaster(t *testing.T) {
 		// dokumen references users through created_by, and its ref_table/ref_id pair
 		// is polymorphic — no foreign key — so nothing else constrains where it sits.
 		"dokumen",
+		// periode references users twice, through ditutup_oleh and dibuka_oleh, and
+		// nothing references periode — the kartu_stok trigger reads it but no column
+		// points at it. So it only has to precede users. Clearing it between tests
+		// matters more than most: a row left behind here does not fail a later test's
+		// insert, it silently refuses its posting.
+		"periode",
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.
 		"product_harga_jual", "product_satuan", "product",

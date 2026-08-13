@@ -38,6 +38,9 @@ type ReturPembelianUseCase struct {
 	ProductRepository   *repository.ProductRepository
 	KartuStokRepository *repository.KartuStokRepository
 	CounterRepository   *repository.DocumentCounterRepository
+	// Read for the error message only; the kartu_stok trigger is the guard. See
+	// PembelianUseCase.
+	PeriodeRepository *repository.PeriodeRepository
 }
 
 func NewReturPembelianUseCase(
@@ -49,6 +52,7 @@ func NewReturPembelianUseCase(
 	productRepository *repository.ProductRepository,
 	kartuStokRepository *repository.KartuStokRepository,
 	counterRepository *repository.DocumentCounterRepository,
+	periodeRepository *repository.PeriodeRepository,
 ) *ReturPembelianUseCase {
 	return &ReturPembelianUseCase{
 		DB:                  db,
@@ -59,6 +63,7 @@ func NewReturPembelianUseCase(
 		ProductRepository:   productRepository,
 		KartuStokRepository: kartuStokRepository,
 		CounterRepository:   counterRepository,
+		PeriodeRepository:   periodeRepository,
 	}
 }
 
@@ -383,6 +388,11 @@ func (c *ReturPembelianUseCase) Posting(ctx context.Context, request *model.Post
 		return nil, model.Invalid("retur pembelian tanpa baris tidak bisa diposting")
 	}
 
+	// Checked here so the refusal can name the period; the trigger stays the guard.
+	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, retur.Tanggal); err != nil {
+		return nil, err
+	}
+
 	// The invoice value of the goods going back, accumulated as the lines are walked. It
 	// is not the same as their cost: cost carries the freight share, which the supplier
 	// never received. See hitungKreditUtang.
@@ -470,7 +480,9 @@ func (c *ReturPembelianUseCase) Posting(ctx context.Context, request *model.Post
 //
 // Valued at the current moving average, like every reversal in this codebase, because
 // the trigger owns the cost of an outgoing row and therefore of what its reversal
-// brings back. See PembelianUseCase.Batal.
+// brings back. And dated today, like every reversal in this codebase, so a return
+// whose period has since closed can still be voided — into the current period. Both
+// are explained at PembelianUseCase.Batal.
 func (c *ReturPembelianUseCase) Batal(ctx context.Context, request *model.BatalReturPembelianRequest) (*model.ReturPembelianResponse, error) {
 	if err := c.Validate.Struct(request); err != nil {
 		return nil, err
@@ -486,6 +498,13 @@ func (c *ReturPembelianUseCase) Batal(ctx context.Context, request *model.BatalR
 
 	retur, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusReturPosted)
 	if err != nil {
+		return nil, err
+	}
+
+	// The reversal is dated now, so the period that has to be open is the current one,
+	// not the document's.
+	tanggalPembalik := time.Now()
+	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, tanggalPembalik); err != nil {
 		return nil, err
 	}
 
@@ -507,7 +526,7 @@ func (c *ReturPembelianUseCase) Batal(ctx context.Context, request *model.BatalR
 		pembalik := &entity.KartuStok{
 			IDBarang:         asal[i].IDBarang,
 			IDRuang:          asal[i].IDRuang,
-			TanggalTransaksi: time.Now(),
+			TanggalTransaksi: tanggalPembalik,
 			JenisTransaksi:   entity.JenisTransaksiPembatalanTransaksi,
 			// Mirrored: what went out comes back in, valued at what the ledger recorded
 			// it leaving for. That is the one figure that makes the pair sum to zero.

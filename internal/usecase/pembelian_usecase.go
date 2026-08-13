@@ -23,6 +23,11 @@ import (
 // The header, its lines, the reserved document number, and every kartu_stok row are
 // written in a single transaction — a partial posting would leave stock that no
 // document explains, and kartu_stok cannot be edited afterwards to fix it.
+//
+// PeriodeRepository is the fifth and belongs to none of that. It is read for the
+// error message only: the kartu_stok trigger is what refuses a closed month, but a
+// RAISE carries no constraint name, so without this the module could only report that
+// either the period is closed or the stock is short.
 type PembelianUseCase struct {
 	DB                  *sql.DB
 	Log                 *logrus.Logger
@@ -31,6 +36,7 @@ type PembelianUseCase struct {
 	ProductRepository   *repository.ProductRepository
 	KartuStokRepository *repository.KartuStokRepository
 	CounterRepository   *repository.DocumentCounterRepository
+	PeriodeRepository   *repository.PeriodeRepository
 }
 
 func NewPembelianUseCase(
@@ -41,6 +47,7 @@ func NewPembelianUseCase(
 	productRepository *repository.ProductRepository,
 	kartuStokRepository *repository.KartuStokRepository,
 	counterRepository *repository.DocumentCounterRepository,
+	periodeRepository *repository.PeriodeRepository,
 ) *PembelianUseCase {
 	return &PembelianUseCase{
 		DB:                  db,
@@ -50,6 +57,7 @@ func NewPembelianUseCase(
 		ProductRepository:   productRepository,
 		KartuStokRepository: kartuStokRepository,
 		CounterRepository:   counterRepository,
+		PeriodeRepository:   periodeRepository,
 	}
 }
 
@@ -410,6 +418,13 @@ func (c *PembelianUseCase) Posting(ctx context.Context, request *model.PostingPe
 		return nil, model.Conflict("pembelian ini sudah punya baris kartu stok")
 	}
 
+	// Checked here so the refusal can name the period. The trigger stays the guard —
+	// it decides under the advisory lock, and a closing that commits between this read
+	// and the insert is still caught there, just with the vaguer message.
+	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, pembelian.Tanggal); err != nil {
+		return nil, err
+	}
+
 	detail, err := c.PembelianRepository.FindDetail(ctx, tx, request.ID)
 	if err != nil {
 		return nil, err
@@ -489,6 +504,19 @@ func (c *PembelianUseCase) Posting(ctx context.Context, request *model.PostingPe
 // reversal takes out the blended cost rather than the purchase cost. That is
 // inherent to a moving average, not a shortcut here — undoing the mixing would need
 // a different valuation method.
+//
+// The reversing rows are dated today, not on the document's own date, and that is a
+// decision rather than an accident (isu #6). Its consequence is that voiding a
+// document whose period has since been closed still works: the reversal lands in the
+// current, open period, and the closed month's figures do not move by a rupiah. That
+// is the ordinary accounting treatment — a correction to a closed period is booked in
+// the current one, not by prising the closed one open — and the alternative leaves a
+// mistyped document from last month with no way out at all.
+//
+// What it costs is worth stating plainly: the document's status stops agreeing with
+// the closed month's books. The document reads BATAL while that month's kartu_stok
+// still carries its movement, offset by a reversing row in a later month. Anything
+// reporting per period has to read the ledger rather than the document status.
 func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembelianRequest) (*model.PembelianResponse, error) {
 	if err := c.Validate.Struct(request); err != nil {
 		return nil, err
@@ -546,6 +574,15 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 		return nil, model.Conflict("batalkan pembayaran utang yang dialokasikan ke faktur ini lebih dulu")
 	}
 
+	// The reversal is dated now, so the period that has to be open is the current one
+	// — not the document's. A closed month does not block this, by design; a closed
+	// *current* month does, and then there is nowhere to book the correction until
+	// somebody reopens it.
+	tanggalPembalik := time.Now()
+	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, tanggalPembalik); err != nil {
+		return nil, err
+	}
+
 	asal, err := c.KartuStokRepository.FindByRef(ctx, tx, entity.RefTablePembelian, request.ID)
 	if err != nil {
 		return nil, err
@@ -564,7 +601,7 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 		pembalik := &entity.KartuStok{
 			IDBarang:         asal[i].IDBarang,
 			IDRuang:          asal[i].IDRuang,
-			TanggalTransaksi: time.Now(),
+			TanggalTransaksi: tanggalPembalik,
 			JenisTransaksi:   entity.JenisTransaksiPembatalanTransaksi,
 			// Mirrored: what came in goes out. Purchases only ever move stock in,
 			// but writing both directions keeps this correct if a reversing path
