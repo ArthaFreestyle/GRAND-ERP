@@ -27,17 +27,20 @@ const dateOnly = "2006-01-02"
 // a price may only be set for a unit the product actually sells in, and opening a price
 // version must close the previous one in the same transaction.
 //
-// PembelianRepository is here for one read only: the purchase history behind
-// GET /product/{id}/riwayat-beli. It is the same arrangement UserUseCase has with
+// PembelianRepository and KartuStokRepository are here for one read each, and neither
+// makes this module own those tables: the purchase history behind
+// GET /product/{id}/riwayat-beli and the per-room balance behind
+// GET /product/{id}/stok. It is the same arrangement UserUseCase has with
 // RoleRepository — the SQL is over another module's tables, so it stays in that
 // module's repository, and the usecase that owns the resource borrows it. The
-// alternative, a usecase of its own, would be a module for what is one query.
+// alternative, a usecase apiece, would be a module for what is one query.
 type ProductUseCase struct {
 	DB                  *sql.DB
 	Log                 *logrus.Logger
 	Validate            *validator.Validate
 	ProductRepository   *repository.ProductRepository
 	PembelianRepository *repository.PembelianRepository
+	KartuStokRepository *repository.KartuStokRepository
 }
 
 func NewProductUseCase(
@@ -46,6 +49,7 @@ func NewProductUseCase(
 	validate *validator.Validate,
 	productRepository *repository.ProductRepository,
 	pembelianRepository *repository.PembelianRepository,
+	kartuStokRepository *repository.KartuStokRepository,
 ) *ProductUseCase {
 	return &ProductUseCase{
 		DB:                  db,
@@ -53,6 +57,7 @@ func NewProductUseCase(
 		Validate:            validate,
 		ProductRepository:   productRepository,
 		PembelianRepository: pembelianRepository,
+		KartuStokRepository: kartuStokRepository,
 	}
 }
 
@@ -408,6 +413,39 @@ func (c *ProductUseCase) RiwayatBeli(ctx context.Context, request *model.ListRiw
 	}
 
 	return converter.RiwayatBeliToResponses(list), pageMetadata(&request.PageRequest, total), nil
+}
+
+// Stok answers where this product's stock currently sits, one row per room.
+//
+// The first read of kartu_stok in the codebase. Until now nothing needed one: purchases
+// and follow-up receipts only add, and a return takes its quota from an invoice line.
+// The mutasi entry screen cannot be used without it — nobody can choose a source room
+// without knowing what is in it — and penjualan, pemakaian, and stok opname will all
+// ask the same question.
+//
+// It is a read and not a guard, and the distinction is the whole point. What it returns
+// may be stale before the caller acts on it; the kartu_stok trigger decides the balance
+// under an advisory lock precisely so no reader can get in front of it. This is for the
+// screen and for a message naming the shortfall, never for a decision.
+//
+// The product is looked up first so an unknown id answers 404 rather than an empty list.
+// "Nobody has ever stocked this" and "there is no such product" are different facts, and
+// a client that cannot tell them apart shows the wrong message.
+func (c *ProductUseCase) Stok(ctx context.Context, request *model.ListStokProductRequest) ([]model.StokRuangResponse, error) {
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, err
+	}
+
+	if _, err := c.ProductRepository.FindByID(ctx, c.DB, request.IDProduct); err != nil {
+		return nil, notFoundOnNoRows(err, "product not found")
+	}
+
+	list, err := c.KartuStokRepository.SaldoPerRuang(ctx, c.DB, request.IDProduct)
+	if err != nil {
+		return nil, err
+	}
+
+	return converter.StokRuangToResponses(list), nil
 }
 
 func (c *ProductUseCase) Search(ctx context.Context, request *model.ListProductRequest) ([]model.ProductResponse, *model.PageMetadata, error) {

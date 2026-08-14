@@ -181,6 +181,24 @@ func (c *ProductController) RiwayatBeli(ctx fiber.Ctx) error {
 	return ctx.JSON(model.WebResponse[[]model.RiwayatBeliResponse]{Data: responses, Paging: paging})
 }
 
+// Stok reports where this product's stock currently sits, one row per room.
+//
+// No query parameters and no paging: the answer is one row per room the product has
+// moved through, and every caller wants all of them to choose from.
+func (c *ProductController) Stok(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	responses, err := c.UseCase.Stok(ctx.Context(), &model.ListStokProductRequest{IDProduct: id})
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[[]model.StokRuangResponse]{Data: responses})
+}
+
 func (c *ProductController) List(ctx fiber.Ctx) error {
 	request := new(model.ListProductRequest)
 	if err := ctx.Bind().Query(request); err != nil {

@@ -37,6 +37,7 @@ type RouteConfig struct {
 	PembelianController  *deliveryhttp.PembelianController
 	SusulanController    *deliveryhttp.PenerimaanSusulanController
 	ReturController      *deliveryhttp.ReturPembelianController
+	MutasiController     *deliveryhttp.MutasiController
 	PembayaranController *deliveryhttp.PembayaranUtangController
 	ProductController    *deliveryhttp.ProductController
 	RuangController      *deliveryhttp.RuangController
@@ -94,6 +95,8 @@ func (c *RouteConfig) setupGuestRoute() {
 //     escalation path: grant yourself SUPERADMIN and the rest follows.
 //   - pembelian, penerimaan-susulan, and retur-pembelian split along their approval
 //     flow rather than by module: see the comment above those routes.
+//   - mutasi writes kartu_stok but has no approval flow, so the split lives here alone
+//     and nowhere else: INVENTARIS reaches DRAFT, SUPERADMIN posts and voids.
 //   - periode writes are SUPERADMIN-only. Closing a month is not this module's own
 //     data changing — it is every other module losing the ability to post into it.
 //
@@ -177,6 +180,13 @@ func (c *RouteConfig) setupAuthRoute() {
 	// documents that were posted anyway.
 	api.Get("/product/:id/riwayat-beli", c.ProductController.RiwayatBeli)
 
+	// stok is a read of kartu_stok and follows the same rule. It is what an input screen
+	// needs before anyone can type a document that takes goods out: mutasi cannot pick a
+	// source room without it, and penjualan, pemakaian, and stok opname will want the
+	// same answer. Being able to see it is not the same as being able to move it — the
+	// documents that do carry their own guards.
+	api.Get("/product/:id/stok", c.ProductController.Stok)
+
 	// pembelian is the first module whose writes are split by workflow stage rather
 	// than by which data they touch, because posting one is not an edit — it appends
 	// to kartu_stok, which is append-only. A wrong posting cannot be corrected, only
@@ -228,6 +238,29 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/retur-pembelian/:id/posting", superadmin, c.ReturController.Posting)
 	api.Post("/retur-pembelian/:id/tolak", superadmin, c.ReturController.Tolak)
 	api.Post("/retur-pembelian/:id/batal", superadmin, c.ReturController.Batal)
+
+	// mutasi writes kartu_stok too, and twice per line, but it is the one such module
+	// whose guards do NOT split along an approval flow — because it has none. There is no
+	// DIAJUKAN and so no ajukan or tolak endpoint: a wrong transfer records goods in the
+	// wrong room, and total stock and total inventory value do not move at all. No outside
+	// party, no money, and the correction is another transfer the same person may write.
+	//
+	// So the split moves entirely here, and this table becomes the only control there is.
+	// INVENTARIS reaches DRAFT and no further; SUPERADMIN posts and voids. Same shape as
+	// pembayaran-utang — one desk prepares, another releases — one state fewer.
+	//
+	// The consequence to know about: with no DIAJUKAN there is no "this draft is ready"
+	// signal, so DRAFT means both "still being typed" and "please post it". The list
+	// endpoint filtered to status=DRAFT with terlama_dulu=true is what stands in for the
+	// queue. If that turns out not to be enough, the fix is to add DIAJUKAN — a cheaper
+	// change than removing it would have been.
+	api.Get("/mutasi", c.MutasiController.List)
+	api.Get("/mutasi/:id", c.MutasiController.Get)
+	api.Post("/mutasi", inventaris, c.MutasiController.Create)
+	api.Patch("/mutasi/:id", inventaris, c.MutasiController.Update)
+	api.Put("/mutasi/:id/detail", inventaris, c.MutasiController.ReplaceDetail)
+	api.Post("/mutasi/:id/posting", superadmin, c.MutasiController.Posting)
+	api.Post("/mutasi/:id/batal", superadmin, c.MutasiController.Batal)
 
 	// pembayaran-utang is the first module that touches no stock at all, so the reason the
 	// three above split by workflow stage does not apply to it — nothing it writes is
