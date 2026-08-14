@@ -55,6 +55,27 @@ info:
     tidak pernah datang dikejar dengan penerimaan susulan, bukan dikirim balik.
 
 
+    `mutasi` adalah perpindahan barang antar `ruang`, dan dokumen pertama yang menulis
+    `kartu_stok` ke **dua arah sekaligus**: satu baris detail menghasilkan
+    `MUTASI_KELUAR` di ruang asal dan `MUTASI_MASUK` di ruang tujuan, dalam satu
+    transaksi. Memecahnya jadi dua dokumen berarti barang bisa keluar dari gudang tanpa
+    pernah masuk ke toko. Nilai yang masuk ke ruang tujuan **persis** nilai yang tercatat
+    keluar dari ruang asal, sehingga total nilai persediaan tidak bergerak sedikit pun
+    hanya karena barang pindah rak. Barang yang bertambah tanpa asal bukan mutasi
+    melainkan stok opname.
+
+
+    `mutasi` juga satu-satunya penulis `kartu_stok` yang **tidak punya `DIAJUKAN`** —
+    alurnya `DRAFT → POSTED → BATAL`, tanpa `ajukan` dan `tolak`. Taruhannya jauh lebih
+    kecil daripada tiga dokumen di atas: mutasi yang salah mencatat barang di ruang yang
+    keliru, sementara total stok dan total nilai persediaan tidak berubah, dan
+    koreksinya adalah mutasi lagi ke arah sebaliknya. Kendali dua orangnya tetap utuh
+    lewat pembagian role: `INVENTARIS` hanya sampai `DRAFT`, `SUPERADMIN` yang
+    memposting dan membatalkan. Konsekuensinya tidak ada lagi sinyal "draft ini sudah
+    siap", jadi daftar berstatus `DRAFT` dengan `terlama_dulu=true` yang jadi antrean
+    kerjanya.
+
+
     `pembayaran-utang` adalah uang yang keluar ke supplier, dan satu-satunya modul
     transaksi yang tidak menyentuh stok. Satu pembayaran boleh menutup beberapa faktur
     dan satu faktur boleh ditutup beberapa pembayaran, jadi alokasinya tabel tersendiri.
@@ -122,6 +143,8 @@ tags:
   - name: pembelian
   - name: penerimaan-susulan
   - name: retur-pembelian
+  - name: pembayaran-utang
+  - name: mutasi
   - name: product
   - name: periode
   - name: docs
@@ -765,6 +788,54 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/RiwayatBeli" }
                   paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/{id}/stok:
+    get:
+      tags: [product]
+      summary: Saldo dan nilai persediaan produk ini per ruang
+      operationId: listStokProduct
+      description: >
+        Bacaan langsung atas `kartu_stok`, yang merupakan satu-satunya sumber kebenaran
+        stok — tidak ada tabel master yang menyimpan kolom stok dan tidak ada yang
+        dihitung dengan menjumlahkan dokumen.
+
+
+        Layar input mutasi tidak bisa dipakai tanpa ini: orang harus tahu ruang asal
+        punya berapa sebelum mengetik. Penjualan, pemakaian, dan stok opname akan
+        memakainya juga.
+
+
+        **Ini bacaan, bukan penjaga.** Angkanya bisa sudah basi sebelum klien
+        menindaklanjutinya; yang memutuskan saldo adalah trigger `kartu_stok`, di dalam
+        advisory lock, justru supaya tidak ada pembaca yang bisa mendahuluinya. Tampilkan
+        angkanya, jangan jadikan dasar keputusan.
+
+
+        Tidak ada paginasi, berbeda dengan setiap daftar lain di API ini: jawabannya satu
+        baris per ruang yang pernah dilalui produk ini, `ruang` tabel master yang isinya
+        sedikit, dan setiap pemakainya menginginkan semuanya sekaligus untuk memilih
+        ruang asal.
+
+
+        Ruang yang belum pernah dilalui produk ini tidak muncul; ruang yang pernah
+        dilalui lalu habis tetap muncul dengan nilai nol, karena itu fakta tentang ke
+        mana barangnya pergi. Produk yang tidak dikenal menjawab **404**, produk yang
+        belum pernah bergerak menjawab array kosong — keduanya fakta yang berbeda.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Saldo per ruang, diurutkan menurut nama ruang
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/StokRuang" }
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
 
@@ -1989,6 +2060,323 @@ paths:
                 type: object
                 properties:
                   data: { $ref: "#/components/schemas/ReturPembelian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/mutasi:
+    get:
+      tags: [mutasi]
+      summary: List mutasi antar ruang
+      operationId: listMutasi
+      description: >
+        Tidak menyertakan `detail`; kuncinya hilang sama sekali, bukan array kosong.
+        `search` mencocokkan nomor dokumen maupun keterangannya.
+
+
+        `status=DRAFT` dengan `terlama_dulu=true` adalah **antrean kerja
+        `SUPERADMIN`**. Karena mutasi tidak punya `DIAJUKAN`, tidak ada sinyal lain
+        bahwa sebuah draft sudah siap diposting, dan daftar inilah penggantinya —
+        diurutkan paling lama dulu, seperti `GET /supplier/{id}/utang`, karena antrean
+        dibaca untuk dikerjakan, bukan untuk melihat yang terbaru.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [DRAFT, POSTED, BATAL] }
+        - name: id_ruang_asal
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: id_ruang_tujuan
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+        - name: terlama_dulu
+          in: query
+          description: Urutkan paling lama dulu, untuk dibaca sebagai antrean.
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Mutasi" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [mutasi]
+      summary: Buat draft mutasi
+      operationId: createMutasi
+      description: >
+        Nomor diambil dari `document_counter` dengan prefix `MT`, direset per bulan dan
+        dikunci pada tanggal dokumennya.
+
+
+        `detail` boleh kosong di sini — mutasi biasanya dibuka saat troli masih dimuat —
+        tetapi posting menolak dokumen tanpa baris. Produk yang sama boleh muncul lebih
+        dari sekali, tidak seperti `penerimaan-susulan` dan `retur-pembelian`: di sana
+        kuotanya per baris dokumen induk, di sini kuotanya saldo ruang asal dan seluruh
+        baris dijumlahkan terhadapnya.
+
+
+        `id_ruang_asal` harus berbeda dari `id_ruang_tujuan` (`mutasi_ruang_check`).
+
+
+        Tidak ada angka uang sama sekali di dokumen ini. Harga pokoknya baru terisi saat
+        posting, dari rata-rata bergerak ruang asal yang hanya diketahui trigger
+        `kartu_stok`.
+
+
+        Role: `INVENTARIS`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tanggal, id_ruang_asal, id_ruang_tujuan]
+              properties:
+                tanggal: { type: string, format: date }
+                id_ruang_asal: { type: integer, format: int64, minimum: 1 }
+                id_ruang_tujuan: { type: integer, format: int64, minimum: 1 }
+                keterangan: { type: string, maxLength: 1000 }
+                detail:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/MutasiDetailInput" }
+      responses:
+        "201":
+          description: Draft dibuat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Mutasi" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/mutasi/{id}:
+    get:
+      tags: [mutasi]
+      summary: Detail mutasi beserta barisnya
+      operationId: getMutasi
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Mutasi" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [mutasi]
+      summary: Ubah header mutasi
+      operationId: updateMutasi
+      description: >
+        **Hanya saat `DRAFT`.** Kedua ruang boleh diubah, berbeda dengan
+        `pembayaran-utang` yang mengeluarkan `id_supplier` dari DTO update-nya: di sana
+        alokasi menunjuk faktur supplier tertentu, sedangkan di sini tidak ada baris
+        detail yang menunjuk ruang — ruangnya hanya ada di header, jadi tidak ada yang
+        tertinggal salah.
+
+
+        Ruang asal dan tujuan tetap tidak boleh sama, dan itu diperiksa terhadap baris
+        yang tersimpan: mengubah salah satunya saja bisa bertabrakan dengan yang sudah
+        ada di sana.
+
+
+        Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggal: { type: string, format: date }
+                id_ruang_asal: { type: integer, format: int64, minimum: 1 }
+                id_ruang_tujuan: { type: integer, format: int64, minimum: 1 }
+                keterangan: { type: string, maxLength: 1000, nullable: true }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Mutasi" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/mutasi/{id}/detail:
+    put:
+      tags: [mutasi]
+      summary: Ganti seluruh baris mutasi
+      operationId: replaceMutasiDetail
+      description: >
+        **Hanya saat `DRAFT`.** Barisnya diganti sekaligus, bukan satu per satu: baris
+        satu mutasi adalah satu hal yang dihitung dan dimuat bersama, dan penyuntingan
+        sebagian meninggalkan dokumen yang tidak konsisten dengan dirinya sendiri di
+        antara dua request.
+
+
+        Berbeda dengan `POST /api/v1/mutasi`, di sini `detail` wajib berisi minimal satu
+        baris — mengosongkan dokumen lewat jalur yang berarti "inilah barisnya" adalah
+        permintaan yang lebih baik ditolak.
+
+
+        Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [detail]
+              properties:
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/MutasiDetailInput" }
+      responses:
+        "200":
+          description: Baris diganti
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Mutasi" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/mutasi/{id}/posting:
+    post:
+      tags: [mutasi]
+      summary: Posting mutasi ke kartu stok
+      operationId: postingMutasi
+      description: >
+        `DRAFT` → `POSTED`, langsung tanpa `DIAJUKAN`. Menulis **dua** baris
+        `kartu_stok` per baris detail: `MUTASI_KELUAR` di ruang asal lalu `MUTASI_MASUK`
+        di ruang tujuan, dalam satu transaksi.
+
+
+        Urutan kedua insert itu terpaksa, dan keterpaksaannya yang membuat modul ini
+        benar. Nilai yang masuk ke ruang tujuan adalah **persis** `nilai_keluar` yang
+        dikembalikan baris keluar — bukan angka yang dihitung ulang, bukan pula harga
+        pokok yang diketik saat draft. Rata-rata bergerak ruang asal hanya diketahui
+        trigger, yang membacanya di dalam advisory lock, dan trigger juga menimpa
+        `nilai_keluar` pada setiap baris keluar. Hasilnya: Σ `nilai_akhir` seluruh ruang
+        tidak bergerak sedikit pun.
+
+
+        `mutasi_detail.harga_pokok_satuan_dasar` ikut terisi di sini, dari
+        `harga_pokok_satuan` yang dilaporkan baris keluar.
+
+
+        Saldo ruang asal yang tidak mencukupi ditolak 400 dengan pesan yang menyebut
+        produk dan kedua angkanya; periode yang sudah `TUTUP` ditolak 400 dengan pesan
+        yang menyebut bulannya. Keduanya dijaga trigger — pemeriksaan di aplikasi hanya
+        untuk kalimatnya.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diposting
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Mutasi" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/mutasi/{id}/batal:
+    post:
+      tags: [mutasi]
+      summary: Batalkan mutasi POSTED dengan baris pembalik
+      operationId: batalMutasi
+      description: >
+        `POSTED` → `BATAL`. Menambah baris pembalik untuk setiap pergerakan yang dibuat
+        dokumen ini: barangnya masuk lagi ke ruang asal dan keluar dari ruang tujuan.
+
+
+        **Pembatalannya tidak simetris nilainya, dan itu tidak bisa diperbaiki.** Baris
+        yang keluar dari ruang tujuan dinilai dengan rata-rata bergerak ruang tujuan
+        saat ini, yang bisa sudah bergeser karena barang lain masuk ke sana. Jadi mutasi
+        dan pembatalannya selalu berjumlah nol dalam kuantitas, tetapi tidak selalu
+        dalam nilai. Keterbatasan yang sama sudah tercatat untuk `pembelian`: trigger
+        yang memiliki harga pokok setiap baris keluar, jadi menyalin nilai aslinya
+        memang tidak tersedia.
+
+
+        **Pembatalannya juga bisa ditolak 400.** Kalau barangnya sudah keluar lagi dari
+        ruang tujuan, baris pembaliknya menyeret saldo ruang itu ke negatif dan trigger
+        menolaknya. Itu memang benar: barang yang sudah terjual dari toko tidak bisa
+        dikembalikan ke gudang lewat pembatalan — obatnya mutasi lagi.
+
+
+        Barisnya bertanggal hari ini, seperti setiap pembalikan di sistem ini. Mutasi
+        yang periodenya sudah ditutup tetap bisa dibatalkan — pembaliknya masuk periode
+        berjalan — dan yang menghalangi justru periode **berjalan** yang sedang `TUTUP`.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_batal]
+              properties:
+                alasan_batal: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Mutasi" }
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -4296,6 +4684,146 @@ components:
             ke satuan dasar. Perhatikan bahwa `qty_dasar` tidak ikut: barang yang tidak
             pernah datang tidak bisa dikirim balik. `qty x faktor` wajib bilangan bulat.
           example: "1"
+
+    Mutasi:
+      type: object
+      description: >
+        Perpindahan barang antar `ruang`. Dokumen keempat yang menulis `kartu_stok` dan
+        yang pertama menulis ke dua arah sekaligus: satu baris detail menghasilkan
+        `MUTASI_KELUAR` di ruang asal dan `MUTASI_MASUK` di ruang tujuan, dalam satu
+        transaksi.
+
+
+        Tidak ada satu pun kolom uang di header, dan ketiadaan itu adalah bentuk modulnya
+        — bukan kelalaian. Mutasi tidak menagih siapa pun: ia memindahkan barang, dan
+        berapa nilainya diputuskan per baris oleh trigger `kartu_stok` saat posting.
+
+
+        Alurnya `DRAFT → POSTED → BATAL`, tanpa `DIAJUKAN` — satu-satunya penulis
+        `kartu_stok` yang begitu. Karena itu tidak ada `diajukan_oleh`, `disetujui_oleh`,
+        maupun `alasan_tolak` di sini.
+      properties:
+        id: { type: integer, format: int64 }
+        nomor:
+          type: string
+          description: Seri sendiri, terpisah dari dokumen lain.
+          example: MT/2026/08/0001
+        tanggal: { type: string, format: date-time }
+        id_ruang_asal: { type: integer, format: int64 }
+        nama_ruang_asal: { type: string }
+        id_ruang_tujuan:
+          type: integer
+          format: int64
+          description: Wajib berbeda dari `id_ruang_asal` (`mutasi_ruang_check`).
+        nama_ruang_tujuan: { type: string }
+        keterangan: { type: string, nullable: true }
+        status: { type: string, enum: [DRAFT, POSTED, BATAL] }
+        detail:
+          type: array
+          description: Hanya pada endpoint detail. Kuncinya hilang pada list.
+          items: { $ref: "#/components/schemas/MutasiDetail" }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        posted_at: { type: string, format: date-time, nullable: true }
+        dibatalkan_oleh: { type: integer, format: int64, nullable: true }
+        alasan_batal: { type: string, nullable: true }
+
+    MutasiDetail:
+      type: object
+      description: >
+        Satu baris: satu produk dan satu kuantitas, berpindah di antara kedua ruang yang
+        disebut header. Menunjuk produk secara langsung, tidak seperti
+        `penerimaan-susulan` dan `retur-pembelian` yang menunjuk baris dokumen lain —
+        mutasi tidak punya dokumen induk.
+      properties:
+        id: { type: integer, format: int64 }
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        qty_input: { type: string, example: "30.0000" }
+        id_satuan_input: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        faktor_konversi:
+          type: integer
+          format: int64
+          description: Snapshot dari `product_satuan` saat baris ditulis.
+        qty_dasar: { type: integer, format: int64, example: 30 }
+        nama_satuan_dasar: { type: string }
+        harga_pokok_satuan_dasar:
+          type: string
+          nullable: true
+          description: >
+            **Null sampai dokumennya diposting**, dan itu memang gunanya kolom ini
+            nullable. Harga pokok mutasi adalah rata-rata bergerak ruang asal pada saat
+            posting, dan aplikasi tidak bisa menghitungnya sendiri: angka itu hanya
+            diketahui trigger `kartu_stok`, yang membacanya di dalam advisory lock. Yang
+            tersimpan di sini adalah salinan dari apa yang dilaporkan baris keluar.
+          example: "10000.0000"
+
+    MutasiDetailInput:
+      type: object
+      required: [id_product, id_satuan_input, qty_input]
+      properties:
+        id_product:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Boleh muncul lebih dari sekali dalam satu dokumen, tidak seperti tiga dokumen
+            yang kuotanya dipegang baris dokumen induk. Di sini kuotanya saldo ruang asal
+            dan seluruh baris untuk produk yang sama dijumlahkan terhadapnya — 2 DUS dan
+            3 PCS barang yang sama adalah dua baris yang sah.
+        id_satuan_input:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Harus terdaftar di `product_satuan` produk itu.
+        qty_input:
+          type: string
+          description: >
+            Setelah dikonversi ke satuan dasar, jumlah seluruh baris untuk satu produk
+            tidak boleh melebihi saldo ruang asal. `qty x faktor` wajib bilangan bulat.
+          example: "30"
+
+    StokRuang:
+      type: object
+      description: >
+        Saldo satu produk di satu ruang: baris terakhir sebuah rantai `kartu_stok`,
+        dibaca dan bukan dihitung ulang.
+
+
+        Bukan jaminan. Angkanya bisa sudah bergerak sebelum klien menindaklanjutinya —
+        yang memutuskan saldo adalah trigger, di dalam advisory lock.
+      properties:
+        id_ruang: { type: integer, format: int64 }
+        nama_ruang: { type: string }
+        stok_akhir:
+          type: integer
+          format: int64
+          description: Selalu dalam satuan dasar. `kartu_stok` tidak mengenal satuan lain.
+          example: 70
+        nilai_akhir:
+          type: string
+          description: >
+            Nilai persediaan atas kuantitas itu. Stok nol memaksa nilainya tepat nol,
+            sehingga sisa pembulatan tidak menumpuk jadi rupiah hantu di gudang kosong.
+          example: "700000.00"
+        harga_pokok_satuan:
+          type: string
+          description: Rata-rata bergerak yang berlaku di ruang itu.
+          example: "10000.0000"
+        tanggal_transaksi:
+          type: string
+          format: date-time
+          nullable: true
+          description: Tanggal pergerakan terakhir menurut dokumennya.
+        terakhir_diperbarui:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Kapan pergerakan itu dicatat. Berbeda dari `tanggal_transaksi` setiap kali
+            dokumennya diketik terlambat, yang merupakan kasus biasa.
 
     PembayaranUtang:
       type: object

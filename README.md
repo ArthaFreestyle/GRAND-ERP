@@ -2,7 +2,7 @@
 
 Backend ERP dengan fokus pada persediaan, pembelian, dan penjualan. Ditulis dengan Go + Fiber v3 di atas PostgreSQL, tanpa ORM.
 
-> **Status: master data, pengguna, produk, dan siklus barang masuk-keluar dari supplier berjalan.** Dua belas modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, `user`, `product` (beserta `product_satuan` dan `product_harga_jual`), `pembelian`, `penerimaan_susulan`, `retur_pembelian`, dan `dokumen` (lampiran berkas lintas modul, sekaligus **job pertama di `cmd/worker`**). **`pembelian` adalah dokumen transaksi pertama, dan yang pertama menulis ke `kartu_stok`** — mesin posting dan generator nomor dokumennya dipakai ulang seluruh modul transaksi berikutnya. **Purchase order sengaja tidak ada**; penggantinya adalah [riwayat harga beli](#riwayat-harga-beli-pengganti-purchase-order), yang terkumpul sendiri dari pembelian yang sudah diposting. Penjualan, retur penjualan, mutasi, pemakaian, dan pembayaran skemanya sudah termigrasi tetapi belum punya lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
+> **Status: master data, pengguna, produk, siklus barang masuk-keluar dari supplier, dan perpindahan antar ruang berjalan.** Lima belas modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, `user`, `product` (beserta `product_satuan` dan `product_harga_jual`), `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `pembayaran_utang`, `mutasi`, `periode` (tutup buku bulanan), dan `dokumen` (lampiran berkas lintas modul, sekaligus **job pertama di `cmd/worker`**). **`pembelian` adalah dokumen transaksi pertama, dan yang pertama menulis ke `kartu_stok`** — mesin posting dan generator nomor dokumennya dipakai ulang seluruh modul transaksi berikutnya. **`mutasi` yang pertama menulisnya ke dua arah sekaligus**, dan bersamanya datang bacaan saldo pertama atas `kartu_stok` ([stok per ruang](#stok-per-ruang-bacaan-pertama-atas-kartu-stok)) yang akan dipakai penjualan, pemakaian, dan stok opname. **Purchase order sengaja tidak ada**; penggantinya adalah [riwayat harga beli](#riwayat-harga-beli-pengganti-purchase-order), yang terkumpul sendiri dari pembelian yang sudah diposting. Penjualan, retur penjualan, piutang, pemakaian, dan stok opname skemanya sudah termigrasi tetapi belum punya lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
 
 > [!WARNING]
 > Seeder memasang superadmin bawaan **`admin` / `admin12345`**, password yang tercatat di repositori ini. Itu kredensial untuk mesin sendiri. Ganti atau nonaktifkan sebelum server bisa dijangkau orang lain — lihat [Autentikasi](#autentikasi).
@@ -354,7 +354,7 @@ Header dan detail hanya bisa diubah saat `DRAFT`. Setiap transisi mengambil row 
 
 Format `BL/2026/08/0001`, mereset tiap bulan mengikuti **tanggal dokumen** — faktur Juli yang baru diketik bulan Agustus tetap dapat nomor Juli. Counter-nya di tabel `document_counter` dan diambil dengan satu `INSERT ... ON CONFLICT DO UPDATE RETURNING` di dalam transaksi dokumen: statement itu atomik dan mengunci barisnya sampai commit, jadi dua request bersamaan antre alih-alih menghasilkan nomor kembar. Nomor bisa berlubang kalau transaksinya rollback — jauh lebih murah daripada dua dokumen bernomor sama.
 
-Generatornya dibuat lintas modul sejak awal (dikunci per `prefix`), karena penjualan, mutasi, dan dokumen pembayaran butuh hal yang sama.
+Generatornya dibuat lintas modul sejak awal (dikunci per `prefix`), karena penjualan, mutasi, dan dokumen pembayaran butuh hal yang sama — `MT` dan `PU` sudah memakainya.
 
 ### Ongkir
 
@@ -646,7 +646,7 @@ Tabel `periode` sudah ada sejak migrasi `000002` dan trigger `kartu_stok` sudah 
 
 Modul ini yang paling mendekati master data, bukan dokumen transaksi: tidak ada nomor, tidak ada baris detail, tidak ada posting. Yang membuatnya berbeda dari `supplier` cuma dua hal — endpoint aksinya (`POST /{...}/tutup`) dan row lock yang diambil sebelum memutuskan.
 
-**Menutup satu bulan menyentuh setiap modul yang menulis `kartu_stok`, sekarang maupun nanti.** Penjualan, mutasi, pemakaian, dan stok opname akan mewarisi perilakunya tanpa satu baris kode, karena penegakannya di trigger.
+**Menutup satu bulan menyentuh setiap modul yang menulis `kartu_stok`, sekarang maupun nanti.** `mutasi` sudah mewarisinya tanpa satu baris kode saat modulnya dibangun, dan penjualan, pemakaian, serta stok opname akan begitu juga — penegakannya di trigger.
 
 ### Bulan tanpa baris dihitung terbuka
 
@@ -683,6 +683,118 @@ Migrasi `000017` menutupnya dengan **advisory lock**: trigger mengambil sisi *sh
 - **Tidak ada `DELETE`**, seperti seluruh proyek ini. Periode yang keliru ditutup dibuka kembali, tidak dihapus — menghapus barisnya juga menghapus satu-satunya catatan bahwa bulan itu pernah ditutup.
 - **Pesan errornya sekarang menyebut satu sebab.** `RAISE` dari trigger tidak membawa nama constraint, jadi `invalidOnCheck` tidak bisa membedakan periode tertutup dari stok kurang, dan setiap pemanggil terpaksa bilang "periode sudah TUTUP **atau** saldo tidak mencukupi". Sekarang periode diperiksa lebih dulu di usecase sehingga pesannya berbunyi "periode 2026-07 sudah TUTUP". Yang menegakkan tetap trigger — pemeriksaan di Go hanya untuk pesan, persis seperti `ExistsByKode` terhadap unique index.
 - Tabelnya tidak punya `created_at`/`updated_at` dan tidak ikut trigger `set_updated_at()`. Tidak ditambahkan: `ts_tutup` dan `ts_buka` sudah menjawab pertanyaan yang berguna, dan baris ini tidak berubah karena hal lain.
+
+## Mutasi antar ruang: satu dokumen, dua baris kartu stok
+
+Perpindahan barang dari satu `ruang` ke `ruang` lain — isu #7. Dokumen keempat yang menulis `kartu_stok`, dan yang **pertama menulis ke dua arah sekaligus**.
+
+`MUTASI_MASUK` dan `MUTASI_KELUAR` bukan dua jenis dokumen. Keduanya adalah dua baris `kartu_stok` yang dihasilkan **satu** baris `mutasi_detail`, dalam satu transaksi — komentar migrasi `000007` sudah menyatakannya:
+
+```
+mutasi (id_ruang_asal → id_ruang_tujuan)
+   └── mutasi_detail (produk, qty)
+         ├── kartu_stok  MUTASI_KELUAR  di id_ruang_asal    (stok_keluar)
+         └── kartu_stok  MUTASI_MASUK   di id_ruang_tujuan  (stok_masuk)
+```
+
+Memecahnya jadi dua dokumen berarti barang bisa keluar dari gudang tanpa pernah masuk ke toko, dan tidak ada yang menahannya. **Barang yang bertambah tanpa asal bukan mutasi** melainkan stok opname — `SO_SURPLUS`/`SO_DEFISIT` sudah disiapkan untuk itu.
+
+Tabel `mutasi` dan `mutasi_detail` ada sejak migrasi `000007` dan nilai enumnya sejak `000002`, jadi **tidak ada `ALTER TYPE` sama sekali**. Migrasi `000018` hanya menambahkan `mutasi_status_check`, kolom pembatalan, dan indeks urutan baca.
+
+### Nilai ikut ruang asal, dan hanya trigger yang tahu berapa
+
+Ini jebakan termahal di modul ini, setara dengan nilai masuk proporsional di `pembelian`. Aturannya dari migrasi `000007`:
+
+> Harga pokok wajib mengikuti ruang asal, kalau tidak memindahkan barang bisa mengubah total nilai persediaan.
+
+Masalahnya, **aplikasi tidak bisa menghitung angka itu sendiri.** Rata-rata bergerak ruang asal hanya diketahui `kartu_stok_hitung_saldo()`, yang membacanya di dalam `pg_advisory_xact_lock` — apa pun yang dibaca Go sebelum insert sudah berpotensi basi. Trigger juga menimpa `nilai_keluar` pada setiap baris keluar, jadi mengirim angka sendiri percuma.
+
+Yang menyelamatkan: `KartuStokRepository.Insert` mengembalikan seluruh barisnya lewat `RETURNING`, termasuk hasil hitungan trigger. Jadi urutan kedua insert itu terpaksa, dan keterpaksaannya justru yang benar:
+
+```go
+// 1. keluar dari ruang asal — trigger yang menilai
+keluar := &entity.KartuStok{IDRuang: m.IDRuangAsal, StokKeluar: qtyDasar, /* ... */}
+c.KartuStokRepository.Insert(ctx, tx, keluar)
+
+// 2. masuk ke ruang tujuan, senilai persis apa yang keluar
+masuk := &entity.KartuStok{IDRuang: m.IDRuangTujuan, StokMasuk: qtyDasar,
+    NilaiMasuk: keluar.NilaiKeluar, /* ... */}
+c.KartuStokRepository.Insert(ctx, tx, masuk)
+```
+
+| `nilai_masuk` baris tujuan | Akibat |
+|---|---|
+| ❌ dihitung ulang di Go dari HPP yang dibaca sebelum insert | bisa meleset kalau ada posting lain menyela — total nilai persediaan berubah hanya karena barang pindah ruang |
+| ❌ diambil dari `harga_pokok_satuan_dasar` yang diketik di draft | HPP saat draft, bukan saat posting. Sama, dan diam-diam |
+| ✅ `nilai_keluar` hasil `RETURNING` baris keluar | sama persis — Σ `nilai_akhir` seluruh ruang tidak bergerak |
+
+Konsekuensinya **`mutasi_detail.harga_pokok_satuan_dasar` diisi saat posting, bukan saat draft** — salinan dari `harga_pokok_satuan` yang dilaporkan baris keluar. Kolomnya nullable memang untuk itu.
+
+### Tanpa `DIAJUKAN`, dan alasannya berbeda dari `pembayaran_utang`
+
+`DRAFT → POSTED → BATAL`. Satu-satunya penulis `kartu_stok` tanpa tahap persetujuan, jadi tidak ada endpoint `ajukan` maupun `tolak` — tujuh endpoint, bukan sembilan.
+
+Aturan untuk tiga penulis `kartu_stok` sebelumnya berbunyi: pisahkan penjaganya per tahap alur, karena tabel itu append-only dan posting yang salah hanya bisa dibalik. Yang membedakan mutasi adalah **kesalahannya jauh lebih murah**:
+
+| Dokumen | Yang terlanjur terjadi kalau salah |
+|---|---|
+| `pembelian` | utang ke pihak luar terbentuk, nilai persediaan bertambah, nomor faktur supplier terpakai |
+| `retur_pembelian` | barang tercatat kembali ke supplier, utang berkurang, kredit membeku di `nilai_kredit_utang` |
+| `mutasi` | barang tercatat di ruang yang keliru. **Total stok dan total nilai persediaan tidak bergerak sedikit pun** |
+
+Tidak ada pihak luar, tidak ada uang, dan koreksinya adalah mutasi lagi ke arah sebaliknya — dokumen yang orang yang sama sudah berwenang membuatnya.
+
+Alasannya **berbeda dari `pembayaran_utang`**, yang juga tidak punya `DIAJUKAN`. Di sana pembenarannya adalah alokasi tidak meninggalkan residu. Mutasi tidak seberuntung itu — pembatalannya tetap meninggalkan residu nilai. Pembenarannya bukan kerapian pembatalan, melainkan kecilnya taruhan.
+
+Kendali dua orangnya tetap utuh dan pindah seluruhnya ke tabel rute: **`INVENTARIS` hanya sampai `DRAFT`, `SUPERADMIN` yang memposting dan membatalkan.** Yang hilang dari membuang `DIAJUKAN` cuma *state*-nya, bukan pemisahan wewenangnya.
+
+Konsekuensi yang perlu disadari: **tidak ada lagi sinyal "draft ini sudah siap"**. `DRAFT` berarti dua hal sekaligus. Karena itu endpoint list wajib bisa memfilter `status=DRAFT`, dan `terlama_dulu=true` yang membuatnya terbaca sebagai antrean — paling lama dulu, seperti `GET /supplier/{id}/utang`, karena antrean dibaca untuk dikerjakan. Kalau nanti ternyata orang tetap butuh menandai "sudah siap", yang ditambahkan adalah `DIAJUKAN` — dan menambah nilai ke `mutasi_status_check` jauh lebih murah daripada membuangnya.
+
+### Dua advisory lock dalam satu transaksi
+
+Trigger mengambil `pg_advisory_xact_lock` per `(id_barang, id_ruang)`. Satu mutasi mengambil **dua** lock untuk produk yang sama, dan urutannya ditentukan arah barang:
+
+```
+dokumen A (gudang → toko)  : lock (X, gudang) lalu (X, toko)
+dokumen B (toko → gudang)  : lock (X, toko)   lalu (X, gudang)
+```
+
+Klasik ABBA, dan sampai modul ini tidak pernah bisa terjadi karena tiap dokumen hanya menyentuh satu ruang. `KartuStokRepository.KunciSaldo` mengambil **seluruhnya di muka dalam urutan kanonik** sebelum insert pertama — mahalnya satu query, dan deadlock jadi mustahil, bukan sekadar jarang. Alternatifnya, memetakan SQLSTATE `40P01` ke 409 dan meminta klien mengulang, menyerahkan cacat nyata ke orang yang sedang berdiri di konter.
+
+Lock periode diambil lebih dulu (`PeriodeRepository.LockShared`), karena itu urutan yang diambil trigger pada setiap insert. Penulis yang membaliknya membuka siklus lain: tutup buku antre di lock eksklusif, sebuah posting memegangnya shared sambil menunggu lock saldo kita, dan kita menunggu di belakang tutup buku itu.
+
+`TestMutasiBerlawananArahTidakDeadlock` mematoknya, dan itu uji sungguhan: tanpa penguncian di muka, uji itu gagal dengan `deadlock detected (SQLSTATE 40P01)` di setiap kali dijalankan.
+
+### Pembatalan tidak simetris nilainya
+
+Pembatalan menulis baris pembalik dengan arah terbalik. Baris yang keluar dari ruang tujuan dinilai dengan **rata-rata bergerak ruang tujuan saat itu**, yang bisa sudah bergeser karena barang lain masuk ke sana. Jadi mutasi dan pembatalannya selalu berjumlah nol dalam kuantitas, tetapi **tidak selalu dalam nilai**.
+
+Ini keterbatasan yang sama yang sudah tercatat untuk `pembelian`: trigger yang memiliki `harga_pokok_satuan` dan `nilai_keluar` setiap baris keluar, jadi menyalin nilai aslinya memang tidak tersedia. Membalikkannya butuh metode penilaian yang berbeda, bukan baris Go yang berbeda.
+
+Selain itu **pembatalannya bisa ditolak 400** kalau barangnya sudah keluar lagi dari ruang tujuan: baris pembaliknya menyeret saldo tujuan ke negatif dan trigger menolak. Itu memang benar — barang yang sudah terjual dari toko tidak bisa dikembalikan ke gudang lewat pembatalan; obatnya mutasi lagi.
+
+### Hal lain yang perlu diketahui
+
+- **Produk yang sama boleh muncul di dua baris**, tidak seperti `penerimaan_susulan`, `retur_pembelian`, dan `pembayaran_utang` yang masing-masing punya unique index melarangnya. Di sana alasannya kuota per baris dokumen induk; di sini kuotanya saldo ruang asal, seluruh baris untuk satu produk dijumlahkan terhadapnya, dan trigger memeriksanya di setiap insert. 2 DUS dan 3 PCS barang yang sama adalah dua baris yang sah.
+- **Kedua ruang boleh diubah selagi `DRAFT`**, berbeda dengan `pembayaran_utang` yang mengeluarkan `id_supplier` dari DTO update-nya: di sana alokasi menunjuk faktur supplier tertentu, di sini tidak ada baris detail yang menunjuk ruang.
+- **Pemeriksaan saldo di Go hanya untuk pesannya**, persis seperti `periksaPeriode`. Trigger yang jadi penjaga sebenarnya, dan dia yang benar karena membaca di dalam lock. Yang dibeli pemeriksaan itu adalah kalimat yang menyebut produk dan kedua angkanya.
+- Tidak ada satu pun kolom uang di headernya: tidak ada subtotal, diskon, PPN, ongkir, maupun koli. `math/big.Rat` tidak dibutuhkan sama sekali — satu-satunya angka desimal adalah harga pokok, dan itu datang dari database.
+- Nomornya seri sendiri, `MT/2026/08/0001`, dari generator yang sama.
+- Foto serah-terima barang bisa dilampirkan lewat `POST /api/v1/dokumen/{id}/tempel` dengan `ref_table = "mutasi"`. Biayanya satu baris di `repository.RefTableDokumen` dan tidak ada migrasi — memang itu desain isu #5.
+
+## Stok per ruang: bacaan pertama atas kartu stok
+
+`GET /api/v1/product/{id}/stok`
+
+`KartuStokRepository` sebelumnya cuma punya `Insert`, `FindByRef`, dan `HasRef` — **tidak ada satu pun cara membaca saldo**, dan sampai isu #7 memang tidak perlu: pembelian dan susulan hanya menambah, dan kuota retur datang dari baris faktur, bukan dari saldo.
+
+Layar input mutasi adalah yang pertama membutuhkannya — orang harus tahu ruang asal punya berapa sebelum mengetik — dan setelah ini penjualan, pemakaian, dan stok opname membutuhkan hal yang persis sama. Karena itu ia dibangun sebagai fase tersendiri: `SaldoTerakhir`, `SaldoBatch`, dan `SaldoPerRuang` di repository, plus satu **query yang bukan modul** yang mengikuti bentuk riwayat harga beli — tanpa tabel, tanpa migrasi, tanpa DTO yang harus diisi.
+
+- **Ini bacaan, bukan penjaga.** Angkanya bisa sudah bergerak sebelum klien menindaklanjutinya; yang memutuskan saldo adalah trigger, di dalam advisory lock, justru supaya tidak ada pembaca yang bisa mendahuluinya.
+- **Pasangan `(barang, ruang)` tanpa baris sama sekali adalah saldo nol**, bukan baris yang hilang. Itu bacaan yang sama yang diambil trigger saat ia meng-`COALESCE` baris sebelumnya ke nol, dan bentuk yang sama yang dipakai `periode` untuk bulan yang belum pernah ditutup: ketiadaan adalah nilai, bukan 404.
+- **Tidak ada paginasi**, berbeda dengan setiap daftar lain di API ini. Jawabannya satu baris per ruang yang pernah dilalui produk, `ruang` tabel master yang isinya sedikit, dan setiap pemakainya menginginkan semuanya sekaligus untuk memilih ruang asal.
+- Ruang yang belum pernah dilalui tidak muncul; ruang yang pernah dilalui lalu habis tetap muncul dengan nol, karena itu fakta tentang ke mana barangnya pergi.
+- Produk yang tidak dikenal menjawab 404, produk yang belum pernah bergerak menjawab array kosong. Keduanya fakta yang berbeda.
 
 ## Autentikasi
 
@@ -736,6 +848,10 @@ Membaca terbuka untuk siapa pun yang sudah login — operator yang tidak bisa me
 | `dokumen` (lampiran) | semua yang login | semua yang login |
 | `pembelian`, `penerimaan_susulan`, `retur_pembelian` — input, edit, ajukan | semua yang login | `SUPERADMIN`, `INVENTARIS` |
 | `pembelian`, `penerimaan_susulan`, `retur_pembelian` — posting, tolak, batal | — | `SUPERADMIN` |
+| `pembayaran_utang` — input, edit, alokasi | semua yang login | `SUPERADMIN`, `CASHIER` |
+| `pembayaran_utang` — posting, batal, cair, tolak giro | — | `SUPERADMIN` |
+| `mutasi` — input, edit, ganti baris | semua yang login | `SUPERADMIN`, `INVENTARIS` |
+| `mutasi` — posting, batal | — | `SUPERADMIN` |
 | `periode` (tutup buku) | semua yang login | `SUPERADMIN` |
 | `role`, `user` | `SUPERADMIN` | `SUPERADMIN` |
 
@@ -744,6 +860,8 @@ Membaca terbuka untuk siapa pun yang sudah login — operator yang tidak bisa me
 **`dokumen` tidak punya pembagian role sama sekali**, dan itu bukan aturan "baca terbuka" yang dilebarkan diam-diam ke tulis. Lampiran adalah infrastruktur milik banyak modul, jadi tidak ada satu pemilik data yang bisa ditunjuk. Yang menjaganya adalah **statusnya, bukan role pemanggilnya**: unggahan tidak berarti apa-apa sampai ada yang menempelkannya, penempelan ditolak begitu dokumen induknya `BATAL` atau sudah memegang 10 lampiran, dan penghapusan ditolak begitu induknya keluar dari `DRAFT`. Membagi role di sini berarti menentukan siapa yang boleh memotret faktur — pertanyaan yang sudah dijawab oleh siapa yang berdiri di meja penerimaan.
 
 **`pembelian`, `penerimaan_susulan`, dan `retur_pembelian` dibagi menurut tahap alurnya, bukan menurut data yang disentuh** — ketiganya menulis `kartu_stok`, dan itulah alasannya. Pada `retur_pembelian` alasannya paling kuat: ia satu-satunya dokumen sejauh ini yang postingnya **mengeluarkan** barang, jadi yang salah bisa menekan saldo ke angka yang tidak lagi cocok dengan rak. Memposting pembelian bukan penyuntingan: ia menambah baris ke `kartu_stok` yang bersifat append-only, jadi posting yang salah tidak bisa diperbaiki, hanya dibalik — dan pembalikannya dinilai pada rata-rata bergerak yang sudah berubah. Karena itu meja yang membaca faktur kertas dan menghitung isi box bukan meja yang memutuskan angka-angka itu boleh masuk buku stok. Pembagiannya ada pada transisinya, bukan pada recordnya: di kantor kecil satu orang bisa saja memegang kedua role, dan baginya tidak ada yang berubah.
+
+**`mutasi` menulis `kartu_stok` juga, tetapi tidak punya alur persetujuan — jadi baris di tabel ini adalah satu-satunya kendali yang tersisa.** Alurnya `DRAFT → POSTED → BATAL`, tanpa `DIAJUKAN`, karena taruhannya jauh lebih kecil: mutasi yang salah mencatat barang di ruang yang keliru sementara total stok dan total nilai persediaan tidak bergerak sedikit pun. Kendali dua orangnya tetap utuh — `INVENTARIS` menyiapkan, `SUPERADMIN` melepas — persis bentuk `pembayaran_utang`, satu state lebih sedikit. Konsekuensinya tidak ada lagi sinyal "draft ini sudah siap", dan penggantinya adalah daftar `status=DRAFT` dengan `terlama_dulu=true`.
 
 **Menulis `periode` hanya `SUPERADMIN`, dan itu penjagaan paling ketat di tabel ini.** Yang berubah saat sebuah bulan ditutup bukan data modul ini sendiri, melainkan kemampuan **setiap modul lain** memposting ke dalamnya. Membacanya tetap terbuka seperti pembacaan yang lain — apakah bulan lalu masih terbuka justru yang perlu diketahui operator sebelum mengetik faktur yang terlambat.
 
@@ -784,7 +902,7 @@ Beberapa hal yang tidak terlihat dari daftar endpoint:
 
 ## Model data persediaan
 
-Skema lengkap ada di migrasi `000002`–`000008`. **`pembelian`, `penerimaan_susulan`, dan `retur_pembelian` sudah punya lapisan Go dan memakainya**; penjualan, retur penjualan, pemakaian, mutasi, dan stok opname belum. Beberapa jaminan ditegakkan database, bukan aplikasi:
+Skema lengkap ada di migrasi `000002`–`000008`. **`pembelian`, `penerimaan_susulan`, `retur_pembelian`, `pembayaran_utang`, dan `mutasi` sudah punya lapisan Go dan memakainya**; penjualan, retur penjualan, piutang, pemakaian, dan stok opname belum. Beberapa jaminan ditegakkan database, bukan aplikasi:
 
 - **`kartu_stok` satu-satunya sumber kebenaran stok dan nilai persediaan.** Tidak ada kolom stok di tabel master, dan stok tidak pernah dihitung dengan menjumlahkan dokumen.
 - **Append-only, dijaga trigger.** `UPDATE`, `DELETE`, dan `TRUNCATE` ditolak. Koreksi dilakukan lewat baris pembalik yang mengisi `id_kartu_stok_asal`.
@@ -832,6 +950,7 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `POST` | `/api/v1/product/{id}/satuan` | Tambah satuan konversi |
 | `POST` | `/api/v1/product/{id}/harga-jual` | Buka versi harga jual baru |
 | `GET` | `/api/v1/product/{id}/riwayat-beli` | Harga beli terakhir per supplier — `page`, `size`, `id_supplier` |
+| `GET` | `/api/v1/product/{id}/stok` | Saldo dan nilai per ruang; tanpa paginasi |
 | `GET` | `/api/v1/pembelian` | List — `page`, `size`, `search`, `status`, `status_penerimaan`, `id_supplier`, `tanggal_dari`, `tanggal_sampai` |
 | `POST` | `/api/v1/pembelian` | Buat draft beserta barisnya; nomor digenerate server |
 | `GET` | `/api/v1/pembelian/{id}` | Detail beserta baris, selisih, dan alokasi ongkir |
@@ -870,6 +989,13 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `POST` | `/api/v1/pembayaran-utang/{id}/batal` | Kembalikan utangnya, wajib `alasan_batal` — `SUPERADMIN` |
 | `POST` | `/api/v1/pembayaran-utang/{id}/cair` | Giro cair — di sinilah utang giro berkurang — `SUPERADMIN` |
 | `POST` | `/api/v1/pembayaran-utang/{id}/tolak-giro` | Giro ditolak bank; utangnya tidak pernah berkurang — `SUPERADMIN` |
+| `GET` | `/api/v1/mutasi` | List — `page`, `size`, `search`, `status`, `id_ruang_asal`, `id_ruang_tujuan`, `tanggal_dari`, `tanggal_sampai`, `terlama_dulu` |
+| `POST` | `/api/v1/mutasi` | Buat draft; `detail` boleh kosong, kedua ruang wajib berbeda |
+| `GET` | `/api/v1/mutasi/{id}` | Detail beserta barisnya |
+| `PATCH` | `/api/v1/mutasi/{id}` | Ubah header termasuk kedua ruang — hanya saat `DRAFT` |
+| `PUT` | `/api/v1/mutasi/{id}/detail` | Ganti seluruh baris — hanya saat `DRAFT` |
+| `POST` | `/api/v1/mutasi/{id}/posting` | Tulis 2×N baris `kartu_stok`, set `POSTED` — `SUPERADMIN` |
+| `POST` | `/api/v1/mutasi/{id}/batal` | Baris pembalik ke dua arah, wajib `alasan_batal` — `SUPERADMIN` |
 | `GET` | `/api/v1/satuan` | List — `page`, `size`, `search`, `is_aktif` |
 | `POST` | `/api/v1/satuan` | Create |
 | `GET` | `/api/v1/satuan/{id}` | Get by id |
@@ -923,7 +1049,7 @@ Semua respons memakai satu amplop, `model.WebResponse[T]`:
 Sudah ada:
 
 - Skema database lengkap: master data, kartu stok beserta trigger saldo, pembelian, penjualan, piutang, utang, pemakaian, mutasi, stok opname
-- **Mesin posting `kartu_stok`** dan **generator nomor dokumen lintas modul**, keduanya dibangun untuk dipakai ulang penjualan, mutasi, pemakaian, dan stok opname
+- **Mesin posting `kartu_stok`** dan **generator nomor dokumen lintas modul**, keduanya dibangun untuk dipakai ulang — dan setelah `mutasi` sudah lengkap, termasuk untuk pergerakan dua arah dalam satu dokumen
 - **Modul `pembelian` penuh**: draft, edit, ganti baris, bagi rata koli, ajukan, tolak, posting, batal, dan daftar sisa — dengan dua kolom kuantitas, alokasi ongkir per koli yang berjumlah persis, dan nilai masuk yang proporsional terhadap yang benar-benar datang
 - **Modul `penerimaan_susulan`** untuk kiriman yang menyusul: menambah stok tanpa menambah utang, harga pokok disalin dari baris pembelian sehingga satu faktur menyumbang persis nilainya sendiri ke persediaan, dan sisa per baris yang diperiksa ulang di bawah row lock saat posting
 - **Modul `retur_pembelian`** untuk barang yang dikirim balik: cermin dari penerimaan susulan, harga pokok disalin dari baris pembelian sehingga pembelian dan returnya saling menghapus, dan kuota yang dibatasi pada barang yang **benar-benar datang** — bukan yang difakturkan
@@ -933,6 +1059,8 @@ Sudah ada:
 - **Daftar utang per supplier** (`GET /supplier/{id}/utang`) — query, bukan modul, seperti riwayat harga beli
 - **Subsistem lampiran berkas** (isu #5): unggah dengan MIME dari isi berkas, penyimpanan di balik interface, unduhan yang selalu `attachment` di balik token, penempelan polimorfik ke dokumen mana pun yang terdaftar, dan **job pertama di `cmd/worker`** — sapuan berkas yatim di bawah advisory lock, menghapus berdasarkan baris tabel dan tidak pernah dengan memindai direktori
 - **Modul `periode`** (isu #6): tutup buku bulanan yang menolak posting ke bulan tertutup untuk setiap modul yang menulis `kartu_stok`, sekarang maupun nanti — dengan advisory lock yang membuat menutup dan memposting tidak bisa saling menyalip, pembukaan kembali yang meninggalkan jejaknya sendiri, dan pembalikan yang tetap bisa dibukukan di periode berjalan
+- **Modul `mutasi`** (isu #7): perpindahan antar ruang sebagai satu dokumen yang menulis dua baris `kartu_stok` per baris detail, dengan nilai yang masuk ke ruang tujuan persis sebesar yang tercatat keluar dari ruang asal — sehingga total nilai persediaan tidak bergerak hanya karena barang pindah rak — alur tanpa `DIAJUKAN`, dan penguncian saldo di muka dalam urutan kanonik yang membuat dua mutasi berlawanan arah tidak bisa saling deadlock
+- **Bacaan saldo `kartu_stok`** (`SaldoTerakhir`, `SaldoBatch`, `SaldoPerRuang`) beserta `GET /product/{id}/stok` — yang pertama membaca kembali kartu stok, dan dipakai ulang penjualan, pemakaian, serta stok opname
 - Tujuh modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `role`, `user` (create/get/list/patch) dan `ruang` (create/get/list)
 - User dengan banyak role, `role_ids` yang mengganti seluruh himpunan dalam satu transaksi, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
@@ -947,7 +1075,7 @@ Belum ada:
 - **Pencabutan sesi.** Token stateless tidak bisa dicabut sebelum kedaluwarsa
 - **Logout dan refresh token**
 - Captcha (Redis sudah terhubung tapi belum dipakai)
-- Lapisan Go untuk penjualan, piutang, retur penjualan, pemakaian, mutasi, dan stok opname
+- Lapisan Go untuk penjualan, piutang, retur penjualan, pemakaian, dan stok opname. **Mesin postingnya sudah lengkap** setelah `mutasi` — yang menahan `pemakaian` tinggal keputusan alur persetujuannya, dan `pemakaian` juga satu-satunya yang tersisa memakai kosakata status lama (`DIPOSTING`/`DIBATALKAN`) yang perlu disesuaikan saat gilirannya tiba
 - **Penyimpanan lampiran di object storage.** Yang berjalan disk lokal di balik `repository.DokumenStorage`, jadi `web` belum bisa discale lebih dari satu instance
 - Validasi tingkat aplikasi yang tersisa, semuanya di sisi penjualan: kuota retur penjualan, batas alokasi penerimaan pembayaran, plafon kredit, dan penghitungan ulang `penjualan.status_pembayaran` — sisi utang sudah selesai di fase 6, dan cerminnya tinggal ditiru. Didaftar lengkap di CLAUDE.md
 - Job rekonsiliasi harian rantai saldo kartu stok

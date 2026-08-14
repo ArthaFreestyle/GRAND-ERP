@@ -6,9 +6,15 @@ import "time"
 // 000002. Constants rather than literals at each call site: a typo would arrive as
 // an invalid-enum error from PostgreSQL naming a type instead of a module.
 const (
-	JenisTransaksiPembelian           = "PEMBELIAN"
-	JenisTransaksiPenerimaanSusulan   = "PENERIMAAN_SUSULAN"
-	JenisTransaksiReturPembelian      = "RETUR_PEMBELIAN"
+	JenisTransaksiPembelian         = "PEMBELIAN"
+	JenisTransaksiPenerimaanSusulan = "PENERIMAAN_SUSULAN"
+	JenisTransaksiReturPembelian    = "RETUR_PEMBELIAN"
+	// The two halves of one mutasi line. They always come in pairs, in this order,
+	// inside one transaction: goods leave the source room and enter the destination
+	// room, and no other document produces either value. Writing one without the other
+	// would make stock vanish or appear.
+	JenisTransaksiMutasiKeluar        = "MUTASI_KELUAR"
+	JenisTransaksiMutasiMasuk         = "MUTASI_MASUK"
 	JenisTransaksiPembatalanTransaksi = "PEMBATALAN_TRANSAKSI"
 )
 
@@ -19,6 +25,11 @@ const (
 	RefTablePembelian      = "pembelian"
 	RefTableSusulan        = "penerimaan_susulan"
 	RefTableReturPembelian = "retur_pembelian"
+	// RefTableMutasi is the first document to produce two rows per line under one
+	// reference — an outgoing one and an incoming one. FindByRef returns both, and a
+	// cancellation reverses each of them, which is what keeps the pair summing to zero
+	// in quantity.
+	RefTableMutasi = "mutasi"
 )
 
 // KartuStok maps the kartu_stok table: the only source of truth for stock and

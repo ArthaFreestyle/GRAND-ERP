@@ -38,6 +38,10 @@ var RefTableDokumen = map[string]string{
 	"penerimaan_susulan": "status",
 	"retur_pembelian":    "status",
 	"pembayaran_utang":   "status",
+	// mutasi: a handover photo or a signed transfer note belongs to the document that
+	// moved the goods. One line, no migration, no DTO change — which is the whole cost
+	// of a module accepting attachments, and the point of the design in isu #5.
+	"mutasi": "status",
 }
 
 // ErrRefTableTidakDikenal reports a ref_table outside RefTableDokumen.

@@ -46,6 +46,7 @@ func Bootstrap(config *BootstrapConfig) {
 	susulanRepository := repository.NewPenerimaanSusulanRepository()
 	returRepository := repository.NewReturPembelianRepository()
 	pembayaranRepository := repository.NewPembayaranUtangRepository()
+	mutasiRepository := repository.NewMutasiRepository()
 	dokumenRepository := repository.NewDokumenRepository()
 	periodeRepository := repository.NewPeriodeRepository()
 
@@ -70,11 +71,13 @@ func Bootstrap(config *BootstrapConfig) {
 	roleUseCase := usecase.NewRoleUseCase(
 		config.DB, config.Log, config.Validate, roleRepository,
 	)
-	// ProductUseCase borrows PembelianRepository for GET /product/{id}/riwayat-beli.
-	// The purchase-history query is SQL over pembelian tables, so it stays in that
-	// module's repository; only the resource it answers for belongs to product.
+	// ProductUseCase borrows two repositories for two reads: PembelianRepository for
+	// GET /product/{id}/riwayat-beli and KartuStokRepository for GET /product/{id}/stok.
+	// Both queries are over another module's tables, so they stay in that module's
+	// repository; only the resource they answer for belongs to product.
 	productUseCase := usecase.NewProductUseCase(
 		config.DB, config.Log, config.Validate, productRepository, pembelianRepository,
+		kartuStokRepository,
 	)
 	// PeriodeUseCase is book closing. It is the module closest to master data — no
 	// number, no lines, no posting — and it holds one repository, because closing a
@@ -117,6 +120,16 @@ func Bootstrap(config *BootstrapConfig) {
 		config.DB, config.Log, config.Validate,
 		returRepository, pembelianRepository, productRepository,
 		kartuStokRepository, counterRepository, periodeRepository,
+	)
+	// MutasiUseCase takes five repositories and reaches into no other module: a transfer
+	// points at no parent document, so nothing here reads or rewrites another module's
+	// rows. What it needs product for is one query — the conversion factors — and what it
+	// needs kartu_stok for is two rows per line plus the balance locks that keep two
+	// opposite transfers of the same goods from deadlocking each other.
+	mutasiUseCase := usecase.NewMutasiUseCase(
+		config.DB, config.Log, config.Validate,
+		mutasiRepository, productRepository, kartuStokRepository, counterRepository,
+		periodeRepository,
 	)
 	// PembayaranUtangUseCase is the first transaction usecase that needs no
 	// KartuStokRepository at all: money moving to a supplier changes no stock. It reaches
@@ -169,6 +182,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
 	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
 	returController := deliveryhttp.NewReturPembelianController(config.Log, returUseCase)
+	mutasiController := deliveryhttp.NewMutasiController(config.Log, mutasiUseCase)
 	pembayaranController := deliveryhttp.NewPembayaranUtangController(config.Log, pembayaranUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
@@ -191,6 +205,7 @@ func Bootstrap(config *BootstrapConfig) {
 		PembelianController:  pembelianController,
 		SusulanController:    susulanController,
 		ReturController:      returController,
+		MutasiController:     mutasiController,
 		PembayaranController: pembayaranController,
 		ProductController:    productController,
 		RuangController:      ruangController,

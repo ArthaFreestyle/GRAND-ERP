@@ -77,6 +77,32 @@ func (r *PeriodeRepository) Lock(ctx context.Context, db DBTX, tahun, bulan int)
 	return nil
 }
 
+// LockShared takes the shared side of the same advisory lock, which is what the
+// kartu_stok trigger takes before it reads periode.status. It must be called inside a
+// transaction.
+//
+// Nothing needs this to be refused a closed month — the trigger still does that. What
+// it is for is lock ordering. Every writer follows periode first, then
+// (id_barang, id_ruang), because the trigger takes them in that order on every insert.
+// A document that pre-locks its balances (KartuStokRepository.KunciSaldo) would
+// otherwise take the second before the first, and then a book closing queued for the
+// exclusive periode lock is enough to close a deadlock cycle: the closer waits on a
+// posting, the posting waits on our balance lock, and we wait on a shared periode lock
+// queued behind the closer.
+//
+// Taking it here restores the order. Shared holders never wait for each other, so the
+// cost against another posting is nothing; the only thing that waits is a book
+// closing, which is what the lock is for.
+func (r *PeriodeRepository) LockShared(ctx context.Context, db DBTX, tanggal time.Time) error {
+	const query = `SELECT pg_advisory_xact_lock_shared(` + periodeLockKey + `)`
+
+	if _, err := db.ExecContext(ctx, query, tanggal.Year(), int(tanggal.Month())); err != nil {
+		return fmt.Errorf("lock shared periode: %w", err)
+	}
+
+	return nil
+}
+
 // FindByTahunBulan returns sql.ErrNoRows when the month has never been closed. The
 // usecase turns that into a synthetic BUKA rather than a 404 — a month with no row is
 // open, not missing.
