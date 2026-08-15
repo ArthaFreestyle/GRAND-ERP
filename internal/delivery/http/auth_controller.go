@@ -53,7 +53,32 @@ func (c *AuthController) Me(ctx fiber.Ctx) error {
 		Data: &model.SessionResponse{
 			UserID:   session.UserID,
 			Username: session.Username,
-			Roles:    session.Roles,
+			Grants:   session.Grants,
+			Aktif:    session.Aktif,
 		},
 	})
+}
+
+// SwitchContext exchanges the caller's session for a new token acting as one
+// specific grant — isu #12 fase 4. No role guard: a session with no active
+// context authorizes nothing else, so this and Me are the only routes such a
+// session can reach at all, and that falls out of Session.HasRole rather than
+// anything special-cased here or in route.go.
+func (c *AuthController) SwitchContext(ctx fiber.Ctx) error {
+	session, ok := middleware.SessionFrom(ctx)
+	if !ok {
+		return model.Unauthorized("authentication required")
+	}
+
+	request := new(model.SwitchContextRequest)
+	if err := ctx.Bind().Body(request); err != nil {
+		return model.Invalid("malformed request body")
+	}
+
+	response, err := c.UseCase.SwitchContext(ctx.Context(), session.UserID, request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.LoginResponse]{Data: response})
 }

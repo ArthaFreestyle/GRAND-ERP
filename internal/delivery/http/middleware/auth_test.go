@@ -58,7 +58,7 @@ func withSession(session *model.Session) fiber.Handler {
 // is already written — that is, never, because a controller does not call Next(). The
 // guard would look present in the route table and protect nothing.
 func TestRouteGuardsRunBeforeHandler(t *testing.T) {
-	cashier := &model.Session{UserID: 1, Username: "kasir", Roles: []string{"CASHIER"}}
+	cashier := &model.Session{UserID: 1, Username: "kasir", Aktif: &model.ActiveContext{Role: "CASHIER"}}
 
 	t.Run("guard first blocks the handler", func(t *testing.T) {
 		app := newApp()
@@ -117,7 +117,7 @@ func TestRouteGuardsRunBeforeHandler(t *testing.T) {
 }
 
 func TestRequireRoleAcceptsAnyOfTheNamedRoles(t *testing.T) {
-	session := &model.Session{UserID: 1, Username: "gudang", Roles: []string{"INVENTARIS"}}
+	session := &model.Session{UserID: 1, Username: "gudang", Aktif: &model.ActiveContext{Role: "INVENTARIS"}}
 
 	app := newApp()
 	app.Get("/x", withSession(session), RequireRole("SUPERADMIN", "INVENTARIS"),
@@ -136,7 +136,7 @@ func TestRequireRoleAcceptsAnyOfTheNamedRoles(t *testing.T) {
 // Role names are unique case-insensitively in the database, so "cashier" and "CASHIER"
 // are one role and must not authorize differently.
 func TestRequireRoleIgnoresCase(t *testing.T) {
-	session := &model.Session{UserID: 1, Username: "kasir", Roles: []string{"cashier"}}
+	session := &model.Session{UserID: 1, Username: "kasir", Aktif: &model.ActiveContext{Role: "cashier"}}
 
 	app := newApp()
 	app.Get("/x", withSession(session), RequireRole("CASHIER"),

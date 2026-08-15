@@ -33,10 +33,18 @@ ON CONFLICT (lower(username)) DO NOTHING;
 --
 -- created_by dibiarkan NULL: tidak ada pelaku yang memberi role ini, ia lahir dari
 -- seeder.
+--
+-- id_unit_kerja sengaja tidak diisi (NULL): sejak migrasi 000020 itu berarti
+-- "berlaku di seluruh unit", bentuk SUPERADMIN. Tanpa ini superadmin bawaan
+-- akan terkunci dari outlet mana pun begitu unit kedua ada.
+--
+-- Target ON CONFLICT mengikuti indeks parsial user_role_grant_global_uidx
+-- (user_id, role_id) WHERE id_unit_kerja IS NULL — indeks (user_id, role_id)
+-- telanjang tidak ada lagi sejak migrasi yang sama.
 INSERT INTO user_role (user_id, role_id)
 SELECT u.id, r.id
 FROM users u
 CROSS JOIN role r
 WHERE lower(u.username) = 'admin'
   AND lower(r.nama) = 'superadmin'
-ON CONFLICT (user_id, role_id) DO NOTHING;
+ON CONFLICT (user_id, role_id) WHERE id_unit_kerja IS NULL DO NOTHING;

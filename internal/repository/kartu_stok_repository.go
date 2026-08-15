@@ -248,20 +248,28 @@ func (r *KartuStokRepository) SaldoBatch(ctx context.Context, db DBTX, barangIDs
 // Ordered by room name so the list reads the way the rooms are named, ending in
 // id_ruang, which is unique across the subquery precisely because DISTINCT ON made it
 // so.
-func (r *KartuStokRepository) SaldoPerRuang(ctx context.Context, db DBTX, idBarang int64) ([]entity.SaldoStok, error) {
+//
+// aktifIDUnitKerja scopes the rooms to the caller's active unit — isu #12 fase 6. Nil
+// means unrestricted, the same reading it carries everywhere else. The filter sits on
+// the outer query rather than inside the DISTINCT ON subquery: filtering a room out
+// before it wins the DISTINCT ON could change which row wins for the rooms that remain
+// (it cannot here, since DISTINCT ON is keyed per room, but keeping the filter outside
+// is what makes that true by construction rather than by accident).
+func (r *KartuStokRepository) SaldoPerRuang(ctx context.Context, db DBTX, idBarang int64, aktifIDUnitKerja *int64) ([]entity.SaldoStok, error) {
 	const query = `
 		SELECT id_barang, id_ruang, nama_ruang, stok_akhir, nilai_akhir,
 			harga_pokok_satuan, tanggal_transaksi, created_at
 		FROM (
-			SELECT DISTINCT ON (ks.id_ruang) ` + saldoColumns + `, r.nama_ruang
+			SELECT DISTINCT ON (ks.id_ruang) ` + saldoColumns + `, r.nama_ruang, r.id_unit_kerja
 			FROM kartu_stok ks
 			JOIN ruang r ON r.id = ks.id_ruang
 			WHERE ks.id_barang = $1
 			ORDER BY ks.id_ruang, ks.id DESC
 		) saldo
+		WHERE $2::BIGINT IS NULL OR id_unit_kerja = $2
 		ORDER BY nama_ruang, id_ruang`
 
-	rows, err := db.QueryContext(ctx, query, idBarang)
+	rows, err := db.QueryContext(ctx, query, idBarang, aktifIDUnitKerja)
 	if err != nil {
 		return nil, fmt.Errorf("select saldo per ruang: %w", err)
 	}

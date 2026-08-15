@@ -42,4 +42,10 @@ type StokRuangResponse struct {
 // IDProduct comes from the path, never the query string, so the two cannot disagree.
 type ListStokProductRequest struct {
 	IDProduct int64 `json:"-" validate:"required,gt=0"`
+
+	// AktifIDUnitKerja is filled from the session's active grant by the controller,
+	// never from the request — isu #12 fase 6. Nil means unrestricted; otherwise only
+	// rooms in this unit appear, silently — this is a list, not a single resource, so
+	// there is no id to answer 404 against.
+	AktifIDUnitKerja *int64 `json:"-"`
 }

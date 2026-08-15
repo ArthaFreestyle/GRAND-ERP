@@ -38,6 +38,12 @@ import (
 //
 // It takes no ProductRepository quota check either; FindFaktorBatch is the only thing
 // product is asked for.
+//
+// RuangRepository is borrowed only to validate id_ruang_asal against the caller's
+// active unit_kerja on Create and Update (isu #12 fase 5). id_ruang_tujuan is never
+// checked against it: cross-unit transfers are allowed by design (isu #12 fase 1), so
+// only the room goods leave from — the one the caller is asserting authority over — is
+// scoped, never the one they land in.
 type MutasiUseCase struct {
 	DB                  *sql.DB
 	Log                 *logrus.Logger
@@ -49,6 +55,7 @@ type MutasiUseCase struct {
 	// Read for the error message only; the kartu_stok trigger is the guard. See
 	// PembelianUseCase.
 	PeriodeRepository *repository.PeriodeRepository
+	RuangRepository   *repository.RuangRepository
 }
 
 func NewMutasiUseCase(
@@ -60,6 +67,7 @@ func NewMutasiUseCase(
 	kartuStokRepository *repository.KartuStokRepository,
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
+	ruangRepository *repository.RuangRepository,
 ) *MutasiUseCase {
 	return &MutasiUseCase{
 		DB:                  db,
@@ -70,6 +78,7 @@ func NewMutasiUseCase(
 		KartuStokRepository: kartuStokRepository,
 		CounterRepository:   counterRepository,
 		PeriodeRepository:   periodeRepository,
+		RuangRepository:     ruangRepository,
 	}
 }
 
@@ -104,6 +113,11 @@ func (c *MutasiUseCase) Create(ctx context.Context, request *model.CreateMutasiR
 	defer func() {
 		_ = tx.Rollback() // no-op once the transaction is committed
 	}()
+
+	// Only id_ruang_asal, never id_ruang_tujuan — see the type comment on why.
+	if err := periksaRuangUnitAktif(ctx, tx, c.RuangRepository, request.AktifIDUnitKerja, request.IDRuangAsal); err != nil {
+		return nil, err
+	}
 
 	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixMutasi, tanggal)
 	if err != nil {
@@ -149,7 +163,7 @@ func (c *MutasiUseCase) Create(ctx context.Context, request *model.CreateMutasiR
 
 	// Re-read so the response carries the stored rows and their joined names rather than
 	// what was sent.
-	return c.detail(ctx, c.DB, mutasi.ID)
+	return c.detail(ctx, c.DB, mutasi.ID, nil)
 }
 
 func (c *MutasiUseCase) Get(ctx context.Context, request *model.GetMutasiRequest) (*model.MutasiResponse, error) {
@@ -157,7 +171,7 @@ func (c *MutasiUseCase) Get(ctx context.Context, request *model.GetMutasiRequest
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, request.AktifIDUnitKerja)
 }
 
 func (c *MutasiUseCase) Search(ctx context.Context, request *model.ListMutasiRequest) ([]model.MutasiResponse, *model.PageMetadata, error) {
@@ -170,7 +184,7 @@ func (c *MutasiUseCase) Search(ctx context.Context, request *model.ListMutasiReq
 	list, total, err := c.MutasiRepository.Search(
 		ctx, c.DB,
 		request.Search, request.Status, request.IDRuangAsal, request.IDRuangTujuan,
-		request.TanggalDari, request.TanggalSampai, request.TerlamaDulu,
+		request.TanggalDari, request.TanggalSampai, request.AktifIDUnitKerja, request.TerlamaDulu,
 		request.Size, request.Offset(),
 	)
 	if err != nil {
@@ -249,6 +263,15 @@ func (c *MutasiUseCase) Update(ctx context.Context, request *model.UpdateMutasiR
 		return nil, model.Invalid("id_ruang_asal dan id_ruang_tujuan tidak boleh sama")
 	}
 
+	// Only when id_ruang_asal is actually moving, and only the new value: a room
+	// once created never changes its unit_kerja (ruang has no PATCH), so a stored
+	// id_ruang_asal the patch leaves untouched was already valid.
+	if patch.IDRuangAsal != nil {
+		if err := periksaRuangUnitAktif(ctx, tx, c.RuangRepository, request.AktifIDUnitKerja, *patch.IDRuangAsal); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := c.MutasiRepository.UpdateHeader(ctx, tx, request.ID, patch); err != nil {
 		return nil, invalidOnForeignKey(
 			invalidOnCheck(
@@ -263,7 +286,7 @@ func (c *MutasiUseCase) Update(ctx context.Context, request *model.UpdateMutasiR
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // ReplaceDetail swaps the whole line set of a DRAFT.
@@ -301,7 +324,7 @@ func (c *MutasiUseCase) ReplaceDetail(ctx context.Context, request *model.Replac
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Posting moves the goods: two kartu_stok rows per line, out of the source room and
@@ -449,7 +472,7 @@ func (c *MutasiUseCase) Posting(ctx context.Context, request *model.PostingMutas
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Batal voids a posted transfer by appending a reversing row for every movement it
@@ -557,7 +580,7 @@ func (c *MutasiUseCase) Batal(ctx context.Context, request *model.BatalMutasiReq
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // kunciJalurStok takes every lock this document's inserts will need, up front, in the
@@ -682,10 +705,18 @@ func (c *MutasiUseCase) periksaSaldo(ctx context.Context, tx repository.DBTX, id
 
 // detail loads a header and its lines. Two queries, independent of how many lines come
 // back.
-func (c *MutasiUseCase) detail(ctx context.Context, db repository.DBTX, id int64) (*model.MutasiResponse, error) {
+func (c *MutasiUseCase) detail(ctx context.Context, db repository.DBTX, id int64, aktifIDUnitKerja *int64) (*model.MutasiResponse, error) {
 	mutasi, err := c.MutasiRepository.FindByID(ctx, db, id)
 	if err != nil {
 		return nil, notFoundOnNoRows(err, "mutasi not found")
+	}
+
+	// isu #12 fase 6 — source room only, mirroring the write-side check in Create/Update.
+	// A destination-room mismatch never hides the document: cross-unit transfers are
+	// allowed by design, so the caller who owns the source room may still see where the
+	// goods went.
+	if diLuarUnitAktif(mutasi.IDUnitKerjaRuangAsal, aktifIDUnitKerja) {
+		return nil, model.NotFound("mutasi not found")
 	}
 
 	// Non-nil even when empty, so the response carries [] rather than dropping the key

@@ -117,6 +117,11 @@ type ReturPembelianDetailRequest struct {
 
 type GetReturPembelianRequest struct {
 	ID int64 `param:"id" validate:"required,gt=0"`
+
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the request — isu #12 fase 6. Nil means
+	// unrestricted; otherwise a document outside this unit answers 404.
+	AktifIDUnitKerja *int64 `json:"-"`
 }
 
 // UpdateReturPembelianRequest patches the header of a DRAFT. Only the two fields that
@@ -168,4 +173,7 @@ type ListReturPembelianRequest struct {
 	IDSupplier    int64   `query:"id_supplier" validate:"omitempty,gt=0"`
 	TanggalDari   *string `query:"tanggal_dari" validate:"omitempty,datetime=2006-01-02"`
 	TanggalSampai *string `query:"tanggal_sampai" validate:"omitempty,datetime=2006-01-02"`
+
+	// AktifIDUnitKerja, same rule as GetReturPembelianRequest.
+	AktifIDUnitKerja *int64 `query:"-"`
 }

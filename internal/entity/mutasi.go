@@ -66,7 +66,13 @@ type Mutasi struct {
 	// Not columns of mutasi. Filled by the read queries.
 	NamaRuangAsal   string
 	NamaRuangTujuan string
-	Detail          []MutasiDetail
+	// IDUnitKerjaRuangAsal is IDRuangAsal's own unit_kerja — isu #12 fase 6.
+	// Only the source room's unit is ever checked, never the destination's:
+	// cross-unit transfers are allowed by design (isu #12 fase 1), and
+	// visibility mirrors the same write-side asymmetry (fase 5) rather than
+	// showing a document to anyone touched by either end of it.
+	IDUnitKerjaRuangAsal int64
+	Detail               []MutasiDetail
 }
 
 // MutasiDetail maps one line: one product, one quantity, moving between the header's

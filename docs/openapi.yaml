@@ -15,19 +15,53 @@ info:
     berlaku untuk `role` dan `user`.
 
 
-    Satu user boleh punya banyak role, dan izinnya adalah gabungan seluruh role
-    yang dipegang — tidak ada konsep "role yang sedang aktif". Pemberian dan
-    pencabutan role dilakukan lewat `role_ids` di `POST`/`PATCH /api/v1/user`,
-    bukan sub-resource tersendiri, supaya baris user dan pemberian rolenya berada
-    dalam satu transaksi.
+    Satu user boleh punya banyak grant. Sejak isu #12 fase 3, satu grant adalah
+    pasangan (role, unit_kerja): `id_unit_kerja` kosong berarti role itu berlaku
+    di seluruh unit, diisi berarti hanya di unit tersebut, dan role yang sama
+    boleh dipegang di lebih dari satu unit sebagai grant terpisah. Pemberian dan
+    pencabutan grant dilakukan lewat `grants` di `POST`/`PATCH /api/v1/user`,
+    bukan sub-resource tersendiri, supaya baris user dan pemberian grant-nya
+    berada dalam satu transaksi.
+
+
+    Sejak isu #12 fase 4, sebuah **sesi** (token) mengotorisasi sebagai **satu**
+    grant aktif, bukan gabungan seluruh grant yang dipegang. Login dengan tepat
+    satu grant usable memilihkannya otomatis; dengan lebih dari satu, token
+    terbit tanpa konteks aktif dan tidak mengotorisasi apa pun sampai
+    `POST /api/v1/auth/switch-context` dipanggil. Lihat endpoint itu untuk
+    detailnya, termasuk kenapa token lama tetap sah sesudahnya.
+
+
+    Sejak isu #12 fase 5, `id_ruang` pada `POST /api/v1/pembelian` dan
+    `id_ruang_asal` pada `POST`/`PATCH /api/v1/mutasi` divalidasi terhadap
+    unit_kerja aktif sesi pemanggil — di luar unit itu → 403. Konteks aktif
+    global (grant tanpa unit) tidak dibatasi. `id_ruang_tujuan` pada `mutasi`
+    tidak pernah dibatasi: mutasi antar unit sengaja diperbolehkan.
+
+
+    Sejak isu #12 fase 6, bacaan pada `ruang`, `pembelian`,
+    `penerimaan-susulan`, `retur-pembelian`, `mutasi`, dan
+    `GET /product/{id}/stok` juga disaring oleh unit_kerja aktif yang sama.
+    Sebuah `GET /{id}` di luar unit menjawab 404, persis seperti id yang tidak
+    ada — bukan 403, supaya bacaan yang disaring tidak sengaja membocorkan
+    bahwa dokumennya ada. Sebuah `GET` daftar (dan `stok`, yang berbentuk
+    daftar) diam-diam melewati baris di luar unit, tanpa error. Untuk
+    `mutasi`, yang diperiksa hanya `id_ruang_asal` — sama seperti fase 5 —
+    jadi dokumen yang `id_ruang_tujuan`-nya di luar unit aktif tetap terlihat
+    selama `id_ruang_asal`-nya cocok. Konteks aktif global tidak dibatasi di
+    sini juga. Ini bagian opsional dari fase 6 ("baru kalau terbukti perlu")
+    yang dibangun; `users.id_ruang_default` dan kolom snapshot role pada
+    dokumen transaksi tetap ditunda.
 
 
     Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`. Ambil
     tokennya dari endpoint itu lalu kirim sebagai `Authorization: Bearer <token>`.
 
 
-    Otorisasi memakai nama role. Membaca terbuka untuk siapa pun yang sudah login;
-    menulis dibagi menurut pemilik datanya — `INVENTARIS` untuk barang, satuan,
+    Otorisasi memakai nama role. Membaca terbuka untuk siapa pun yang sudah login —
+    ini soal role guard, bukan seluruh jawaban sebuah bacaan: sejak fase 6 di atas,
+    beberapa bacaan juga disaring lebih lanjut oleh unit_kerja aktif sesi; menulis
+    dibagi menurut pemilik datanya — `INVENTARIS` untuk barang, satuan,
     ruang, ekspedisi, dan supplier, `CASHIER` untuk pelanggan. `SUPERADMIN` boleh
     apa saja. `role` dan `user` khusus `SUPERADMIN`, termasuk untuk membaca.
 
@@ -148,6 +182,7 @@ tags:
   - name: product
   - name: periode
   - name: docs
+  - name: unit-kerja
   - name: ruang
   - name: satuan
   - name: ekspedisi
@@ -220,9 +255,19 @@ paths:
         `users_username_lower_uidx`.
 
 
-        Token berisi role yang dipegang user **saat token dibuat**, dan hanya role
-        yang `is_aktif`. Role yang diberikan atau dicabut setelahnya baru berlaku
-        pada login berikutnya.
+        Token berisi grant yang dipegang user **saat token dibuat**, dan hanya
+        yang usable — role-nya `is_aktif`, dan kalau grant-nya menyebut unit,
+        unit itu juga `is_aktif`. Grant yang diberikan, dicabut, atau
+        (unit/role-nya) dipensiunkan setelahnya baru terlihat pada login
+        berikutnya.
+
+
+        **Isu #12 fase 4 — konteks aktif.** Dengan wewenang bertempat, tidak
+        ada default yang aman dipilihkan diam-diam. Memegang tepat satu grant
+        usable membuatnya otomatis aktif; memegang lebih dari satu menjawab
+        `aktif: null`, dan token itu **tidak mengotorisasi apa pun** sampai
+        `POST /auth/switch-context` dipanggil untuk memilih salah satunya —
+        lihat endpoint itu di bawah.
       requestBody:
         required: true
         content:
@@ -253,8 +298,9 @@ paths:
       description: >
         Membaca isi token, bukan tabel `users`. Itu memang yang dipakai server untuk
         memutuskan izin, jadi itulah yang berguna diperiksa — dan dengan token
-        stateless keduanya bisa berbeda. Role yang dicabut setelah token dibuat masih
-        muncul di sini sampai tokennya kedaluwarsa.
+        stateless keduanya bisa berbeda. Grant yang dicabut, atau role/unitnya
+        dipensiunkan, setelah token dibuat masih muncul di sini sampai tokennya
+        kedaluwarsa.
       responses:
         "200":
           description: Sesi yang sedang berlaku
@@ -265,6 +311,56 @@ paths:
                 properties:
                   data: { $ref: "#/components/schemas/Session" }
         "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/switch-context:
+    post:
+      tags: [auth]
+      summary: Pilih satu grant sebagai konteks aktif
+      operationId: switchContext
+      description: >
+        Isu #12 fase 4. Menerbitkan token baru yang beraksi sebagai `id_user_role`
+        yang disebut — tidak ada role guard di endpoint ini, karena sesi tanpa
+        konteks aktif memang tidak mengotorisasi apa pun sama sekali, jadi tidak
+        ada yang perlu dijaga selain autentikasi.
+
+
+        Grant-nya dibaca ulang dari database saat itu juga, **tidak pernah
+        dipercaya dari klaim token pemanggil sendiri** — satu-satunya titik di
+        seluruh desain ini di mana kebasian token dibiarkan berpengaruh. Setiap
+        kegagalan menjawab **403 yang sama**: grant tidak ada, grant milik user
+        lain, rolenya sudah `is_aktif: false`, atau unitnya sudah
+        `is_aktif: false`. Membedakannya memberi jalan menebak id grant milik
+        orang lain, persis alasan `POST /auth/login` menjawab satu pesan untuk
+        setiap kegagalan.
+
+
+        **Token lama tetap sah.** Menukar konteks menerbitkan token baru; ia
+        tidak mencabut yang lama, dan tidak bisa — desainnya JWT stateless.
+        Token sebelumnya, dengan wewenang lamanya, tetap berlaku sampai
+        kedaluwarsa (`jwt.ttl_minutes`). Konteks aktif adalah kendali
+        kejelasan dan least-privilege, bukan batas keamanan terhadap pemegang
+        tokennya sendiri.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id_user_role]
+              properties:
+                id_user_role: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Token baru dengan konteks aktif yang dipilih
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/LoginResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
 
   /health:
     get:
@@ -823,6 +919,11 @@ paths:
         dilalui lalu habis tetap muncul dengan nilai nol, karena itu fakta tentang ke
         mana barangnya pergi. Produk yang tidak dikenal menjawab **404**, produk yang
         belum pernah bergerak menjawab array kosong — keduanya fakta yang berbeda.
+
+
+        Isu #12 fase 6: ruang di luar unit_kerja aktif sesi pemanggil dilewati
+        begitu saja, tanpa error — sama seperti daftar lain yang disaring.
+        Konteks aktif global melihat semua ruang seperti biasa.
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -853,6 +954,11 @@ paths:
         Diurutkan `tanggal DESC, id DESC`. Pemecah seri yang unik itu wajib: banyak
         dokumen bertanggal sama, dan tanpa pemecah seri satu baris bisa muncul di
         dua halaman sementara baris lain tidak pernah keluar.
+
+
+        Isu #12 fase 6: dokumen yang ruangnya di luar unit_kerja aktif sesi
+        pemanggil dilewati begitu saja, tanpa error — `total_item` sudah
+        menghitung setelah penyaringan ini.
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/Size"
@@ -951,6 +1057,13 @@ paths:
                   description: >
                     Ruang tujuan seluruh baris. Satu dokumen tidak bisa masuk ke dua
                     ruang.
+
+
+                    Isu #12 fase 5: divalidasi terhadap unit_kerja aktif sesi
+                    pemanggil. Konteks aktif global (grant tanpa unit, bentuk
+                    SUPERADMIN) tidak dibatasi; konteks aktif yang menyebut
+                    satu unit hanya boleh memilih ruang di unit itu, kalau
+                    tidak → 403.
                 no_faktur_supplier:
                   type: string
                   nullable: true
@@ -1011,6 +1124,7 @@ paths:
                 properties:
                   data: { $ref: "#/components/schemas/Pembelian" }
         "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/pembelian/{id}:
@@ -1018,6 +1132,10 @@ paths:
       tags: [pembelian]
       summary: Detail pembelian beserta barisnya
       operationId: getPembelian
+      description: >
+        Isu #12 fase 6: dokumen yang ruangnya di luar unit_kerja aktif sesi
+        pemanggil menjawab 404, sama seperti id yang tidak ada. Konteks aktif
+        global tidak dibatasi.
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -1361,6 +1479,10 @@ paths:
         Hanya baris yang `qty_diterima_dasar` kurang dari `qty_dasar`. Baris yang
         datang lengkap tidak muncul — ini daftar kerja untuk mengejar susulan lewat
         WhatsApp, dan baris yang lengkap tidak ada di dalamnya.
+
+
+        Isu #12 fase 6: penyaringan yang sama dengan `GET /pembelian/{id}` —
+        dokumen di luar unit_kerja aktif menjawab 404.
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -1383,6 +1505,10 @@ paths:
       description: >
         Tidak menyertakan `detail`; kuncinya hilang sama sekali, bukan array kosong.
         `search` mencocokkan nomor dokumen ini maupun nomor pembelian asalnya.
+
+
+        Isu #12 fase 6: dokumen yang ruang pembelian asalnya di luar unit_kerja
+        aktif sesi pemanggil dilewati begitu saja, tanpa error.
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/Size"
@@ -1481,6 +1607,10 @@ paths:
       tags: [penerimaan-susulan]
       summary: Detail penerimaan susulan beserta barisnya
       operationId: getPenerimaanSusulan
+      description: >
+        Isu #12 fase 6: dokumen yang ruang pembelian asalnya di luar
+        unit_kerja aktif sesi pemanggil menjawab 404, sama seperti id yang
+        tidak ada.
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -1717,6 +1847,10 @@ paths:
       description: >
         Tidak menyertakan `detail`; kuncinya hilang sama sekali, bukan array kosong.
         `search` mencocokkan nomor dokumen ini maupun nomor pembelian asalnya.
+
+
+        Isu #12 fase 6: dokumen yang ruang pembelian asalnya di luar unit_kerja
+        aktif sesi pemanggil dilewati begitu saja, tanpa error.
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/Size"
@@ -1822,6 +1956,10 @@ paths:
       tags: [retur-pembelian]
       summary: Detail retur pembelian beserta barisnya
       operationId: getReturPembelian
+      description: >
+        Isu #12 fase 6: dokumen yang ruang pembelian asalnya di luar
+        unit_kerja aktif sesi pemanggil menjawab 404, sama seperti id yang
+        tidak ada.
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -2079,6 +2217,12 @@ paths:
         bahwa sebuah draft sudah siap diposting, dan daftar inilah penggantinya —
         diurutkan paling lama dulu, seperti `GET /supplier/{id}/utang`, karena antrean
         dibaca untuk dikerjakan, bukan untuk melihat yang terbaru.
+
+
+        Isu #12 fase 6: dokumen yang `id_ruang_asal`-nya di luar unit_kerja
+        aktif sesi pemanggil dilewati begitu saja, tanpa error —
+        `id_ruang_tujuan` tidak pernah diperiksa, mengikuti aturan yang sama
+        dengan validasi tulis di fase 5.
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/Size"
@@ -2142,6 +2286,12 @@ paths:
         `kartu_stok`.
 
 
+        **Isu #12 fase 5:** `id_ruang_asal` divalidasi terhadap unit_kerja aktif
+        sesi pemanggil, kalau tidak → 403. `id_ruang_tujuan` **tidak pernah**
+        dibatasi — mutasi antar unit sengaja diperbolehkan (isu #12 fase 1); yang
+        diperiksa hanya wewenang atas ruang tempat barang dinyatakan keluar.
+
+
         Role: `INVENTARIS`.
       requestBody:
         required: true
@@ -2169,6 +2319,7 @@ paths:
                 properties:
                   data: { $ref: "#/components/schemas/Mutasi" }
         "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/mutasi/{id}:
@@ -2176,6 +2327,11 @@ paths:
       tags: [mutasi]
       summary: Detail mutasi beserta barisnya
       operationId: getMutasi
+      description: >
+        Isu #12 fase 6: dokumen yang `id_ruang_asal`-nya di luar unit_kerja
+        aktif sesi pemanggil menjawab 404, sama seperti id yang tidak ada.
+        `id_ruang_tujuan` tidak pernah diperiksa — dokumen yang tujuannya di
+        unit lain tetap terlihat selama `id_ruang_asal`-nya cocok.
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -2207,6 +2363,13 @@ paths:
         ada di sana.
 
 
+        **Isu #12 fase 5:** kalau `id_ruang_asal` dikirim, nilai barunya divalidasi
+        terhadap unit_kerja aktif sesi pemanggil, kalau tidak → 403. Tidak dikirim
+        berarti tidak diperiksa ulang — ruang tersimpan sudah pasti valid, karena
+        `ruang` sendiri tidak punya `PATCH` sehingga unitnya tidak bisa berubah.
+        `id_ruang_tujuan` tidak pernah dibatasi, alasannya sama seperti di `POST`.
+
+
         Role: `INVENTARIS`.
       parameters:
         - $ref: "#/components/parameters/ID"
@@ -2231,6 +2394,7 @@ paths:
                 properties:
                   data: { $ref: "#/components/schemas/Mutasi" }
         "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
@@ -2952,11 +3116,133 @@ paths:
         # Bulan itu tidak sedang TUTUP, termasuk kalau barisnya belum pernah ada.
         "409": { $ref: "#/components/responses/Error" }
 
+  /api/v1/unit-kerja:
+    get:
+      tags: [unit-kerja]
+      summary: List unit kerja
+      operationId: listUnitKerja
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: >
+            Cocokkan sebagian pada kode atau nama unit. `%` dan `_` diperlakukan
+            sebagai teks biasa, bukan wildcard.
+          schema: { type: string, maxLength: 255 }
+        - $ref: "#/components/parameters/IsAktif"
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/UnitKerja" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [unit-kerja]
+      summary: Create unit kerja
+      operationId: createUnitKerja
+      description: >
+        Isu #12 fase 2: lokasi organisasi yang jadi induk setiap `ruang`.
+        `user_role.id_unit_kerja` dan konteks aktif sesi belum ada — lihat
+        catatan "Unit kerja and location-bound authority" di CLAUDE.md.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [nama]
+              properties:
+                kode:
+                  type: string
+                  maxLength: 32
+                  nullable: true
+                  description: >
+                    Opsional. Unik tanpa memperhatikan huruf besar-kecil, tapi
+                    beberapa unit boleh sama-sama tidak punya kode.
+                  example: "PUSAT"
+                nama: { type: string, maxLength: 255, example: "Unit Utama" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/UnitKerja" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/unit-kerja/{id}:
+    get:
+      tags: [unit-kerja]
+      summary: Get unit kerja by id
+      operationId: getUnitKerja
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/UnitKerja" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [unit-kerja]
+      summary: Update unit kerja
+      operationId: updateUnitKerja
+      description: >
+        Field yang tidak dikirim tidak diubah. Mengirim `null` pada kode
+        mengosongkan kolom itu. `id`, `created_at`, dan `created_by` tidak
+        pernah diambil dari body.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                kode: { type: string, maxLength: 32, nullable: true }
+                nama: { type: string, maxLength: 255 }
+                is_aktif: { type: boolean }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/UnitKerja" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
   /api/v1/ruang:
     get:
       tags: [ruang]
       summary: List ruang
       operationId: listRuang
+      description: >
+        Isu #12 fase 6: ruang di luar unit_kerja aktif sesi pemanggil
+        dilewati begitu saja, tanpa error. Konteks aktif global melihat
+        semua ruang seperti biasa.
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/Size"
@@ -2985,13 +3271,18 @@ paths:
       tags: [ruang]
       summary: Create ruang
       operationId: createRuang
+      description: >
+        `id_unit_kerja` wajib dan divalidasi menunjuk unit kerja yang aktif
+        (isu #12 fase 2) — ruang tanpa unit adalah ruang yang tidak bisa
+        diputuskan siapa berhak memakainya. `ruang` masih tidak punya PATCH,
+        jadi unitnya tidak bisa diganti lewat API ini.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               type: object
-              required: [nama_ruang]
+              required: [nama_ruang, id_unit_kerja]
               properties:
                 kode:
                   type: string
@@ -3002,6 +3293,11 @@ paths:
                     beberapa ruang boleh sama-sama tidak punya kode.
                   example: "GD-UTM"
                 nama_ruang: { type: string, maxLength: 255, example: "Gudang Utama" }
+                id_unit_kerja:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: Harus menunjuk unit_kerja yang masih is_aktif.
       responses:
         "201":
           description: Created
@@ -3019,6 +3315,9 @@ paths:
       tags: [ruang]
       summary: Get ruang by id
       operationId: getRuang
+      description: >
+        Isu #12 fase 6: ruang di luar unit_kerja aktif sesi pemanggil
+        menjawab 404, sama seperti id yang tidak ada.
       parameters:
         - $ref: "#/components/parameters/ID"
       responses:
@@ -3568,9 +3867,9 @@ paths:
       summary: Create user
       operationId: createUser
       description: >
-        User dan seluruh role-nya ditulis dalam satu transaksi: kalau pemberian
-        role gagal, usernya juga tidak jadi dibuat. `role_ids` boleh dikosongkan —
-        user tanpa role bisa dibuat lalu diberi role lewat PATCH.
+        User dan seluruh grant-nya ditulis dalam satu transaksi: kalau pemberian
+        grant gagal, usernya juga tidak jadi dibuat. `grants` boleh dikosongkan —
+        user tanpa role bisa dibuat lalu diberi grant lewat PATCH.
       requestBody:
         required: true
         content:
@@ -3597,7 +3896,7 @@ paths:
                     PostgreSQL tidak mengikat NULL.
                 password: { $ref: "#/components/schemas/Password" }
                 nama_lengkap: { type: string, maxLength: 255, nullable: true }
-                role_ids: { $ref: "#/components/schemas/RoleIDs" }
+                grants: { $ref: "#/components/schemas/Grants" }
       responses:
         "201":
           description: Created
@@ -3630,7 +3929,7 @@ paths:
 
     patch:
       tags: [user]
-      summary: Update user, termasuk mengatur ulang role-nya
+      summary: Update user, termasuk mengatur ulang grant-nya
       operationId: updateUser
       description: >
         Field yang tidak dikirim tidak diubah. Mengirim `null` pada `email` atau
@@ -3638,22 +3937,24 @@ paths:
         `is_aktif` NOT NULL sehingga `null` ditolak 400.
 
 
-        `role_ids` **mengganti seluruh himpunan**, bukan menambah: tidak dikirim
-        berarti role dibiarkan apa adanya, `[]` mencabut semuanya, dan `[1, 3]`
-        membuat user berakhir dengan tepat role 1 dan 3. `null` ditolak, karena
-        `[]` sudah berarti "tanpa role".
+        `grants` **mengganti seluruh himpunan**, bukan menambah: tidak dikirim
+        berarti grant dibiarkan apa adanya, `[]` mencabut semuanya, dan sebuah
+        daftar membuat user berakhir dengan tepat grant yang disebut di dalamnya.
+        `null` ditolak, karena `[]` sudah berarti "tanpa grant".
 
 
-        Role yang tetap dipegang tidak dicabut lalu diberikan ulang, jadi
-        `user_role.created_at` tetap mencatat kapan pemberian itu benar-benar
-        dimulai.
+        Grant yang tetap dipegang — pasangan (id_role, id_unit_kerja) yang sama
+        persis — tidak dicabut lalu diberikan ulang, jadi `user_role.created_at`
+        tetap mencatat kapan pemberian itu benar-benar dimulai. Perbandingannya
+        NULL-safe: dua grant global (id_unit_kerja tidak diisi) untuk role yang
+        sama dianggap grant yang sama, bukan dua baris berbeda.
 
 
-        Body yang hanya berisi `role_ids` tetap menggerakkan `updated_at` user —
+        Body yang hanya berisi `grants` tetap menggerakkan `updated_at` user —
         itu tetap perubahan pada user tersebut.
 
 
-        Perubahan user dan role-nya berada dalam satu transaksi.
+        Perubahan user dan grant-nya berada dalam satu transaksi.
       parameters:
         - $ref: "#/components/parameters/ID"
       requestBody:
@@ -3669,7 +3970,7 @@ paths:
                 password: { $ref: "#/components/schemas/Password" }
                 nama_lengkap: { type: string, maxLength: 255, nullable: true }
                 is_aktif: { type: boolean }
-                role_ids: { $ref: "#/components/schemas/RoleIDs" }
+                grants: { $ref: "#/components/schemas/Grants" }
       responses:
         "200":
           description: Updated
@@ -3955,6 +4256,28 @@ components:
         kode: { type: string, nullable: true }
         nama_ruang: { type: string }
         is_aktif: { type: boolean }
+        id_unit_kerja: { type: integer, format: int64 }
+        nama_unit_kerja:
+          type: string
+          description: Diambil sekalian lewat JOIN ke unit_kerja, bukan query terpisah.
+
+    UnitKerja:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        kode: { type: string, nullable: true }
+        nama: { type: string }
+        is_aktif: { type: boolean }
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64, nullable: true }
+        nama_pembuat:
+          type: string
+          nullable: true
+          description: >
+            Diambil sekalian lewat LEFT JOIN ke users, bukan query terpisah per
+            baris. Null selama pembuatnya tidak diisi.
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
 
     Satuan:
       type: object
@@ -4033,6 +4356,48 @@ components:
         `null` berarti **tanpa batas**, bukan nol. Nilai negatif ditolak 400.
       example: "15000000.00"
 
+    Grant:
+      type: object
+      description: >
+        Satu grant yang dipegang user saat token dibuat — bentuk yang mengisi
+        menu penukar konteks (isu #12 fase 4). Cuma yang usable yang muncul di
+        sini: role-nya `is_aktif`, dan kalau grant-nya menyebut unit, unit itu
+        juga `is_aktif`. Sama seperti `roles` pada `User`, role yang sama boleh
+        muncul lebih dari sekali — satu baris per unit tempat ia diberikan.
+      properties:
+        id_user_role:
+          type: integer
+          format: int64
+          description: Id baris user_role — inilah yang dikirim ke switch-context.
+        id_role: { type: integer, format: int64 }
+        role: { type: string, example: CASHIER }
+        id_unit_kerja:
+          type: integer
+          format: int64
+          nullable: true
+          description: 'null berarti grant ini berlaku di seluruh unit.'
+        nama_unit_kerja:
+          type: string
+          nullable: true
+
+    ActiveContext:
+      type: object
+      nullable: true
+      description: >
+        Grant yang sedang dipakai sesi ini — isu #12 fase 4. `null` berarti
+        pemanggil belum memilih: itu terjadi saat login dengan lebih dari satu
+        grant usable, dan sesi seperti itu tidak mengotorisasi apa pun sampai
+        `POST /auth/switch-context` dipanggil — `role tidak mencukupi` akan
+        menjawab setiap endpoint yang butuh role, termasuk endpoint yang
+        sebenarnya dipegang pemanggil di grant lain.
+      properties:
+        id_user_role: { type: integer, format: int64 }
+        role: { type: string, example: CASHIER }
+        id_unit_kerja:
+          type: integer
+          format: int64
+          nullable: true
+
     LoginResult:
       type: object
       properties:
@@ -4045,8 +4410,19 @@ components:
           format: date-time
           description: >
             Waktu absolut, bukan durasi, supaya klien tidak perlu menebak kapan
-            responsnya diterima. Ini juga batas satu-satunya sesi ini bisa dicabut.
+            responsnya diterima. Ini juga batas satu-satunya token ini bisa
+            dicabut — lihat catatan "aktif" di bawah.
         user: { $ref: "#/components/schemas/User" }
+        grants:
+          type: array
+          description: Seluruh grant usable yang dipegang user. Selalu array, tidak pernah null.
+          items: { $ref: "#/components/schemas/Grant" }
+        aktif:
+          allOf: [{ $ref: "#/components/schemas/ActiveContext" }]
+          description: >
+            Grant yang aktif di token ini. `null` berarti klien harus memanggil
+            `POST /auth/switch-context` sebelum bisa memakai endpoint mana pun
+            yang butuh role.
 
     Session:
       type: object
@@ -4054,12 +4430,15 @@ components:
       properties:
         user_id: { type: integer, format: int64 }
         username: { type: string }
-        roles:
+        grants:
           type: array
           description: >
-            Nama role yang dipegang saat token dibuat, hanya yang aktif. Selalu array,
-            tidak pernah null.
-          items: { type: string, example: SUPERADMIN }
+            Seluruh grant usable yang dipegang user saat token dibuat. Selalu
+            array, tidak pernah null.
+          items: { $ref: "#/components/schemas/Grant" }
+        aktif:
+          allOf: [{ $ref: "#/components/schemas/ActiveContext" }]
+          description: Grant yang sedang aktif — satu-satunya yang dipakai mengotorisasi.
 
     Product:
       type: object
@@ -4998,13 +5377,21 @@ components:
         roles:
           type: array
           description: >
-            Seluruh role yang dipegang user; satu user boleh punya banyak. Selalu
+            Seluruh grant yang dipegang user; satu user boleh punya banyak. Selalu
             array, tidak pernah `null`, jadi `roles.length` aman dibaca di setiap
-            baris. Diurutkan berdasarkan nama role.
+            baris. Diurutkan berdasarkan nama role lalu unit (grant global lebih
+            dulu).
 
 
-            Termasuk role yang dipensiunkan setelah diberikan — pemberiannya masih
-            nyata dan masih perlu dicabut. Bedakan lewat `is_aktif` di dalamnya.
+            Isu #12 fase 3: satu grant adalah (role, unit_kerja), bukan cuma role
+            lagi, jadi role yang sama bisa muncul lebih dari sekali di sini — satu
+            baris per unit tempat ia diberikan. "INVENTARIS di outlet A" dan
+            "INVENTARIS di outlet B" adalah dua baris, bukan duplikat.
+
+
+            Termasuk grant yang rolenya, atau unitnya, dipensiunkan setelah
+            diberikan — pemberiannya masih nyata dan masih perlu dicabut. Bedakan
+            lewat `is_aktif` di dalamnya.
           items: { $ref: "#/components/schemas/RoleRef" }
         created_at: { type: string, format: date-time }
         created_by: { type: integer, format: int64, nullable: true }
@@ -5014,24 +5401,66 @@ components:
     RoleRef:
       type: object
       description: >
-        Bentuk ringkas role di dalam user. Kolom audit role tidak diulang di setiap
-        baris daftar user.
+        Bentuk ringkas satu grant di dalam user. Kolom audit role tidak diulang di
+        setiap baris daftar user.
       properties:
         id: { type: integer, format: int64 }
         nama: { type: string, example: CASHIER }
         is_aktif: { type: boolean }
+        id_user_role:
+          type: integer
+          format: int64
+          description: >
+            Id baris user_role itu sendiri — identitas grant ini, bukan
+            identitas rolenya. Isu #12 fase 4: ini yang dikirim sebagai
+            id_user_role ke POST /auth/switch-context.
+        id_unit_kerja:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            Unit tempat grant ini berlaku. `null` berarti berlaku di seluruh unit
+            — bentuk grant SUPERADMIN.
+        nama_unit_kerja:
+          type: string
+          nullable: true
+          description: Diambil sekalian lewat JOIN, null kalau id_unit_kerja null.
+        is_aktif_unit_kerja:
+          type: boolean
+          nullable: true
+          description: >
+            Versi is_aktif untuk unitnya. null persis ketika id_unit_kerja null
+            — grant global tidak punya unit yang bisa dipensiunkan.
 
-    RoleIDs:
+    Grant:
+      type: object
+      required: [id_role]
+      description: >
+        Satu role untuk diberikan, dan di mana — isu #12 fase 3. `id_unit_kerja`
+        yang tidak diisi (atau `null`) memberi role itu di seluruh unit, bentuk
+        grant SUPERADMIN; diisi berarti grant itu hanya berlaku di unit tersebut,
+        dan role yang sama boleh diberikan lagi untuk unit lain lewat entri
+        `Grant` kedua.
+      properties:
+        id_role: { type: integer, format: int64, minimum: 1 }
+        id_unit_kerja:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+
+    Grants:
       type: array
       maxItems: 32
-      items: { type: integer, format: int64, minimum: 1 }
+      items: { $ref: "#/components/schemas/Grant" }
       description: >
-        Id role yang dipegang user. Id yang berulang dianggap satu — `[2, 2]` jelas
-        berarti "beri role 2".
+        Grant yang dipegang user. Pasangan (id_role, id_unit_kerja) yang berulang
+        dianggap satu — jelas berarti "beri grant itu sekali".
 
 
-        Id yang tidak ada atau rolenya sudah `is_aktif: false` ditolak 400, bukan
-        diabaikan diam-diam.
+        id_role yang tidak ada atau rolenya sudah `is_aktif: false` ditolak 400,
+        begitu juga id_unit_kerja yang tidak ada atau unitnya sudah
+        `is_aktif: false` — bukan diabaikan diam-diam.
       example: [2, 3]
 
     Password:

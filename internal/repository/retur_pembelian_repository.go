@@ -29,7 +29,8 @@ const returReadColumns = `r.id, r.nomor, r.tanggal, r.id_pembelian, r.id_supplie
 	r.id_ruang, r.alasan, r.total::TEXT, r.nilai_kredit_utang::TEXT, r.status,
 	r.created_by, r.created_at,
 	r.diajukan_oleh, r.diajukan_pada, r.disetujui_oleh, r.disetujui_pada, r.posted_at,
-	r.dibatalkan_oleh, r.alasan_batal, r.alasan_tolak, p.nomor, sup.nama, ru.nama_ruang`
+	r.dibatalkan_oleh, r.alasan_batal, r.alasan_tolak, p.nomor, sup.nama, ru.nama_ruang,
+	ru.id_unit_kerja`
 
 // returFrom joins INNER throughout: every one of these foreign keys is NOT NULL, so a
 // return without a purchase, a supplier, or a room cannot exist.
@@ -42,14 +43,18 @@ const returFrom = `
 // returFilter is shared by the COUNT and the row query. Two copies of a filter
 // eventually diverge and total_item starts lying about the data.
 //
-// Placeholder discipline: the filter owns $1..$6 and pagination follows after it.
+// Placeholder discipline: the filter owns $1..$7 and pagination follows after it.
+//
+// $7 is the active-unit scope (isu #12 fase 6), against ru.id_unit_kerja —
+// which is why the COUNT query now has to join ruang too, not just pembelian.
 const returFilter = `
 	WHERE ($1 = '' OR r.nomor ILIKE '%' || $1 || '%' OR p.nomor ILIKE '%' || $1 || '%')
 	  AND ($2 = '' OR r.status = $2)
 	  AND ($3 = 0 OR r.id_pembelian = $3)
 	  AND ($4 = 0 OR r.id_supplier = $4)
 	  AND ($5::DATE IS NULL OR r.tanggal >= $5::DATE)
-	  AND ($6::DATE IS NULL OR r.tanggal < ($6::DATE + INTERVAL '1 day'))`
+	  AND ($6::DATE IS NULL OR r.tanggal < ($6::DATE + INTERVAL '1 day'))
+	  AND ($7::BIGINT IS NULL OR ru.id_unit_kerja = $7)`
 
 // returDetailReadColumns reaches the product through pembelian_detail: a return line
 // names the invoice line the goods came in on, not the product directly.
@@ -238,14 +243,16 @@ func (r *ReturPembelianRepository) Batal(ctx context.Context, db DBTX, id, actor
 	return execTransisi(ctx, db, query, "batal retur_pembelian", id, actorID, alasan)
 }
 
-func (r *ReturPembelianRepository) Search(ctx context.Context, db DBTX, search, status string, idPembelian, idSupplier int64, dari, sampai *string, limit, offset int) ([]entity.ReturPembelian, int64, error) {
+func (r *ReturPembelianRepository) Search(ctx context.Context, db DBTX, search, status string, idPembelian, idSupplier int64, dari, sampai *string, aktifIDUnitKerja *int64, limit, offset int) ([]entity.ReturPembelian, int64, error) {
 	search = EscapeLike(search)
 
+	// COUNT now runs through returFrom rather than a hand-rolled join, since $7
+	// needs ru.id_unit_kerja alongside p.nomor.
 	var total int64
 	if err := db.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM retur_pembelian r JOIN pembelian p ON p.id = r.id_pembelian`+returFilter,
-		search, status, idPembelian, idSupplier, dari, sampai,
+		`SELECT COUNT(*) `+returFrom+returFilter,
+		search, status, idPembelian, idSupplier, dari, sampai, aktifIDUnitKerja,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count retur_pembelian: %w", err)
 	}
@@ -259,9 +266,12 @@ func (r *ReturPembelianRepository) Search(ctx context.Context, db DBTX, search, 
 	// supports exactly this.
 	query := `SELECT ` + returReadColumns + returFrom + returFilter + `
 		ORDER BY r.tanggal DESC, r.id DESC
-		LIMIT $7 OFFSET $8`
+		LIMIT $8 OFFSET $9`
 
-	rows, err := db.QueryContext(ctx, query, search, status, idPembelian, idSupplier, dari, sampai, limit, offset)
+	rows, err := db.QueryContext(
+		ctx, query,
+		search, status, idPembelian, idSupplier, dari, sampai, aktifIDUnitKerja, limit, offset,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select retur_pembelian: %w", err)
 	}
@@ -385,5 +395,6 @@ func scanReturRead(row rowScanner, retur *entity.ReturPembelian) error {
 	return row.Scan(append(
 		returFields(retur),
 		&retur.NomorPembelian, &retur.NamaSupplier, &retur.NamaRuang,
+		&retur.IDUnitKerjaRuang,
 	)...)
 }

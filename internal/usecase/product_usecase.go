@@ -440,7 +440,7 @@ func (c *ProductUseCase) Stok(ctx context.Context, request *model.ListStokProduc
 		return nil, notFoundOnNoRows(err, "product not found")
 	}
 
-	list, err := c.KartuStokRepository.SaldoPerRuang(ctx, c.DB, request.IDProduct)
+	list, err := c.KartuStokRepository.SaldoPerRuang(ctx, c.DB, request.IDProduct, request.AktifIDUnitKerja)
 	if err != nil {
 		return nil, err
 	}

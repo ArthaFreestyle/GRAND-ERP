@@ -31,7 +31,17 @@ func stokAwalMutasi(t *testing.T, testApp *app, qty string) (*app, mutasiSetup) 
 
 	f := pembelianFixture(t, testApp)
 
-	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{NamaRuang: "Toko Depan"})
+	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Toko Depan"})
+	if err != nil {
+		t.Fatalf("create unit kerja tujuan: %v", err)
+	}
+
+	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
+	// gets its own unit_kerja rather than reusing the fixture's.
+	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		NamaRuang:   "Toko Depan",
+		IDUnitKerja: unitTujuan.ID,
+	})
 	if err != nil {
 		t.Fatalf("create ruang tujuan: %v", err)
 	}
@@ -162,7 +172,17 @@ func TestMutasiKekalMeskiHargaPokokTidakBulat(t *testing.T) {
 	testApp := newApp(t)
 	f := pembelianFixture(t, testApp)
 
-	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{NamaRuang: "Toko Depan"})
+	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Toko Depan"})
+	if err != nil {
+		t.Fatalf("create unit kerja tujuan: %v", err)
+	}
+
+	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
+	// gets its own unit_kerja rather than reusing the fixture's.
+	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		NamaRuang:   "Toko Depan",
+		IDUnitKerja: unitTujuan.ID,
+	})
 	if err != nil {
 		t.Fatalf("create ruang tujuan: %v", err)
 	}
@@ -352,7 +372,17 @@ func TestBatalMutasiPeriodeTutupMasukPeriodeBerjalan(t *testing.T) {
 	testApp := newApp(t)
 	f := pembelianFixture(t, testApp)
 
-	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{NamaRuang: "Toko Depan"})
+	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Toko Depan"})
+	if err != nil {
+		t.Fatalf("create unit kerja tujuan: %v", err)
+	}
+
+	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
+	// gets its own unit_kerja rather than reusing the fixture's.
+	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		NamaRuang:   "Toko Depan",
+		IDUnitKerja: unitTujuan.ID,
+	})
 	if err != nil {
 		t.Fatalf("create ruang tujuan: %v", err)
 	}

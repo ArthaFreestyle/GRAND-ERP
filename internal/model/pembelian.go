@@ -167,6 +167,13 @@ type SisaPembelianBarisRow struct {
 type CreatePembelianRequest struct {
 	ActorID int64 `json:"-" validate:"required,gt=0"`
 
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the body — isu #12 fase 5. Nil means the active
+	// grant applies to every unit, in which case id_ruang is not restricted;
+	// otherwise id_ruang must belong to this unit or the write is refused
+	// 403, checked by periksaRuangUnitAktif.
+	AktifIDUnitKerja *int64 `json:"-"`
+
 	Tanggal          string  `json:"tanggal" validate:"required,datetime=2006-01-02"`
 	IDSupplier       int64   `json:"id_supplier" validate:"required,gt=0"`
 	IDRuang          int64   `json:"id_ruang" validate:"required,gt=0"`
@@ -218,8 +225,17 @@ type PembelianDetailRequest struct {
 	KeteranganSelisih *string `json:"keterangan_selisih" validate:"omitempty,max=500"`
 }
 
+// GetPembelianRequest backs both Get and Sisa — both are pure reads keyed on
+// the same id.
 type GetPembelianRequest struct {
 	ID int64 `param:"id" validate:"required,gt=0"`
+
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the request — isu #12 fase 6. Nil means the
+	// active grant applies everywhere; otherwise a document whose id_ruang
+	// falls outside this unit answers 404, the same as one that does not
+	// exist.
+	AktifIDUnitKerja *int64 `json:"-"`
 }
 
 // UpdatePembelianRequest patches the header of a DRAFT.
@@ -316,4 +332,7 @@ type ListPembelianRequest struct {
 	IDSupplier       int64   `query:"id_supplier" validate:"omitempty,gt=0"`
 	TanggalDari      *string `query:"tanggal_dari" validate:"omitempty,datetime=2006-01-02"`
 	TanggalSampai    *string `query:"tanggal_sampai" validate:"omitempty,datetime=2006-01-02"`
+
+	// AktifIDUnitKerja, same rule as GetPembelianRequest.
+	AktifIDUnitKerja *int64 `query:"-"`
 }

@@ -33,6 +33,7 @@ func Bootstrap(config *BootstrapConfig) {
 	config.App.Use(logger.New())
 
 	ruangRepository := repository.NewRuangRepository()
+	unitKerjaRepository := repository.NewUnitKerjaRepository()
 	satuanRepository := repository.NewSatuanRepository()
 	ekspedisiRepository := repository.NewEkspedisiRepository()
 	supplierRepository := repository.NewSupplierRepository()
@@ -50,8 +51,14 @@ func Bootstrap(config *BootstrapConfig) {
 	dokumenRepository := repository.NewDokumenRepository()
 	periodeRepository := repository.NewPeriodeRepository()
 
+	unitKerjaUseCase := usecase.NewUnitKerjaUseCase(
+		config.DB, config.Log, config.Validate, unitKerjaRepository,
+	)
+	// RuangUseCase borrows UnitKerjaRepository to validate id_unit_kerja is an
+	// active unit before writing (isu #12 fase 2) — the same reasoning
+	// UserUseCase applies to role_ids via RoleRepository.
 	ruangUseCase := usecase.NewRuangUseCase(
-		config.DB, config.Log, config.Validate, ruangRepository,
+		config.DB, config.Log, config.Validate, ruangRepository, unitKerjaRepository,
 	)
 	satuanUseCase := usecase.NewSatuanUseCase(
 		config.DB, config.Log, config.Validate, satuanRepository,
@@ -87,7 +94,7 @@ func Bootstrap(config *BootstrapConfig) {
 	periodeUseCase := usecase.NewPeriodeUseCase(
 		config.DB, config.Log, config.Validate, periodeRepository,
 	)
-	// PembelianUseCase takes five repositories: posting a purchase writes the
+	// PembelianUseCase takes six repositories: posting a purchase writes the
 	// header, its lines, a reserved document number, and one kartu_stok row per
 	// received line — all in one transaction, because a partial posting would leave
 	// stock that no document explains and kartu_stok cannot be edited afterwards.
@@ -96,10 +103,13 @@ func Bootstrap(config *BootstrapConfig) {
 	// kartu_stok trigger is what actually refuses a closed month, but its RAISE carries
 	// no constraint name, so without a read of its own this module could only tell an
 	// operator that either the period is closed or the stock is short.
+	//
+	// RuangRepository is the sixth, borrowed to validate Create's id_ruang against the
+	// caller's active unit_kerja (isu #12 fase 5).
 	pembelianUseCase := usecase.NewPembelianUseCase(
 		config.DB, config.Log, config.Validate,
 		pembelianRepository, productRepository, kartuStokRepository, counterRepository,
-		periodeRepository,
+		periodeRepository, ruangRepository,
 	)
 	// PenerimaanSusulanUseCase reaches into pembelian on purpose: a follow-up
 	// receipt is defined as the remainder of a purchase, so it reads that document's
@@ -121,15 +131,17 @@ func Bootstrap(config *BootstrapConfig) {
 		returRepository, pembelianRepository, productRepository,
 		kartuStokRepository, counterRepository, periodeRepository,
 	)
-	// MutasiUseCase takes five repositories and reaches into no other module: a transfer
-	// points at no parent document, so nothing here reads or rewrites another module's
-	// rows. What it needs product for is one query — the conversion factors — and what it
-	// needs kartu_stok for is two rows per line plus the balance locks that keep two
-	// opposite transfers of the same goods from deadlocking each other.
+	// MutasiUseCase takes six repositories. A transfer points at no parent document, so
+	// nothing here reads or rewrites another module's rows except for two narrow reads:
+	// product for the conversion factors, and ruang to validate id_ruang_asal against
+	// the caller's active unit_kerja (isu #12 fase 5) — never id_ruang_tujuan, since
+	// cross-unit transfers are allowed by design. kartu_stok is for two rows per line
+	// plus the balance locks that keep two opposite transfers of the same goods from
+	// deadlocking each other.
 	mutasiUseCase := usecase.NewMutasiUseCase(
 		config.DB, config.Log, config.Validate,
 		mutasiRepository, productRepository, kartuStokRepository, counterRepository,
-		periodeRepository,
+		periodeRepository, ruangRepository,
 	)
 	// PembayaranUtangUseCase is the first transaction usecase that needs no
 	// KartuStokRepository at all: money moving to a supplier changes no stock. It reaches
@@ -164,13 +176,15 @@ func Bootstrap(config *BootstrapConfig) {
 		config.DB, config.Log, config.Validate, userRepository,
 		authConfig.Secret, authConfig.TTL, authConfig.Issuer,
 	)
-	// UserUseCase takes both repositories: granting a role has to verify the role
-	// exists and is active, and that SQL belongs to role's repository.
+	// UserUseCase takes all three repositories: granting a role at a unit_kerja
+	// has to verify both the role and the unit exist and are active, and that
+	// SQL belongs to each one's own repository (isu #12 fase 3).
 	userUseCase := usecase.NewUserUseCase(
-		config.DB, config.Log, config.Validate, userRepository, roleRepository,
+		config.DB, config.Log, config.Validate, userRepository, roleRepository, unitKerjaRepository,
 	)
 
 	ruangController := deliveryhttp.NewRuangController(config.Log, ruangUseCase)
+	unitKerjaController := deliveryhttp.NewUnitKerjaController(config.Log, unitKerjaUseCase)
 	satuanController := deliveryhttp.NewSatuanController(config.Log, satuanUseCase)
 	ekspedisiController := deliveryhttp.NewEkspedisiController(config.Log, ekspedisiUseCase)
 	supplierController := deliveryhttp.NewSupplierController(config.Log, supplierUseCase)
@@ -208,6 +222,7 @@ func Bootstrap(config *BootstrapConfig) {
 		MutasiController:     mutasiController,
 		PembayaranController: pembayaranController,
 		ProductController:    productController,
+		UnitKerjaController:  unitKerjaController,
 		RuangController:      ruangController,
 		SatuanController:     satuanController,
 		EkspedisiController:  ekspedisiController,

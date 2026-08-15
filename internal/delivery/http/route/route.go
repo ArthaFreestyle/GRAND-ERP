@@ -40,6 +40,7 @@ type RouteConfig struct {
 	MutasiController     *deliveryhttp.MutasiController
 	PembayaranController *deliveryhttp.PembayaranUtangController
 	ProductController    *deliveryhttp.ProductController
+	UnitKerjaController  *deliveryhttp.UnitKerjaController
 	RuangController      *deliveryhttp.RuangController
 	SatuanController     *deliveryhttp.SatuanController
 	EkspedisiController  *deliveryhttp.EkspedisiController
@@ -86,9 +87,18 @@ func (c *RouteConfig) setupGuestRoute() {
 // Authorization policy, in one place so it can be read as a whole:
 //
 //   - Reads are open to any authenticated user. An operator who cannot see a
-//     supplier cannot do their job, whatever their role.
-//   - Writes are split by who owns the data: INVENTARIS keeps goods, units, rooms,
-//     carriers, and suppliers; CASHIER keeps customers.
+//     supplier cannot do their job, whatever their role. That is a statement about
+//     the ROUTE GUARD, not the whole answer a read gives: since isu #12 fase 6, ruang,
+//     pembelian, penerimaan-susulan, retur-pembelian, mutasi, and product's
+//     stok-per-ruang read additionally scope by the caller's active unit_kerja —
+//     a room, document, or balance outside it is silently omitted from a list, or
+//     answers 404 on a Get, as if it did not exist. That scoping is enforced in the
+//     usecase layer, from the session's active grant, not by a route guard here, so
+//     it does not appear in this route table at all. A caller with a global grant
+//     (nil active unit — the SUPERADMIN shape) is unrestricted, same as always.
+//   - Writes are split by who owns the data: INVENTARIS keeps goods, units of
+//     measure, work units (unit_kerja), rooms, carriers, and suppliers; CASHIER
+//     keeps customers.
 //   - SUPERADMIN may do anything, so it appears in every write guard.
 //   - user and role are SUPERADMIN-only, reads included. Listing accounts and their
 //     privileges is itself sensitive, and being able to write there is a privilege
@@ -107,6 +117,14 @@ func (c *RouteConfig) setupAuthRoute() {
 
 	// Any authenticated caller may ask who the server thinks they are.
 	api.Get("/auth/me", c.AuthController.Me)
+
+	// switch-context (isu #12 fase 4) carries no role guard, the same as
+	// auth/me: a session with no active context (issued at login when the
+	// caller holds more than one grant) authorizes nothing at all, so it
+	// cannot reach anything guarded by RequireRole regardless — that is
+	// Session.HasRole answering false when Aktif is nil, not a route-table
+	// special case. Nothing below this line changed for fase 4.
+	api.Post("/auth/switch-context", c.AuthController.SwitchContext)
 
 	// Guard first, controller last. Fiber v3's signature is
 	// Get(path, handler, handlers...) and the chain runs in the order given, so the
@@ -159,6 +177,17 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/periode/:tahun/:bulan/tutup", superadmin, c.PeriodeController.Tutup)
 	api.Post("/periode/:tahun/:bulan/buka", superadmin, c.PeriodeController.Buka)
 
+	// unit_kerja is isu #12 fase 2: the organizational location a ruang belongs
+	// to. It is plain master data — no number, no lines, no posting — so it
+	// follows the same split as ruang and carries a PATCH, unlike ruang.
+	api.Get("/unit-kerja", c.UnitKerjaController.List)
+	api.Get("/unit-kerja/:id", c.UnitKerjaController.Get)
+	api.Post("/unit-kerja", inventaris, c.UnitKerjaController.Create)
+	api.Patch("/unit-kerja/:id", inventaris, c.UnitKerjaController.Update)
+
+	// ruang.id_unit_kerja is required and validated active at create time (isu
+	// #12 fase 2), but ruang still has no PATCH, so a room cannot change unit
+	// through the API yet.
 	api.Get("/ruang", c.RuangController.List)
 	api.Get("/ruang/:id", c.RuangController.Get)
 	api.Post("/ruang", inventaris, c.RuangController.Create)

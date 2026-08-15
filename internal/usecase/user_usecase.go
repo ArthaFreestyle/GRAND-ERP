@@ -18,15 +18,17 @@ import (
 // UserUseCase holds the business rules for users and their role grants. It owns
 // the transaction boundary and returns models, never entities or Fiber types.
 //
-// It depends on RoleRepository as well as UserRepository: granting a role has to
-// check that the role exists and is still active, and that question belongs to
-// role's SQL, not to a second copy of it here.
+// It depends on RoleRepository and UnitKerjaRepository as well as UserRepository:
+// granting a role at a unit has to check that both the role and the unit exist
+// and are still active, and those questions belong to their own modules' SQL,
+// not to a second copy of it here.
 type UserUseCase struct {
-	DB             *sql.DB
-	Log            *logrus.Logger
-	Validate       *validator.Validate
-	UserRepository *repository.UserRepository
-	RoleRepository *repository.RoleRepository
+	DB                  *sql.DB
+	Log                 *logrus.Logger
+	Validate            *validator.Validate
+	UserRepository      *repository.UserRepository
+	RoleRepository      *repository.RoleRepository
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewUserUseCase(
@@ -35,13 +37,15 @@ func NewUserUseCase(
 	validate *validator.Validate,
 	userRepository *repository.UserRepository,
 	roleRepository *repository.RoleRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *UserUseCase {
 	return &UserUseCase{
-		DB:             db,
-		Log:            log,
-		Validate:       validate,
-		UserRepository: userRepository,
-		RoleRepository: roleRepository,
+		DB:                  db,
+		Log:                 log,
+		Validate:            validate,
+		UserRepository:      userRepository,
+		RoleRepository:      roleRepository,
+		UnitKerjaRepository: unitKerjaRepository,
 	}
 }
 
@@ -53,10 +57,10 @@ func (c *UserUseCase) Create(ctx context.Context, request *model.CreateUserReque
 		return nil, err
 	}
 
-	// A body repeating an id is not an error worth a 409 — [2, 2] plainly means
-	// "grant role 2". Deduplicating here is also what lets ReplaceRoles rely on
-	// ON CONFLICT covering only the concurrent case.
-	roleIDs := dedupeIDs(request.RoleIDs)
+	// A body repeating a pair is not an error worth a 409 — it plainly means
+	// "grant that once". Deduplicating here is also what lets ReplaceRoles rely
+	// on ON CONFLICT covering only the concurrent case.
+	grants := toGrants(request.Grants)
 
 	hash, err := hashPassword(request.Password)
 	if err != nil {
@@ -91,7 +95,7 @@ func (c *UserUseCase) Create(ctx context.Context, request *model.CreateUserReque
 		}
 	}
 
-	if err := c.requireActiveRoles(ctx, tx, roleIDs); err != nil {
+	if err := c.requireActiveGrants(ctx, tx, grants); err != nil {
 		return nil, err
 	}
 
@@ -108,8 +112,8 @@ func (c *UserUseCase) Create(ctx context.Context, request *model.CreateUserReque
 		return nil, conflictOnUnique(err, "username or email already used")
 	}
 
-	if err := c.UserRepository.ReplaceRoles(ctx, tx, user.ID, roleIDs, nil); err != nil {
-		return nil, invalidOnForeignKey(err, "role_ids contains a role that no longer exists")
+	if err := c.UserRepository.ReplaceRoles(ctx, tx, user.ID, grants, nil); err != nil {
+		return nil, invalidOnForeignKey(err, "grants contains a role or unit kerja that no longer exists")
 	}
 
 	if err := c.attachRoles(ctx, tx, []*entity.User{user}); err != nil {
@@ -140,9 +144,9 @@ func (c *UserUseCase) Get(ctx context.Context, request *model.GetUserRequest) (*
 	return converter.UserToResponse(user), nil
 }
 
-// Update patches the user and, when role_ids is present, replaces the whole grant
+// Update patches the user and, when grants is present, replaces the whole grant
 // set — both inside one transaction, so a failed role write cannot leave a renamed
-// user holding the old roles.
+// user holding the old grants.
 func (c *UserUseCase) Update(ctx context.Context, request *model.UpdateUserRequest) (*model.UserResponse, error) {
 	if err := c.Validate.Struct(request); err != nil {
 		return nil, err
@@ -159,10 +163,10 @@ func (c *UserUseCase) Update(ctx context.Context, request *model.UpdateUserReque
 		return nil, model.Invalid("is_aktif cannot be null")
 	}
 
-	// [] already means "revoke every role", so null would be a second spelling of
-	// the same instruction. Rejecting it keeps one meaning per body.
-	if request.RoleIDs.Clears() {
-		return nil, model.Invalid("role_ids cannot be null; send [] to revoke every role")
+	// [] already means "revoke every grant", so null would be a second spelling
+	// of the same instruction. Rejecting it keeps one meaning per body.
+	if request.Grants.Clears() {
+		return nil, model.Invalid("grants cannot be null; send [] to revoke every grant")
 	}
 
 	patch := repository.UserPatch{
@@ -187,7 +191,7 @@ func (c *UserUseCase) Update(ctx context.Context, request *model.UpdateUserReque
 
 	touchesUser := patch.Username != nil || patch.SetEmail || patch.Password != nil ||
 		patch.SetNamaLengkap || patch.IsAktif != nil
-	replacesRoles := request.RoleIDs.Present
+	replacesRoles := request.Grants.Present
 
 	// An empty body would still fire the updated_at trigger, recording a change
 	// that never happened.
@@ -195,9 +199,9 @@ func (c *UserUseCase) Update(ctx context.Context, request *model.UpdateUserReque
 		return nil, model.Invalid("no fields to update")
 	}
 
-	var roleIDs []int64
+	var grants []repository.Grant
 	if replacesRoles {
-		roleIDs = dedupeIDs(*request.RoleIDs.Value)
+		grants = toGrants(*request.Grants.Value)
 	}
 
 	tx, err := c.DB.BeginTx(ctx, nil)
@@ -230,7 +234,7 @@ func (c *UserUseCase) Update(ctx context.Context, request *model.UpdateUserReque
 	}
 
 	if replacesRoles {
-		if err := c.requireActiveRoles(ctx, tx, roleIDs); err != nil {
+		if err := c.requireActiveGrants(ctx, tx, grants); err != nil {
 			return nil, err
 		}
 	}
@@ -251,8 +255,8 @@ func (c *UserUseCase) Update(ctx context.Context, request *model.UpdateUserReque
 	}
 
 	if replacesRoles {
-		if err := c.UserRepository.ReplaceRoles(ctx, tx, user.ID, roleIDs, nil); err != nil {
-			return nil, invalidOnForeignKey(err, "role_ids contains a role that no longer exists")
+		if err := c.UserRepository.ReplaceRoles(ctx, tx, user.ID, grants, nil); err != nil {
+			return nil, invalidOnForeignKey(err, "grants contains a role or unit kerja that no longer exists")
 		}
 	}
 
@@ -306,9 +310,9 @@ func (c *UserUseCase) attachRoles(ctx context.Context, db repository.DBTX, users
 		return err
 	}
 
-	byUser := make(map[int64][]entity.Role, len(users))
+	byUser := make(map[int64][]entity.RoleGrant, len(users))
 	for _, assignment := range assignments {
-		byUser[assignment.UserID] = append(byUser[assignment.UserID], assignment.Role)
+		byUser[assignment.UserID] = append(byUser[assignment.UserID], assignment.RoleGrant)
 	}
 
 	// A user with no grants keeps a nil slice, which the converter turns into [].
@@ -330,25 +334,40 @@ func pointersTo(list []entity.User) []*entity.User {
 	return users
 }
 
-// requireActiveRoles rejects a grant naming a role that does not exist or has been
-// retired, before any write happens.
+// requireActiveGrants rejects a grant naming a role or a unit_kerja that does not
+// exist or has been retired, before any write happens.
 //
-// The foreign key already refuses an unknown id, but it cannot tell an inactive
-// role from an active one, and its error message names a constraint rather than the
-// field the caller got wrong. ids must be deduplicated, or the count comparison
-// under-counts and a valid request is rejected.
-func (c *UserUseCase) requireActiveRoles(ctx context.Context, db repository.DBTX, ids []int64) error {
-	if len(ids) == 0 {
+// The foreign keys already refuse an unknown id, but neither can tell an
+// inactive row from an active one, and their error messages name a constraint
+// rather than the field the caller got wrong. The two checks are independent —
+// a bad role and a bad unit are different problems — so each gets its own
+// message.
+func (c *UserUseCase) requireActiveGrants(ctx context.Context, db repository.DBTX, grants []repository.Grant) error {
+	if len(grants) == 0 {
 		return nil
 	}
 
-	count, err := c.RoleRepository.CountActiveByIDs(ctx, db, ids)
+	roleIDs := uniqueRoleIDs(grants)
+
+	count, err := c.RoleRepository.CountActiveByIDs(ctx, db, roleIDs)
 	if err != nil {
 		return err
 	}
+	if count != int64(len(roleIDs)) {
+		return model.Invalid("grants contains a role that does not exist or is not active")
+	}
 
-	if count != int64(len(ids)) {
-		return model.Invalid("role_ids contains a role that does not exist or is not active")
+	unitIDs := uniqueUnitIDs(grants)
+	if len(unitIDs) == 0 {
+		return nil
+	}
+
+	count, err = c.UnitKerjaRepository.CountActiveByIDs(ctx, db, unitIDs)
+	if err != nil {
+		return err
+	}
+	if count != int64(len(unitIDs)) {
+		return model.Invalid("grants contains a unit_kerja that does not exist or is not active")
 	}
 
 	return nil
@@ -373,24 +392,81 @@ func hashPassword(plain string) (string, error) {
 	return string(hash), nil
 }
 
-// dedupeIDs removes repeats while preserving order, and always returns a non-nil
+// toGrants converts request grants to repository.Grant, deduplicating by
+// (IDRole, IDUnitKerja) while preserving order, and always returns a non-nil
 // slice.
 //
-// Non-nil matters: ReplaceRoles deletes with `role_id <> ALL($2)`, and a NULL array
-// makes that comparison NULL so nothing is deleted. An empty non-nil slice is what
-// makes "revoke every role" actually revoke.
-func dedupeIDs(ids []int64) []int64 {
-	seen := make(map[int64]struct{}, len(ids))
-	unique := make([]int64, 0, len(ids))
+// A body repeating a pair plainly means "grant that once", not a conflict worth
+// a 409. Non-nil matters too: ReplaceRoles' delete is an anti-join over
+// unnest(...), and an empty non-nil slice is what makes "revoke every grant"
+// actually revoke — unnest of a nil array behaves the same as an empty one here,
+// but the explicit non-nil return keeps the contract obvious at the call site.
+func toGrants(requests []model.GrantRequest) []repository.Grant {
+	// unitID normalises a nil IDUnitKerja to 0 for the dedup key. Real unit ids
+	// start at 1 (BIGINT GENERATED BY DEFAULT AS IDENTITY), so 0 is safe as the
+	// "every unit" sentinel and can never collide with a real id.
+	type key struct {
+		roleID int64
+		unitID int64
+	}
 
-	for _, id := range ids {
-		if _, ok := seen[id]; ok {
+	seen := make(map[key]struct{}, len(requests))
+	grants := make([]repository.Grant, 0, len(requests))
+
+	for _, request := range requests {
+		k := key{roleID: request.IDRole}
+		if request.IDUnitKerja != nil {
+			k.unitID = *request.IDUnitKerja
+		}
+
+		if _, ok := seen[k]; ok {
+			continue
+		}
+		seen[k] = struct{}{}
+
+		grants = append(grants, repository.Grant{RoleID: request.IDRole, IDUnitKerja: request.IDUnitKerja})
+	}
+
+	return grants
+}
+
+// uniqueRoleIDs collects the distinct role ids named across a set of grants —
+// the same role may appear more than once, granted at different units.
+func uniqueRoleIDs(grants []repository.Grant) []int64 {
+	seen := make(map[int64]struct{}, len(grants))
+	ids := make([]int64, 0, len(grants))
+
+	for _, grant := range grants {
+		if _, ok := seen[grant.RoleID]; ok {
 			continue
 		}
 
-		seen[id] = struct{}{}
-		unique = append(unique, id)
+		seen[grant.RoleID] = struct{}{}
+		ids = append(ids, grant.RoleID)
 	}
 
-	return unique
+	return ids
+}
+
+// uniqueUnitIDs collects the distinct non-nil unit ids named across a set of
+// grants. A nil IDUnitKerja (every unit) contributes nothing here — there is no
+// row to validate.
+func uniqueUnitIDs(grants []repository.Grant) []int64 {
+	seen := make(map[int64]struct{}, len(grants))
+	ids := make([]int64, 0, len(grants))
+
+	for _, grant := range grants {
+		if grant.IDUnitKerja == nil {
+			continue
+		}
+
+		if _, ok := seen[*grant.IDUnitKerja]; ok {
+			continue
+		}
+
+		seen[*grant.IDUnitKerja] = struct{}{}
+		ids = append(ids, *grant.IDUnitKerja)
+	}
+
+	return ids
 }

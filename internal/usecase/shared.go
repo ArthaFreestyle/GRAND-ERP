@@ -113,6 +113,63 @@ func periksaPeriode(ctx context.Context, db repository.DBTX, periode *repository
 	return nil
 }
 
+// periksaRuangUnitAktif refuses a write naming a ruang outside the caller's
+// active unit_kerja — isu #12 fase 5. A nil aktifIDUnitKerja means either the
+// caller's active grant applies everywhere (the SUPERADMIN shape) or,
+// defensively, that there is no active context at all; either way nothing is
+// checked, the same reading "id_unit_kerja IS NULL" already carries
+// everywhere else in this codebase.
+//
+// This is validation, not a default: id_ruang is used exactly as the request
+// sent it, never silently substituted or corrected. The same rule
+// created_by follows via middleware.SessionFrom — a server that fills in a
+// default but still accepts whatever the body said makes the scoping
+// decorative rather than real.
+//
+// Unlike periksaPeriode, this is not a friendlier message ahead of a database
+// guard — there is no trigger behind it, because ruang.id_unit_kerja cannot
+// change after a room is created (ruang has no PATCH), so nothing can
+// invalidate this check between reading it and the write that follows.
+//
+// An unknown id_ruang is deliberately let through here (returns nil): that is
+// a different failure — "this room does not exist" — and answering it is the
+// foreign key's job, not this one's.
+func periksaRuangUnitAktif(ctx context.Context, db repository.DBTX, ruang *repository.RuangRepository, aktifIDUnitKerja *int64, idRuang int64) error {
+	if aktifIDUnitKerja == nil {
+		return nil
+	}
+
+	idUnitKerja, err := ruang.IDUnitKerjaByID(ctx, db, idRuang)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+
+		return err
+	}
+
+	if idUnitKerja != *aktifIDUnitKerja {
+		return model.Forbidden("id_ruang is outside your active unit_kerja")
+	}
+
+	return nil
+}
+
+// diLuarUnitAktif reports whether a room's unit_kerja falls outside the
+// caller's active unit — isu #12 fase 6, the read-side counterpart of
+// periksaRuangUnitAktif. A nil aktifIDUnitKerja (global grant, or
+// defensively no active context) excludes nothing, the same reading nil
+// carries everywhere else in this codebase.
+//
+// Every caller of this must answer with model.NotFound, never
+// model.Forbidden: a scoped read makes a document outside the active unit
+// look like it does not exist, the same as a genuinely unknown id. Answering
+// 403 here would confirm the document exists, which is exactly the
+// information scoping a read is supposed to withhold.
+func diLuarUnitAktif(idUnitKerjaRuang int64, aktifIDUnitKerja *int64) bool {
+	return aktifIDUnitKerja != nil && idUnitKerjaRuang != *aktifIDUnitKerja
+}
+
 // conflictOnTransisi maps a guarded status change that matched no row to a 409.
 //
 // The document moved between the read and the write. Nothing failed — the guard is

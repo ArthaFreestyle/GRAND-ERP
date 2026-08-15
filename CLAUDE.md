@@ -6,9 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Master data is implemented, and **`pembelian` is the first transaction document** — the first thing that writes `kartu_stok`. Copy an existing slice when adding a module — don't invent a new shape.
 
-- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`ruang`** (create / get / list, no patch), **`periode`** (list / get / tutup / buka), **`product`** with `product_satuan` + `product_harga_jual`, **`pembelian`** with `pembelian_detail`, `kartu_stok` posting, and `document_counter`, **`penerimaan_susulan`** with `penerimaan_susulan_detail`, **`retur_pembelian`** with `retur_pembelian_detail`, **`pembayaran_utang`** with `pembayaran_utang_alokasi`, **`mutasi`** with `mutasi_detail`, **`dokumen`** (file attachments, and the only module holding a store that is not the database), and three queries that are not modules — **`riwayat_beli`**, **`utang_supplier`**, and **`stok_per_ruang`**
+- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`unit_kerja`** (create / get / list / patch), **`ruang`** (create / get / list, no patch — now requires an active `id_unit_kerja`), **`periode`** (list / get / tutup / buka), **`product`** with `product_satuan` + `product_harga_jual`, **`pembelian`** with `pembelian_detail`, `kartu_stok` posting, and `document_counter`, **`penerimaan_susulan`** with `penerimaan_susulan_detail`, **`retur_pembelian`** with `retur_pembelian_detail`, **`pembayaran_utang`** with `pembayaran_utang_alokasi`, **`mutasi`** with `mutasi_detail`, **`dokumen`** (file attachments, and the only module holding a store that is not the database), and three queries that are not modules — **`riwayat_beli`**, **`utang_supplier`**, and **`stok_per_ruang`**
+- **`unit_kerja` (isu #12) has all five load-bearing phases plus the optional read-scoping piece of phase 6** — the master table, `ruang.id_unit_kerja`, `user_role.id_unit_kerja` (grants scoped to a unit), active session context (`POST /api/v1/auth/switch-context`), `id_ruang` validated against the active unit on `pembelian`/`mutasi` writes, and reads on `ruang`, `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `mutasi`, and `product/{id}/stok` scoped to the same active unit. See "Unit kerja and location-bound authority", "Wewenang bertempat", "Konteks aktif per sesi", "`id_ruang` validated against the active unit", and "Read-path scoping" below before touching any of it. `users.id_ruang_default` and a role-as-snapshot column remain deferred
 - Use **`supplier`** as the template for a plain master slice: it is the one with every ordinary concern at once — nullable unique `kode`, PATCH presence semantics, and a `LEFT JOIN` in the list query
-- Use **`user`** as the template when a slice writes two tables: a user and its `user_role` grants in one transaction, and it is where `Optional[[]int64]`, bcrypt hashing, and the `Touch` pattern live. See "Users and roles" below
+- Use **`user`** as the template when a slice writes two tables: a user and its `user_role` grants in one transaction, and it is where `Optional[[]model.GrantRequest]`, bcrypt hashing, and the `Touch` pattern live. See "Users and roles" below
 - Use **`pembelian`** as the template for a **transaction document** — a state machine, a generated number, exact decimal arithmetic, and stock movements, all in one transaction. See "Pembelian and the posting engine" below. Do not model a transaction document on a master slice; the concerns barely overlap
 - Use **`riwayat_beli`** as the template for a **read that is not a module** — no table, no migration, one query in another module's repository, borrowed by the usecase that owns the resource. See "Riwayat harga beli" below
 - Use **`penerimaan_susulan`** as the template for a **document that derives from another** — one that points at a parent's detail rows, draws down a quota held there, copies a cost snapshot from it, and rewrites a cache on it. See "Penerimaan susulan" below
@@ -20,7 +21,7 @@ Master data is implemented, and **`pembelian` is the first transaction document*
 - Module path: `Arthafreestyle/ERP` (no domain prefix); internal imports are `Arthafreestyle/ERP/internal/...`
 - Go 1.25.0 — required by Fiber v3.4.0, which refuses to build on 1.24
 - The rest of the inventory/sales schema exists as migrations `000002`–`000008` and still has **no Go layers** — sales, sales returns, `pemakaian`, stock opname, and the receivable side. See "Inventory data model" below. The posting engine itself is finished: `mutasi` was the last shape it was missing
-- Auth is implemented: bearer JWT login, role guards per route — see "Authentication and authorization" below
+- Auth is implemented: bearer JWT login, role guards per route, active session context (isu #12 fase 4) — see "Authentication and authorization" below. `pembelian` and `mutasi` also validate a write's `id_ruang` against that active context (fase 5), and `ruang`/`pembelian`/`penerimaan_susulan`/`retur_pembelian`/`mutasi`/`product` scope their reads by it too (fase 6)
 - **`cmd/worker` now has one job**, the orphan-attachment sweep. The scheduler is a `time.Ticker` per job in `internal/config/worker.go`, wired by `BootstrapWorker` — the counterpart of `Bootstrap`, so the "wiring happens only in `internal/config`" rule still holds
 - Not built yet: captcha (Redis is wired but unused), logout/refresh, session revocation (stateless tokens cannot be revoked)
 - `product` and `pembelian` are the only modules that fill `created_by`/`updated_by`, taken from the token via `middleware.SessionFrom`. Every other slice still writes `NULL` — the plumbing exists, they just don't use it yet
@@ -168,8 +169,8 @@ Controller boilerplate is fixed — copy it verbatim rather than improvising, be
 Bearer JWT, stateless by decision. Every `/api/v1` route needs a token except `POST /api/v1/auth/login`.
 
 - **Route guards must be the FIRST handler argument.** Fiber v3 registers as `Get(path, handler, handlers...)` and runs the chain in the order given, so `Get(path, controller, guard)` puts the guard *after* the controller — which means never, because a controller does not call `Next()`. The route table looks protected and protects nothing. Write `Get(path, guard, controller)`. `TestRouteGuardsRunBeforeHandler` pins both halves of this, including a subtest that fails if Fiber's ordering ever changes.
-- **Tokens cannot be revoked.** Nothing is stored server-side and no lookup happens per request, so there is nothing to invalidate. `is_aktif = false` on a user, or a revoked role, does not reach a token already issued — access ends only at expiry. `jwt.ttl_minutes` (default 60) is the entire bound on that window. Do not "fix" this with a Redis blacklist without revisiting the decision: the blacklist reinstates the per-request lookup that JWT was chosen to avoid.
-- **Roles live in the token claims**, so authorization touches no database. The cost is that a role granted or revoked takes effect at next login. Only `is_aktif` roles are embedded, which is where retired-role-does-not-authorize is enforced — `FindRolesByUserIDs` itself returns retired grants on purpose, for the user-management view.
+- **Tokens cannot be revoked.** Nothing is stored server-side and no lookup happens per request, so there is nothing to invalidate. `is_aktif = false` on a user, or a revoked role, does not reach a token already issued — access ends only at expiry. `jwt.ttl_minutes` (default 60) is the entire bound on that window. Do not "fix" this with a Redis blacklist without revisiting the decision: the blacklist reinstates the per-request lookup that JWT was chosen to avoid. `POST /api/v1/auth/switch-context` (isu #12 fase 4) does not change this: it mints a new token and cannot touch the old one, which stays valid until it expires regardless of what context was switched to. See "Konteks aktif per sesi" below.
+- **Grants live in the token claims**, so authorization touches no database. The cost is that a grant made, revoked, or retired takes effect at next login or at the next `switch-context`. Only usable grants are embedded — role `is_aktif`, and if the grant is scoped to a unit, that unit `is_aktif` too — which is where retired-does-not-authorize is enforced; `FindRolesByUserIDs` itself returns retired grants on purpose, for the user-management view. Since isu #12 fase 4, a token also carries **which one grant is currently active**, and authorization checks that alone, not the full list — see "Konteks aktif per sesi" below for what changed and, more to the point, what deliberately did not.
 - **`jwt.secret` has no default and the process refuses to start without one** (`config.NewAuthConfig`, minimum 32 characters). A baked-in default is a key every deployment shares, and holding it means minting a `SUPERADMIN` token for any user id. A random per-process key was also rejected: it invalidates every token on restart and breaks outright across more than one instance, both silently.
 - **Login answers one message for every failure** — unknown username, wrong password, disabled account. Distinguishing them enumerates valid usernames. The unknown-username path runs a dummy bcrypt compare so it does not return measurably faster than a wrong password, which would leak what the identical message hides.
 - `Authenticate` pins the accepted signing method. Without `jwt.WithValidMethods`, the parser trusts the token's own `alg` header and accepts `alg=none`. `TestAlgNoneTokenIsRejected` covers it.
@@ -182,6 +183,8 @@ Bearer JWT, stateless by decision. Every `/api/v1` route needs a token except `P
 ### Pembelian and the posting engine (migration 000012)
 
 The first transaction document, and the first thing that writes `kartu_stok`. Its number generator and its posting path are built to be reused by sales, transfers, usage, and stock counts — build those on this, not on a master slice.
+
+`Create`'s `id_ruang` is validated against the caller's active `unit_kerja` (isu #12 fase 5) — see "`id_ruang` validated against the active unit" below for the shared mechanism. `Get`, `List`, and `Sisa` are scoped by the same active unit on the read side too (fase 6) — see "Read-path scoping" below.
 
 - **The costing arithmetic is pure and lives apart from the I/O.** `internal/usecase/pembelian_alokasi.go` holds `hitungPosting` and `bagiProporsional`, both operating on `*big.Rat` with no database in sight, and `pembelian_alokasi_test.go` is an **internal** test (`package usecase`) — the only one in the repo. That split is deliberate: this is where a mistake is permanent, so it has to be testable without a fixture.
 - **Money and quantities are `math/big.Rat`, never `float64`.** 0.1 has no exact binary representation and these figures become a payable and an inventory valuation. `internal/usecase/numeric.go` parses `NUMERIC` text into exact rationals and rounds once, deliberately, at the end. `formatNumeric` uses `big.Rat.FloatString`, which rounds halves away from zero — the same rule PostgreSQL's `ROUND` applies to `NUMERIC`, and they have to agree or a value computed in Go and one the database recomputes differ by a cent nobody can see.
@@ -204,6 +207,8 @@ The first transaction document, and the first thing that writes `kartu_stok`. It
 
 The second shipment for goods that did not arrive with the first. It adds stock and never a payable — the supplier's invoice was issued in full with the first delivery and booked in full then, so what is still outstanding after that is goods.
 
+`Get` and `List` are scoped by the caller's active `unit_kerja` (isu #12 fase 6), against the parent purchase's room — this module has no `id_ruang` of its own to check on write, since it is copied from the parent, but the read-side scope still needs the room's unit, so `susulanReadColumns` joins it in. See "Read-path scoping" below.
+
 - **Why a separate document rather than raising `qty_diterima`.** A POSTED `pembelian` must not change and `kartu_stok` is append-only, so editing the posted line is not available: it would break document immutability, make cancellation impossible to audit (which `kartu_stok` rows would be reversed?), and erase when the goods actually turned up. The shape that fits is the mirror of `retur_pembelian` — both point at `pembelian_detail`, the goods just move the other way.
 - **`harga_pokok_satuan_dasar` is copied from the source line, never recomputed and never read off the current moving average.** That is what makes a purchase and all its follow-ups contribute exactly the invoice value to inventory, and it is why the average does not shift when the remainder turns up. Copying a cost rather than deriving one is the pattern every document deriving from another should follow.
 - **Two snapshots from different places, deliberately.** `faktor_konversi` is resolved from `product_satuan` *now*, because the quantity is a fresh count and may arrive in a different unit than the invoice used (five loose pieces short of a line typed in boxes). The cost is copied from the source. Quantity conversion follows current master; cost follows the invoice.
@@ -220,6 +225,8 @@ The second shipment for goods that did not arrive with the first. It adds stock 
 ### Retur pembelian (migration 000014)
 
 Goods sent back to the supplier — isu #4 fase 5. Deliberately the mirror of `penerimaan_susulan`: same parent, same copied cost, same quota-on-a-line shape, goods moving the other way. Read the two side by side; what follows is only what the direction changes.
+
+`Get` and `List` are scoped the same way `penerimaan_susulan`'s are (isu #12 fase 6), against the parent purchase's room. See "Read-path scoping" below.
 
 - **The tables already existed** (migration `000005`); `000014` adds the approval flow, the cancellation columns, the status CHECK, a `(tanggal DESC, id DESC)` index, and the per-document unique index on the source line. **No `ALTER TYPE`** — `'RETUR_PEMBELIAN'` has been in `jenis_transaksi` since `000002`, which is lucky, because `ADD VALUE` cannot be undone.
 - **What may be returned is what actually arrived**, `qty_diterima_dasar + Σ POSTED susulan − Σ POSTED retur`. Note which quantity is absent: `qty_dasar`. The invoice quantity is what the supplier billed, and goods that never turned up cannot be sent back — a shortfall is chased with a `penerimaan_susulan`, not returned. `pembelianDetailRetur` in `pembelian_repository.go` is that sum, declared once next to `pembelianDetailSusulan`.
@@ -289,6 +296,8 @@ Isu #6. The act that makes a month refuse further stock movements. The tables an
 
 Isu #7. Goods moving from one `ruang` to another — the fourth document to write `kartu_stok` and the first to write **in both directions at once**. The tables came from migration `000007` and `'MUTASI_KELUAR'`/`'MUTASI_MASUK'` have been in `jenis_transaksi` since `000002`, so **no `ALTER TYPE`**; `000018` adds the status CHECK, the cancellation columns, `mutasi_status_idx`, and a `(tanggal DESC, id DESC)` index.
 
+`Create` and `Update` validate `id_ruang_asal` — never `id_ruang_tujuan` — against the caller's active `unit_kerja` (isu #12 fase 5): cross-unit transfers stay allowed, only the room goods are said to be leaving is checked. See "`id_ruang` validated against the active unit" below. `Get` and `List` inherit the identical source-only asymmetry on the read side (fase 6) — see "Read-path scoping" below.
+
 - **One `mutasi_detail` line is two `kartu_stok` rows, in one transaction.** That is migration `000007`'s own description of the table. Splitting it into two documents would let goods leave the warehouse without ever entering the shop, with nothing holding the halves together. Goods appearing with no origin are not a mutasi at all — that is `stok_opname`, and `SO_SURPLUS`/`SO_DEFISIT` are waiting for it.
 - **The incoming row is valued at exactly `nilai_keluar` from the outgoing row, read back from `RETURNING`.** This is the module's whole correctness argument and the most expensive thing to get wrong. Migration `000007` states the rule — cost follows the source room or moving goods changes the value of inventory — but the application *cannot compute that cost*: the source room's moving average is known only to `kartu_stok_hitung_saldo`, which reads it inside the advisory lock, and the trigger overwrites `nilai_keluar` and `harga_pokok_satuan` on every outgoing row anyway. So the order of the two inserts is forced, and the constraint is what makes it right. `ReturPembelianUseCase.Batal` fills `NilaiMasuk` from a `NilaiKeluar` for the same reason.
 - **`mutasi_detail.harga_pokok_satuan_dasar` is written at posting, not at draft**, from what the outgoing row reported. The column is nullable precisely for that. A cost typed on a draft is the average at draft time, which is a different number and wrong in a way nobody would notice.
@@ -302,6 +311,462 @@ Isu #7. Goods moving from one `ruang` to another — the fourth document to writ
 - `periksaSaldo` is for the message, not the guard — same relationship `periksaPeriode` has to a closed period. It runs *after* `KunciSaldo`, which is what makes the figure it reports actually true for the rest of the transaction rather than merely friendlier.
 - No money column anywhere: no subtotal, discount, PPN, freight, or koli. `pembelian_alokasi.go` has nothing to offer and `math/big.Rat` is needed only to convert quantities. Prefix is `MT`.
 
+### Unit kerja and location-bound authority (migration 000019, isu #12)
+
+Isu #12 proposes answering not just *who* but *acting as what, and where* — a
+work-context system where `user_role` grants a role at a specific `unit_kerja`,
+and a session carries exactly one grant as its active context. The full
+proposal is six phases, and **this codebase has all five that were
+scoped**: the decisions, the `unit_kerja` master and `ruang.id_unit_kerja`
+(phase 2), `user_role.id_unit_kerja` itself with its `NULL`-safe `ReplaceRoles`
+diff and the `grants` DTO (phase 3, migration `000020`), active session
+context via `POST /api/v1/auth/switch-context` (phase 4, no migration — see
+"Konteks aktif per sesi" below), and `id_ruang` validated against the active
+unit on write paths (phase 5, no migration — see "`id_ruang` validated
+against the active unit" below). Phase 6 — read-path scoping and a
+role-as-snapshot column on documents — was explicitly deferred by the issue
+itself, not overlooked; see that section for why.
+
+Three decisions the issue asked to make now, even before the phases that need
+them are built, because two of them touch tables every stock-writing module
+already depends on and the price of deciding late is a breaking change to
+numbers already printed on paper:
+
+- **`document_counter` gets a per-unit series.** The key becomes `(prefix,
+  id_unit_kerja, tahun, bulan)` rather than `(prefix, tahun, bulan)`, so a
+  document number is traceable to the outlet that issued it. **Not
+  implemented yet** — `DocumentCounterRepository.Next` still keys on the old
+  triple, and every transaction module still reserves numbers the old way.
+  Change the key before any two real outlets start sharing one series: once a
+  number is on paper in a supplier's hands, the key cannot change under it.
+- **`periode` stays global**, not per `unit_kerja`. One close/open per
+  `(tahun, bulan)` for the whole company. The alternative — an outlet closing
+  August while another is still posting into it — produces a consolidated
+  report that cannot be explained, and nothing in this codebase asks for that.
+  If a real need for per-unit closing shows up later, `periode` gains
+  `id_unit_kerja` and the `kartu_stok` trigger's advisory-lock key
+  (`'periode:' || tahun || '-' || bulan`, duplicated between migration
+  `000017` and `periodeLockKey`) has to grow the unit into that same
+  expression on both sides, or one side stops waiting for the other.
+- **Cross-unit `mutasi` is allowed.** A transfer's `id_ruang_asal` and
+  `id_ruang_tujuan` may belong to different `unit_kerja` — moving stock
+  between outlets is exactly what `mutasi` is for, and restricting it to one
+  unit would leave no document for the ordinary case of restocking a branch
+  from the central warehouse. Nothing about `mutasi`'s posting changes: it
+  stays partitioned by `(id_barang, id_ruang)`, never by unit.
+
+**This is not `users.role_active` revived.** "Users and roles" below says
+plainly not to reintroduce that column, and the reason still holds: it was
+`UNIQUE` across the whole table rather than per user, and its FK pointed at
+`user_role (id)` without `user_id`. Phase 3 does add a column to `user_role`
+(`id_unit_kerja`), but nothing on `users` itself, and the mechanism is entirely
+different: a grant is a row a caller *holds*, not a pointer to "the" active
+one — a user can hold the same role at two units simultaneously as two rows,
+which `role_active` structurally could not express even before its bug. Phase
+4's active-context claim (see "Konteks aktif per sesi" below) confirms the
+shape: it lives in the JWT, not in a column on `users`, and a session's active
+grant is one row of `user_role` copied into the token — never a pointer stored
+server-side.
+
+**`unit_kerja` is a plain master slice — follow `supplier`.** Nullable
+case-insensitive unique `kode` (`unit_kerja_kode_lower_uidx`), PATCH presence
+semantics via `Optional[T]`, retirement with `is_aktif = false`, no `DELETE`.
+It carries no telephone/address/NPWP — just `kode`, `nama`, `is_aktif`, and the
+usual audit columns — so its shape is closer to `satuan`, but it follows
+`supplier`'s `ExistsByKode` (optional, checked only when supplied) rather than
+`satuan`'s `ExistsByNama` (required, unique). `nama` is **not** unique.
+
+**`ruang.id_unit_kerja` is `NOT NULL`, and the backfill lives in the migration,
+not the seeder.** A `ruang` with no unit is a `ruang` nobody can decide is
+theirs to use, so the column is required from the start rather than eased in.
+The migration itself creates one default unit (`kode = 'PUSAT'`, `nama = 'Unit
+Utama'`) and points every existing `ruang` row at it inside the same
+transaction, *before* adding the `NOT NULL` — that is what makes the migration
+safe on a database that already has `ruang` rows, not only on a fresh one.
+Relying on a seeder for the backfill would only ever have been safe for a
+fresh database, since a seeder is never guaranteed to run before a later
+migration's `NOT NULL` lands on a database upgrading in place. `001_ruang.sql`
+was updated to point its five rows at `'PUSAT'` by lookup, not by a hardcoded
+id, since the migration makes no promise about which id that default row gets.
+
+`RuangUseCase.Create` validates `id_unit_kerja` names an active `unit_kerja`
+before writing — the same reasoning as `RoleRepository.CountActiveByIDs` for
+role grants: the foreign key alone cannot tell a retired unit from a live one,
+and its message names a constraint instead of the field. `ruang` still has no
+`PATCH`, so a room's unit cannot be changed through the API — that was already
+true before this issue and phase 2 did not need to add it.
+
+### Wewenang bertempat: `user_role.id_unit_kerja` (migration 000020, isu #12 fase 3)
+
+A grant is now the pair `(role, unit_kerja)`, not just a role. `NULL` means "every
+unit" — the shape the seeded `SUPERADMIN` grant takes, and the shape every grant
+made before this migration keeps, since the column was added with no default.
+`user` is the module that owns this: granting and revoking happen while editing
+a user (`ReplaceRoles`), never while editing a role, same as before this phase.
+
+**Two unique indexes, not one, because a unique index does not constrain
+`NULL`.** `user_role_grant_uidx` on `(user_id, role_id, id_unit_kerja)` covers
+every scoped grant, but PostgreSQL treats `NULL <> NULL`, so that index alone
+would let ten identical *global* grants for the same `(user, role)` pair sit in
+the table at once. `user_role_grant_global_uidx` — a partial index
+`(user_id, role_id) WHERE id_unit_kerja IS NULL` — is what actually closes that
+gap. Both are required; dropping either one reopens a different hole.
+
+**The same role may now be held at more than one unit, as two distinct rows.**
+"INVENTARIS at outlet A" and "INVENTARIS at outlet B" are not a duplicate to
+collapse — they are two grants, and both indexes above are built around that
+being legal. Everywhere a single row used to mean "this user has this role", it
+now means "this user has this role, possibly several times, each at a
+different place or nowhere in particular."
+
+**`ReplaceRoles`'s diff had to become `NULL`-safe, and the old code could not
+have been patched in place.** The delete used to be `role_id <> ALL($2)` — that
+comparison is `NULL` (not `TRUE`) whenever either side is `NULL`, so a plain
+port to `(role_id, id_unit_kerja) <> ALL(...)` would silently keep every global
+grant no matter what the replacement set said, because a `NULL` id_unit_kerja
+can never prove itself `<>` anything. The fix is `NOT EXISTS (... WHERE
+t.role_id = ur.role_id AND t.id_unit_kerja IS NOT DISTINCT FROM
+ur.id_unit_kerja)` — `IS NOT DISTINCT FROM` is the one comparison PostgreSQL
+defines to treat two `NULL`s as equal. `TestUserRevokingGlobalGrantActuallyDeletesIt`
+pins exactly this: revoking a user's only (global) grant down to `[]` must
+leave zero `user_role` rows, not one nobody can prove should be gone.
+
+**The insert is two statements, not one, for the same underlying reason.** A
+single `INSERT ... ON CONFLICT` names exactly one arbiter index, and a scoped
+grant and a global grant are protected by two different ones. `ReplaceRoles`
+therefore filters its input in Go — rows with a non-nil `IDUnitKerja` go
+through `ON CONFLICT (user_id, role_id, id_unit_kerja) DO NOTHING`, rows with a
+nil one go through `ON CONFLICT (user_id, role_id) WHERE id_unit_kerja IS NULL
+DO NOTHING` — rather than trying to make one statement's arbiter clause satisfy
+both indexes at once, which PostgreSQL has no syntax for.
+
+**The DTO changed shape, not just name.** `role_ids` (`Optional[[]int64]`)
+became `grants` (`Optional[[]model.GrantRequest]`), where `GrantRequest` is
+`{id_role, id_unit_kerja}` and `id_unit_kerja` is an optional, nullable
+pointer. Keeping the old key name on a payload that no longer holds bare ids
+would have been the misleading choice. The three-state presence semantics are
+unchanged: absent leaves grants alone, `[]` revokes everything, a list
+replaces the whole set — and deduplication is now by the `(id_role,
+id_unit_kerja)` pair (`usecase.toGrants`), not by id alone, so
+`[{id_role:1},{id_role:1,id_unit_kerja:2}]` is two grants, not one collapsed
+into a conflict. `model.Optional[[]model.GrantRequest]` is registered in
+`config.NewValidator` alongside the other `Optional` instantiations, or its
+`dive` tag would silently stop validating each `GrantRequest`'s own fields —
+the mechanism `TestValidatorDivesIntoOptionalSlice` already pins for
+`Optional[[]int64]` extends here without changes to the validator itself,
+because `dive` descends into struct fields automatically once
+`WithRequiredStructEnabled()` is set.
+
+**`id_unit_kerja` is validated active independently of `id_role`, with its own
+message.** `UserUseCase.requireActiveGrants` runs `RoleRepository.CountActiveByIDs`
+against the distinct role ids and, only if any grant names a unit,
+`UnitKerjaRepository.CountActiveByIDs` against the distinct unit ids — two
+separate counts because a bad role and a bad unit are different problems, and
+collapsing them into one message would leave an operator guessing which field
+to fix. Both are pre-checks only; `invalidOnForeignKey` remains the backstop
+for the race where a role or unit is retired between the check and the write.
+
+**`FindRolesByUserIDs` still costs one query for a whole page**, `LEFT JOIN
+unit_kerja` added alongside the existing `JOIN role`. A grant whose unit was
+retired after being granted is still returned — same rule as a retired role —
+because the grant is still real and still needs revoking; `RoleRef.IsAktif`
+already told the role story, and `RoleRef.IsAktifUnitKerja` is its counterpart
+for the unit, added in phase 4 alongside `IDUserRole` once the grant's own row
+identity and its unit's liveness both turned out to matter beyond just this
+view — see "Konteks aktif per sesi" below for what needs them.
+
+**`db/seeder_postgres/004_superadmin.sql`'s `ON CONFLICT` had to change target.**
+It used to name `(user_id, role_id)`, matching the bare index this migration
+drops. It now names `(user_id, role_id) WHERE id_unit_kerja IS NULL` — the
+partial index — since the seeded grant is, and must stay, global.
+
+Phase 3 ends here; phase 4 (active session context) is its own section below,
+and phase 5 (`id_ruang` validated against the active unit on write paths)
+remains future work under the same issue.
+
+### Konteks aktif per sesi: `switch-context` (isu #12 fase 4, no migration)
+
+Phase 3 made a grant `(role, unit_kerja)`; phase 4 is what makes a **session**
+answer "acting as which one, right now" — a token now authorizes as **one**
+active grant rather than the union of everything the user holds. No schema
+change: this phase lives entirely in the JWT claims and the two usecases that
+mint them, `Login` and the new `SwitchContext`.
+
+- **`model.Grant` and `model.ActiveContext` are the one pair of types for
+  three jobs.** They are the JWT claim shape, `Session`'s own fields, and what
+  `LoginResponse`/`SessionResponse` hand a client — the same struct, tagged
+  once, rather than three shapes kept in sync by hand. `claims.Grants
+  []model.Grant` and `claims.Aktif *model.ActiveContext` decode straight into
+  `Session.Grants`/`Session.Aktif` with no intermediate conversion; only
+  `entity.RoleGrant` (the database-shaped version, keyed by `Role Role` and
+  carrying `IsAktifUnitKerja`) needs `usecase.toGrantList`/`toActiveContext` to
+  cross into it.
+- **`Session.HasRole` compares the active grant alone, never the full list.**
+  `s.Aktif != nil && strings.EqualFold(s.Aktif.Role, name)` — that one-line
+  change is the entire enforcement mechanism. `RequireRole` and every guard in
+  `route.go` are **byte-for-byte unchanged**; a session with `Aktif == nil`
+  fails every `RequireRole` check by construction, because `HasRole` has
+  nothing to compare against. That is the measure the issue itself proposed
+  for whether the design fit, and it does: **grep confirms zero lines changed
+  in `middleware/auth.go` or `route.go`'s guards** for this phase.
+- **Login auto-selects when there is no ambiguity, and refuses to guess
+  otherwise.** Exactly one usable grant becomes the active context
+  automatically — the ordinary case, one person, one role, one place. Two or
+  more issues a token with `Aktif: nil`, which authorizes nothing at all until
+  `switch-context` is called. There is no default among several grants that
+  would not risk someone acting under an authority they did not realize they
+  had picked, so none is chosen. A session with `Aktif == nil` can still reach
+  `auth/me` and `switch-context` — both are open to any authenticated caller
+  and need no special case for this, since neither carries a `RequireRole`
+  guard to begin with.
+- **`attachRolesForLogin` now filters on unit activity too, via
+  `grantUsableBy`.** Before phase 3 it only excluded a retired role; a grant
+  scoped to a retired `unit_kerja` is equally unusable and must not become the
+  active context, appear in the switcher menu, or count toward "exactly one
+  grant". `grantUsableBy` is the single predicate both `Login`'s filtering and
+  `SwitchContext`'s validation share, so the two can never drift on what
+  "usable" means.
+- **`SwitchContext` re-reads the grant from the database — the one place in
+  the whole design a token's claims are not trusted.** Everywhere else,
+  authorization is purely a claims read, which is the entire point of
+  choosing stateless JWT. Here it cannot be: the caller is naming a grant by
+  id, and a stale token could name one that has since been revoked, or whose
+  role or unit has since been retired. `UserRepository.FindGrantByID` +
+  `grantUsableBy` (ownership, role active, unit active-or-absent) is that
+  check, and it runs against the database at request time — a deliberate,
+  narrow exception to "no per-request lookup", scoped to exactly one endpoint.
+- **Every rejection reason collapses to one 403.** Grant does not exist,
+  belongs to another user, role retired, unit retired — `SwitchContext`
+  answers `model.Forbidden("grant does not exist or is not usable")` for all
+  four, the same reasoning `Login` already applies to an unknown username:
+  distinguishing them would let a caller probe which grant ids exist for
+  other users.
+- **`SwitchContext` takes a `userID int64`, not a `*model.Session`.** The
+  usecase layer needing only the caller's id — not the whole session object —
+  is what it actually needs; the controller extracts it via
+  `middleware.SessionFrom` and passes the bare id down, the same shape
+  `product_controller.go` already uses for `created_by`.
+- **Switching context cannot revoke the token being switched away from, and
+  is not trying to.** `SwitchContext` mints a brand new token; the old one is
+  still signed, still unexpired, and still authorizes exactly what it did the
+  moment it was issued. This is not a bug being tolerated — it is the same
+  "tokens cannot be revoked" limitation stated in "Authentication and
+  authorization" above, restated here because switch-context is exactly where
+  someone might assume otherwise. `jwt.ttl_minutes` is the only bound, same as
+  everywhere else. **Do not "fix" this with a Redis blacklist** — same
+  rejection as the general case, for the same reason: it reinstates the
+  per-request lookup JWT was chosen to avoid.
+- **This is not a security boundary against the token's own holder.** Active
+  context is a *least-privilege and clarity* control — it stops someone from
+  acting under an authority they forgot they were holding, not from a caller
+  who already has a token doing anything that token's claims allow. Holding a
+  token that carries a CASHIER-at-outlet-A grant and an INVENTARIS-at-outlet-B
+  grant means both are yours; switching only changes which one is *active*,
+  never what you are entitled to switch to.
+- **`TestAlgNoneTokenIsRejected` and `TestRouteGuardsRunBeforeHandler` needed
+  no changes** beyond updating the literal claims/session values they
+  construct to the new shape — pinned in the DoD precisely because a passing
+  test here is what proves phase 4 did not quietly touch the security
+  primitives the issue promised to leave alone.
+
+Phase 4 ends here. Phase 5 — validating `id_ruang` against the active unit —
+is its own section below. Phase 6 — read-path scoping, built afterwards once
+it was proven necessary — is the section after that.
+
+### `id_ruang` validated against the active unit (isu #12 fase 5, no migration)
+
+The last phase. `unit_kerja → ruang` is one-to-many — an outlet with both a
+warehouse and a shopfront has two rooms in one unit — so knowing the active
+unit is never enough to infer *which* room a document means. The client still
+picks; what changes is that the id it sends is checked, not merely offered
+from a filtered list.
+
+- **Two decisions were made before writing any of this, both explicit
+  trade-offs rather than defaults, and both open questions in the issue
+  itself:**
+  - **Write paths only, at the time. Reads stay exactly as open as before —
+    for now.** Every list and get endpoint is unfiltered by unit at the end
+    of this phase, same as every phase before it. The issue frames this as
+    the two-day-versus-three-week fork and recommends exactly this for a
+    first pass — scoping reads means touching every list endpoint's filter
+    constant and its `COUNT` twin, and one missed pair makes `total_item`
+    disagree with the rows. Reads were scoped afterwards, once asked for, as
+    phase 6; see that section for what changed and what didn't need to.
+  - **`mutasi` checks `id_ruang_asal` only, never `id_ruang_tujuan`.**
+    Phase 1 already decided cross-unit transfers are allowed, and the active
+    unit is exactly one unit — requiring *both* rooms to match it would make
+    every mutasi this check permits same-unit in practice, quietly reversing
+    that decision. Checking the source room alone matches the real
+    authority being asserted: an INVENTARIS person is vouching that goods are
+    leaving a room they are responsible for; where those goods land is not a
+    claim about their own authority.
+- **`periksaRuangUnitAktif` (`usecase/shared.go`) is the one function every
+  call site shares**, the same role `periksaPeriode` plays for closed
+  months — except this one guards nothing on the database side, because
+  `ruang.id_unit_kerja` cannot change after a room is created (`ruang` has no
+  `PATCH`). There is no race to be defensive about; the check is simply
+  correct once and stays correct. A `nil` `aktifIDUnitKerja` — the caller's
+  active grant applies everywhere, or (defensively) there is no active
+  context at all — skips the check entirely, the same reading `id_unit_kerja
+  IS NULL` already carries everywhere else in this codebase. An unknown
+  `id_ruang` is deliberately let through (returns `nil`): that failure
+  belongs to the foreign key, not to this check.
+- **Validation, not a default — the same rule `created_by` already
+  follows.** `AktifIDUnitKerja *int64` rides on `CreatePembelianRequest`,
+  `CreateMutasiRequest`, and `UpdateMutasiRequest`, filled by the controller
+  from `session.Aktif.IDUnitKerja` via the new `aktifIDUnitKerja(ctx)`
+  helper — never from the body, and never used to silently substitute a room
+  the client didn't ask for. A server that filled in a default while still
+  accepting whatever `id_ruang` the body sent would make the scoping
+  decorative; `id_ruang` is used exactly as sent, or the write is refused
+  403.
+- **Only two modules have `id_ruang` in their own request body at all —
+  `pembelian` and `mutasi` — so only they gained this check.**
+  `penerimaan_susulan` and `retur_pembelian` copy `id_ruang` from the parent
+  `pembelian`'s own header, never accept one in their own body, so the
+  parent's Create already validated it; checking again on the child would be
+  redundant at best and wrong if it ever re-read a stale copy. `pembelian`'s
+  own `PATCH` has no `id_ruang` field to begin with (unchanged from before
+  this issue), so only `Create` needed the check there; `mutasi` needed it on
+  both `Create` and `Update`, since "both rooms may change while `DRAFT`" (see
+  "Mutasi antar ruang" above) already lets `id_ruang_asal` move after
+  creation.
+- **`mutasi`'s `Update` only checks when `id_ruang_asal` is actually present
+  in the patch, and only the new value** — mirroring the existing
+  `id_ruang_asal <> id_ruang_tujuan` check just above it, which is checked
+  against the *effective* value (patch value if present, else the stored
+  one) for the identical reason: a patch that never touches the field cannot
+  have broken anything, and re-validating a stored value that cannot have
+  changed (`ruang` has no `PATCH`) would be pure waste.
+- **`RuangRepository.IDUnitKerjaByID`** is a one-column read, not
+  `FindByID`'s join — this check needs only the unit id, and pulling `kode`,
+  `nama_ruang`, `is_aktif`, and a name lookup along for a fact nobody asked
+  for would be waste on a path every `pembelian`/`mutasi` write now takes.
+- **`PembelianUseCase` and `MutasiUseCase` each borrow `RuangRepository`** for
+  exactly this one query, the same "borrow a repository for a narrow read"
+  shape `UserUseCase` already uses for `UnitKerjaRepository` and
+  `SupplierUseCase` for `PembelianRepository`.
+- **`users.id_ruang_default` was deliberately not built.** The issue raises
+  it explicitly as a possible convenience — saving the client one field on
+  every request — and just as explicitly warns not to confuse it with this
+  authorization boundary: one saves typing, the other is what stops a write
+  from naming a room outside the caller's authority. Add it only if the
+  convenience is actually asked for, and never let it double as validation.
+- **This does not close isu #12 outright** — the five load-bearing phases are
+  built: the decisions, the `unit_kerja` master and `ruang.id_unit_kerja`,
+  `user_role.id_unit_kerja` with its `NULL`-safe diff, active session context
+  via `switch-context`, and `id_ruang` validated against it. What the issue
+  left explicitly optional (phase 6, "baru kalau terbukti perlu") bundled
+  three independent pieces; read-path scoping was the one asked for and is
+  its own section next. `users.id_ruang_default` and a role-as-snapshot
+  column on transaction documents remain deferred, not overlooked.
+
+### Read-path scoping (isu #12 fase 6, no migration)
+
+The optional phase, built after being explicitly asked for rather than
+inferred as "obviously also needed." The issue bundles three independent
+pieces under phase 6 and says to build none of them until proven necessary;
+only the first was — the other two (`users.id_ruang_default`, a
+role-as-snapshot column on transaction documents) are still deferred.
+
+- **What "scoped" means depends on the shape of the read, and conflating
+  them is the mistake to avoid.** A `Get` answers **404**, not 403, for a
+  resource outside the caller's active unit — the same one the room's own
+  foreign key would produce for an id that never existed, on purpose: a
+  scoped read has to make "outside your unit" and "does not exist" the same
+  fact from the caller's side, or the 403 case itself confirms the resource
+  is real. A `List` (and `product/{id}/stok`, which has list shape) simply
+  **omits** rows outside the unit, silently, the same way a page with no
+  matches always looks — there is no id to 404 against and nothing to
+  confirm or deny.
+- **`diLuarUnitAktif` (`usecase/shared.go`) is the read-side counterpart of
+  `periksaRuangUnitAktif`** from phase 5, and deliberately a separate
+  function rather than a shared one: the write-side check returns
+  `model.Forbidden`, and reusing it for reads would make a scoped Get leak
+  exactly the fact it exists to hide. `diLuarUnitAktif` returns a bare
+  `bool`; every call site maps `true` to `model.NotFound` itself, so the
+  403-shaped mistake has to be written out loud at each site rather than
+  inherited by accident. A `nil` `aktifIDUnitKerja` excludes nothing — the
+  same reading `nil` carries everywhere else in this codebase.
+- **Every scoped module gained one column read alongside the document
+  already being read, never a second query.** `pembelian`, `penerimaan_susulan`,
+  and `retur_pembelian` each carry an unexported `IDUnitKerjaRuang int64` on
+  their entity, filled by joining `ruang.id_unit_kerja` into the same read
+  query that already joins `ruang` for its name — `pembelianReadColumns`,
+  `susulanReadColumns`, and `returReadColumns` each gained one column, and
+  their `scanXRead` gained one scan target. `mutasi` is the same shape but
+  named `IDUnitKerjaRuangAsal`, joined from `asal.id_unit_kerja` rather than
+  `ruang.id_unit_kerja` — see below for why only that one room.
+- **The `detail()` helper every write-path re-read goes through is where the
+  check actually lives, threaded as a parameter rather than read from
+  ambient state.** `pembelian`, `penerimaan_susulan`, `retur_pembelian`, and
+  `mutasi` each already had a `detail(ctx, db, id)` helper — `Get` was one of
+  several callers, alongside every posting/approval action that re-reads its
+  own document to build a response. All four gained an `aktifIDUnitKerja
+  *int64` parameter: `Get` (and, on `pembelian`, `Sisa`) passes the caller's
+  real active unit; every write-path call — `Create`'s re-read, `Ajukan`,
+  `Posting`, `Tolak`, `Batal`, `ReplaceDetail`, `BagiRataKoli` — passes `nil`.
+  The reasoning is the same as `periksaRuangUnitAktif`'s write-side check
+  running only on the fields actually being written: a caller who just
+  posted a document is, by construction, allowed to see the response posting
+  produced, whatever their active unit is at that moment. Scoping the
+  write-path re-read would make a legitimate action's own response look like
+  a 404.
+- **A filter clause that reaches a joined table forces the `COUNT` query to
+  join it too, and three of the four modules had to change for exactly
+  that.** `pembelianFilter`, `susulanFilter`, and `returFilter` each gained a
+  `$N::BIGINT IS NULL OR ruang_alias.id_unit_kerja = $N` clause, and each
+  module's `Search` had been running its `COUNT` against a bare `FROM table`
+  that never reached `ruang` — because nothing before phase 6 needed to.
+  Changing the `COUNT` query to use the same `xFrom` constant as the row
+  query is what "write the filter once, and both queries use it" (see
+  "PostgreSQL specifics" below) actually requires once the filter itself
+  reaches a join. `mutasi` needed the identical fix to its own `Search`,
+  even though `mutasiFrom` already joins both rooms unconditionally for the
+  room *names* — the `COUNT` query had never used `mutasiFrom` either, for
+  the same reason.
+- **`mutasi` checks `id_ruang_asal` only, never `id_ruang_tujuan` — the read
+  side inherits the identical asymmetry phase 5 already made on the write
+  side, for the identical reason.** Requiring both rooms to match the active
+  unit would make every mutasi this scoping lets through same-unit in
+  practice, quietly re-deciding that cross-unit transfers are allowed (isu
+  #12 fase 1). A transfer whose destination sits in a different unit than
+  the caller's stays fully visible to whoever owns the source room; a caller
+  who only owns the destination cannot see it at all, even though the goods
+  are headed there. That is deliberate: visibility follows the room a
+  caller is asserting authority over, not every room a document happens to
+  touch. `TestMutasiGetVisibleWhenOnlyDestinationRuangOutsideActiveUnit`
+  pins exactly the case a reader arriving from the other three modules would
+  expect to be scoped and isn't.
+- **`GET /product/{id}/stok` is scoped too, but it is a list-shaped read, not
+  a `Get`, and the fix landed in `KartuStokRepository.SaldoPerRuang` rather
+  than in a `detail()`-style helper.** The filter sits on the *outer* query,
+  after the `DISTINCT ON (ks.id_ruang)` subquery has already picked one row
+  per room — filtering a room out earlier could, in principle, only change
+  which room wins each `DISTINCT ON` group, and since the key is the room
+  itself, it cannot actually change any row that survives. Keeping the
+  filter outside is what makes that true by construction rather than by
+  argument. Unlike a `Get`, there is no id to 404 against — a room outside
+  the active unit is just missing from the list, the same as a room the
+  product has never moved through.
+- **Query-string spoofing is closed the same way `ActorID` already is.**
+  Every `AktifIDUnitKerja` field added by this phase carries `json:"-"` on a
+  body-bound request or `query:"-"` on a query-bound one — Fiber v3's query
+  binder is `gorilla/schema` under an alias tag, and `query:"-"` is what
+  excludes a field from it, confirmed against the vendored binder source
+  rather than assumed. The controller then overwrites the field
+  unconditionally after binding, from `aktifIDUnitKerja(ctx)` (the existing
+  helper from phase 5), regardless of whether the tag alone would have been
+  enough — the same defense-in-depth `ActorID` already gets from
+  `middleware.SessionFrom`.
+- **Tests live in `fase6_read_scope_test.go`, one file spanning every scoped
+  module, rather than one file per module** — unlike phase 5, whose write-side
+  tests split naturally along `pembelian`/`mutasi`. A read scoped identically
+  across five different resource shapes is one behavior repeated five times,
+  and reading the five Get/List pairs together is what makes the one real
+  asymmetry — `mutasi`'s source-only check — legible as a deliberate
+  exception rather than a module that was simply forgotten.
+
 ### Stok per ruang (no migration)
 
 `GET /api/v1/product/{id}/stok` — isu #7 fase 1, and the **first read of `kartu_stok` in the codebase**. `KartuStokRepository` had only `Insert`, `FindByRef`, and `HasRef`; nothing needed a balance until now, because purchases and follow-up receipts only add and a return's quota comes from an invoice line.
@@ -311,6 +776,7 @@ Isu #7. Goods moving from one `ruang` to another — the fourth document to writ
 - **It is a read and never a guard**, and every call site has to keep treating it that way. The balance is decided inside the trigger under an advisory lock precisely so no reader can get in front of it.
 - Follows `riwayat_beli`: no table, no migration, the query lives in the repository that owns `kartu_stok`, and `ProductUseCase` borrows it for the resource the endpoint hangs off. **No pagination** — one row per room the product has moved through, `ruang` is small, and every caller wants all of them to pick a source room from.
 - Rooms the product has never been in do not appear; a room that emptied out still does, with zero. Unknown product is a 404, a product that has never moved is an empty list.
+- **`SaldoPerRuang` additionally scopes by the caller's active `unit_kerja` since isu #12 fase 6** — see "Read-path scoping" above for the mechanism and why the filter sits outside the `DISTINCT ON` subquery rather than inside it.
 
 ### Riwayat harga beli (no migration)
 
@@ -343,20 +809,22 @@ Three tables, one slice: `product`, `product_satuan`, `product_harga_jual`.
 
 ### Users and roles (migration 000010)
 
-One user holds many roles. `user_role` is the only record of that, and permissions are the **union of every role a user holds** — there is no "currently active role".
+One user holds many grants. `user_role` is the only record of that. What a user *may* do is still the union of every grant they hold — `RoleRepository`/`UnitKerjaRepository` validate against all of them, and the management view (`GET /api/v1/user`) lists all of them. What a **session** authorizes as, since isu #12 fase 4, is exactly one of them at a time — see "Konteks aktif per sesi" above. Don't conflate the two: a user's grants are a set; a session's active context is a single choice from that set.
 
-- **`users.role_active` is gone.** Migration `000002` declared `UNIQUE (role_active)`, which is unique across the whole table rather than per user, so the system could hold exactly one cashier and the second was rejected by the database. Its FK also pointed at `user_role (id)` without `user_id`, so user A's active role could point at user B's grant. Migration `000010` drops the column outright rather than repairing it. Don't reintroduce it; if a "default module on login" preference is ever wanted, that is a UI preference column, not a permission gate.
+- **`users.role_active` is gone.** Migration `000002` declared `UNIQUE (role_active)`, which is unique across the whole table rather than per user, so the system could hold exactly one cashier and the second was rejected by the database. Its FK also pointed at `user_role (id)` without `user_id`, so user A's active role could point at user B's grant. Migration `000010` drops the column outright rather than repairing it. Don't reintroduce it; if a "default module on login" preference is ever wanted, that is a UI preference column, not a permission gate. See "Wewenang bertempat" above for why `user_role.id_unit_kerja` (migration `000020`) is not this column resurrected under a new name.
 - **Roles are seeded, then editable.** `SUPERADMIN`, `CASHIER`, `INVENTARIS` come from `db/seeder_postgres/003_role.sql`. `PATCH /api/v1/role/{id}` can rename them, and **renaming a role that authorization code checks by name breaks that code** — nothing in the database can catch it. Retire with `is_aktif = false` and add a new role instead.
-- **Grants are managed through the user, not a sub-resource.** `role_ids` on `POST`/`PATCH /api/v1/user` replaces the whole set: absent leaves grants alone, `[]` revokes everything, `[1,3]` ends with exactly those. An explicit `null` is rejected, because `[]` already says "no roles". This is the only place `Optional[[]int64]` is used, and it must stay registered in `config.NewValidator`.
-- **`ReplaceRoles` is a diff, not delete-then-insert.** Rows for roles that survive the change are left alone so `user_role.created_at` keeps saying when the grant actually started. It deletes with `role_id <> ALL($2)`, which is why the usecase always passes a **non-nil** slice — a NULL array makes that comparison NULL and deletes nothing, silently turning "revoke all" into a no-op.
+- **A grant is `(role, unit_kerja)`, not just role, since migration `000020`.** `grants` on `POST`/`PATCH /api/v1/user` replaces the whole set: absent leaves grants alone, `[]` revokes everything, a list ends with exactly those grants. An explicit `null` is rejected, because `[]` already says "no grants". Each entry is `model.GrantRequest{IDRole, IDUnitKerja}` — `IDUnitKerja` nil means the role applies everywhere. `Optional[[]model.GrantRequest]` is the DTO, and it must stay registered in `config.NewValidator` alongside the other `Optional` instantiations.
+- **The same role may be granted more than once per user, one row per unit.** "INVENTARIS at outlet A" and "INVENTARIS at outlet B" are two distinct `user_role` rows, not a duplicate — `usecase.toGrants` deduplicates by the `(id_role, id_unit_kerja)` **pair**, not by role id alone, so sending both in one request grants both. `entity.User.Roles` reflects this: it is `[]entity.RoleGrant`, and the same role's name can legitimately appear more than once in it.
+- **`ReplaceRoles` is a diff, not delete-then-insert.** Rows for grants that survive the change are left alone so `user_role.created_at` keeps saying when the grant actually started. The comparison is **`NULL`-safe** (`IS NOT DISTINCT FROM` on `id_unit_kerja`, inside a `NOT EXISTS` anti-join), not `<>` — `id_unit_kerja <> ...` is `NULL` (never `TRUE`) whenever either side is `NULL`, so a naive port of the old `role_id <> ALL($2)` pattern would silently keep every global grant no matter what. See "Wewenang bertempat" above for the full trap and how the insert side works around the same limitation by using two `ON CONFLICT` statements instead of one.
 - `user_role` is the one table in the codebase where `DELETE` is correct. It is a join table that no transaction table references, so revoking a grant breaks no foreign key and erases no document history — `created_by` on documents points at `users`, not at `user_role`.
 - **A roles-only patch still has to move `updated_at`**, which is what `UserRepository.Touch` is for: it writes no other column, fires the `users_set_updated_at` trigger, and yields `sql.ErrNoRows` so an unknown id still answers 404.
-- **Role ids are validated before the write**, not left to the foreign key: the FK cannot tell a retired role from a live one, and its message names a constraint rather than the field. `RoleRepository.CountActiveByIDs` compares a count against the number of **deduplicated** ids — pass duplicates and a valid request is wrongly rejected. `repository.IsForeignKeyViolation` (SQLSTATE `23503`) is the race backstop, mapping to a 400.
+- **Role ids and unit ids are both validated before the write**, not left to the foreign key: the FK cannot tell a retired row from a live one, and its message names a constraint rather than the field. `RoleRepository.CountActiveByIDs` and `UnitKerjaRepository.CountActiveByIDs` each compare a count against the number of **deduplicated** ids for their own kind — pass duplicates and a valid request is wrongly rejected. The two checks are independent and produce different messages, so an operator learns which field was wrong. `repository.IsForeignKeyViolation` (SQLSTATE `23503`) is the race backstop for both, mapping to a 400.
 - **Passwords are bcrypt hashes, hashed in the usecase.** `model.UserResponse` has no password field at all, which is what makes a leak structurally impossible rather than a matter of remembering. bcrypt refuses input over 72 **bytes** while the DTO's `max=72` counts **runes**, so `hashPassword` maps `bcrypt.ErrPasswordTooLong` to `model.Invalid` for the multibyte case.
-- Attaching roles to a page of users is **one extra query, not one per user** (`FindRolesByUserIDs` with `= ANY($1)`). `pgx/stdlib` implements `CheckNamedValue`, so a Go `[]int64` passes through `database/sql` untouched — no array wrapper needed.
+- Attaching grants to a page of users is **one extra query, not one per user** (`FindRolesByUserIDs` with `= ANY($1)`, `LEFT JOIN unit_kerja`). `pgx/stdlib` implements `CheckNamedValue`, so a Go `[]int64` (and, since fase 3, `[]*int64` for a nullable `BIGINT[]`) passes through `database/sql` untouched — no array wrapper needed.
 - The `role_id` list filter is an **`EXISTS`, never a join**. A join to `user_role` returns one row per matching role and silently multiplies the page when a user holds several, breaking both `LIMIT` and `total_item`.
-- A user's role list **includes roles retired after being granted** — the grant is still real and still needs revoking. `RoleRef.is_aktif` is what tells them apart. Authorization, when written, must filter on `role.is_aktif` itself rather than assuming every listed role is live.
+- A user's grant list **includes grants whose role, or whose unit, was retired after being granted** — the grant is still real and still needs revoking. `RoleRef.is_aktif` tells a retired role apart; `RoleRef.is_aktif_unit_kerja` (fase 4) is its counterpart for the unit, nil exactly when `id_unit_kerja` is nil. This management view intentionally shows *everything held*, retired or not — the filtering down to what a session may act as happens only in `AuthUseCase.attachRolesForLogin`/`grantUsableBy`, never here.
 - `username`, `email`, and `role.nama` are unique **case-insensitively** via `lower(...)` indexes, same as master codes. `email` is nullable, so any number of users may have none.
+- **The JWT claim carries every usable grant, plus which one is active — see "Konteks aktif per sesi" above for the full design.** It is not a flat role-name list any more; `model.Grant`/`model.ActiveContext` are the shape, shared by the claims, `Session`, and the login/switch-context responses alike.
 
 ### Inventory data model (migrations 000002–000008)
 
@@ -448,7 +916,7 @@ A pointer cannot tell "field absent" from "field explicitly null", and `COALESCE
 - `NOT NULL` columns: `COALESCE` is correct, and an explicit `null` is rejected with `model.Invalid` in the usecase.
 - `UPDATE ... RETURNING` supplies the response; `sql.ErrNoRows` from it means the id does not exist. Never `SELECT` first to check — two queries, still racy.
 - `id`, `created_at`, and `created_by` never appear in an update DTO. The controller binds the body first and then overwrites `ID` from the path.
-- Tags on an `Optional` field must lead with `omitempty`, and each instantiation must be registered in `config.NewValidator` — otherwise its validation tags are silently ignored. Registered today: `Optional[string]`, `Optional[bool]`, `Optional[[]int64]`, `Optional[int64]`.
+- Tags on an `Optional` field must lead with `omitempty`, and each instantiation must be registered in `config.NewValidator` — otherwise its validation tags are silently ignored. Registered today: `Optional[string]`, `Optional[bool]`, `Optional[[]int64]`, `Optional[int64]`, `Optional[[]model.GrantRequest]`.
 - A collection field works the same way, with the states meaning replace rather than set: absent leaves it alone, `[]` empties it, a list replaces it wholesale. `dive` does reach elements through the custom type func (`TestValidatorDivesIntoOptionalSlice` pins that), so `dive,gt=0` on an `Optional[[]int64]` is really enforced.
 
 ## API contract

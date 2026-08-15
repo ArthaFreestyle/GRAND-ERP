@@ -37,6 +37,21 @@ func actorID(ctx fiber.Ctx) (int64, error) {
 	return session.UserID, nil
 }
 
+// aktifIDUnitKerja returns the caller's active unit_kerja, or nil when the
+// active grant applies everywhere (or, defensively, when there is no active
+// grant at all — unreachable through any route guarded by RequireRole, since
+// HasRole always answers false without one, but not assumed here). isu #12
+// fase 5: this is what lets a usecase validate a write's id_ruang against the
+// caller's actual authority instead of trusting it as sent.
+func aktifIDUnitKerja(ctx fiber.Ctx) *int64 {
+	session, ok := middleware.SessionFrom(ctx)
+	if !ok || session.Aktif == nil {
+		return nil
+	}
+
+	return session.Aktif.IDUnitKerja
+}
+
 func (c *ProductController) Create(ctx fiber.Ctx) error {
 	request := new(model.CreateProductRequest)
 	if err := ctx.Bind().Body(request); err != nil {
@@ -191,7 +206,9 @@ func (c *ProductController) Stok(ctx fiber.Ctx) error {
 		return model.Invalid("id must be an integer")
 	}
 
-	responses, err := c.UseCase.Stok(ctx.Context(), &model.ListStokProductRequest{IDProduct: id})
+	responses, err := c.UseCase.Stok(ctx.Context(), &model.ListStokProductRequest{
+		IDProduct: id, AktifIDUnitKerja: aktifIDUnitKerja(ctx),
+	})
 	if err != nil {
 		return err
 	}
