@@ -48,6 +48,7 @@ func Bootstrap(config *BootstrapConfig) {
 	returRepository := repository.NewReturPembelianRepository()
 	pembayaranRepository := repository.NewPembayaranUtangRepository()
 	mutasiRepository := repository.NewMutasiRepository()
+	pemakaianRepository := repository.NewPemakaianRepository()
 	dokumenRepository := repository.NewDokumenRepository()
 	periodeRepository := repository.NewPeriodeRepository()
 
@@ -143,6 +144,17 @@ func Bootstrap(config *BootstrapConfig) {
 		mutasiRepository, productRepository, kartuStokRepository, counterRepository,
 		periodeRepository, ruangRepository,
 	)
+	// PemakaianUseCase takes five repositories, one fewer than pembelian and mutasi:
+	// unlike those two it has no RuangRepository, because isu #9 does not ask for
+	// id_ruang to be validated against the caller's active unit_kerja. It reaches into
+	// product for the conversion factors and kartu_stok for the outgoing rows plus the
+	// balance locks — the same ABBA risk mutasi guards against, even though every line
+	// here shares one room.
+	pemakaianUseCase := usecase.NewPemakaianUseCase(
+		config.DB, config.Log, config.Validate,
+		pemakaianRepository, productRepository, kartuStokRepository, counterRepository,
+		periodeRepository,
+	)
 	// PembayaranUtangUseCase is the first transaction usecase that needs no
 	// KartuStokRepository at all: money moving to a supplier changes no stock. It reaches
 	// into pembelian to lock each invoice it allocates against, read what that invoice
@@ -197,6 +209,7 @@ func Bootstrap(config *BootstrapConfig) {
 	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
 	returController := deliveryhttp.NewReturPembelianController(config.Log, returUseCase)
 	mutasiController := deliveryhttp.NewMutasiController(config.Log, mutasiUseCase)
+	pemakaianController := deliveryhttp.NewPemakaianController(config.Log, pemakaianUseCase)
 	pembayaranController := deliveryhttp.NewPembayaranUtangController(config.Log, pembayaranUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
@@ -220,6 +233,7 @@ func Bootstrap(config *BootstrapConfig) {
 		SusulanController:    susulanController,
 		ReturController:      returController,
 		MutasiController:     mutasiController,
+		PemakaianController:  pemakaianController,
 		PembayaranController: pembayaranController,
 		ProductController:    productController,
 		UnitKerjaController:  unitKerjaController,

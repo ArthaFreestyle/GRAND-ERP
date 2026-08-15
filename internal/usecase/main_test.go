@@ -75,6 +75,7 @@ type app struct {
 	susulan    *usecase.PenerimaanSusulanUseCase
 	retur      *usecase.ReturPembelianUseCase
 	mutasi     *usecase.MutasiUseCase
+	pemakaian  *usecase.PemakaianUseCase
 	pembayaran *usecase.PembayaranUtangUseCase
 	dokumen    *usecase.DokumenUseCase
 	periode    *usecase.PeriodeUseCase
@@ -190,6 +191,11 @@ func newApp(t *testing.T) *app {
 			repository.NewMutasiRepository(), productRepository,
 			kartuStokRepository, counterRepository, periodeRepository, ruangRepository,
 		),
+		pemakaian: usecase.NewPemakaianUseCase(
+			testDB, log, validate,
+			repository.NewPemakaianRepository(), productRepository,
+			kartuStokRepository, counterRepository, periodeRepository,
+		),
 		pembayaran: usecase.NewPembayaranUtangUseCase(
 			testDB, log, validate,
 			repository.NewPembayaranUtangRepository(), pembelianRepository, counterRepository,
@@ -242,6 +248,10 @@ func truncateMaster(t *testing.T) {
 		// only has to precede those four. It goes here rather than later because a
 		// leftover row would keep a ruang or a product from being deleted below.
 		"mutasi_detail", "mutasi",
+		// pemakaian points at no document either, only at product, ruang, satuan, and
+		// users (id_pemohon, disetujui_oleh, created_by, dibatalkan_oleh) — same shape as
+		// mutasi, so it sits right beside it for the same reason.
+		"pemakaian_detail", "pemakaian",
 		// pembayaran_utang_alokasi references pembelian, and pembayaran_utang references
 		// supplier and users, so both come before pembelian.
 		"pembayaran_utang_alokasi", "pembayaran_utang",

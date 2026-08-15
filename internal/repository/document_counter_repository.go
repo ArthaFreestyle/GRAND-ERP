@@ -14,6 +14,7 @@ const (
 	PrefixRetur           = "RB"
 	PrefixPembayaranUtang = "PU"
 	PrefixMutasi          = "MT"
+	PrefixPemakaian       = "PM"
 )
 
 // DocumentCounterRepository hands out the per-month sequence behind every document

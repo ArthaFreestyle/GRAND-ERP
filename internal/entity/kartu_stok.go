@@ -16,6 +16,18 @@ const (
 	JenisTransaksiMutasiKeluar        = "MUTASI_KELUAR"
 	JenisTransaksiMutasiMasuk         = "MUTASI_MASUK"
 	JenisTransaksiPembatalanTransaksi = "PEMBATALAN_TRANSAKSI"
+	// JenisTransaksiPemakaian is the fifth document to write kartu_stok and the first
+	// to take goods out with no counterparty at all — no supplier, no customer, no
+	// destination room. What is posted is qty_disetujui_dasar, never qty_dasar; see
+	// PemakaianUseCase.Posting.
+	//
+	// Its cancellation reuses JenisTransaksiPembatalanTransaksi above, following the
+	// other four writers, rather than the enum's own 'PEMBATALAN_PEMAKAIAN' value —
+	// id_kartu_stok_asal already says what a reversal undoes, and two vocabularies for
+	// one meaning is exactly what migration 000021 spent itself removing elsewhere.
+	// 'PEMBATALAN_PEMAKAIAN' has existed in jenis_transaksi since migration 000002 and
+	// stays there unused: PostgreSQL has no DROP VALUE for an enum.
+	JenisTransaksiPemakaian = "PEMAKAIAN"
 )
 
 // Ref tables recorded on kartu_stok. Paired with ref_id_transaksi they say which
@@ -30,6 +42,9 @@ const (
 	// cancellation reverses each of them, which is what keeps the pair summing to zero
 	// in quantity.
 	RefTableMutasi = "mutasi"
+	// RefTablePemakaian is the fifth document to write kartu_stok, and the first to
+	// leave with no other party recorded — see JenisTransaksiPemakaian.
+	RefTablePemakaian = "pemakaian"
 )
 
 // KartuStok maps the kartu_stok table: the only source of truth for stock and
