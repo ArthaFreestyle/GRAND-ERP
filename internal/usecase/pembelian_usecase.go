@@ -28,6 +28,10 @@ import (
 // error message only: the kartu_stok trigger is what refuses a closed month, but a
 // RAISE carries no constraint name, so without this the module could only report that
 // either the period is closed or the stock is short.
+//
+// RuangRepository is the sixth, borrowed only to validate a Create's id_ruang against
+// the caller's active unit_kerja (isu #12 fase 5) — the same reasoning UserUseCase
+// borrows UnitKerjaRepository to validate a grant's unit.
 type PembelianUseCase struct {
 	DB                  *sql.DB
 	Log                 *logrus.Logger
@@ -37,6 +41,7 @@ type PembelianUseCase struct {
 	KartuStokRepository *repository.KartuStokRepository
 	CounterRepository   *repository.DocumentCounterRepository
 	PeriodeRepository   *repository.PeriodeRepository
+	RuangRepository     *repository.RuangRepository
 }
 
 func NewPembelianUseCase(
@@ -48,6 +53,7 @@ func NewPembelianUseCase(
 	kartuStokRepository *repository.KartuStokRepository,
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
+	ruangRepository *repository.RuangRepository,
 ) *PembelianUseCase {
 	return &PembelianUseCase{
 		DB:                  db,
@@ -58,6 +64,7 @@ func NewPembelianUseCase(
 		KartuStokRepository: kartuStokRepository,
 		CounterRepository:   counterRepository,
 		PeriodeRepository:   periodeRepository,
+		RuangRepository:     ruangRepository,
 	}
 }
 
@@ -88,6 +95,10 @@ func (c *PembelianUseCase) Create(ctx context.Context, request *model.CreatePemb
 	defer func() {
 		_ = tx.Rollback() // no-op once the transaction is committed
 	}()
+
+	if err := periksaRuangUnitAktif(ctx, tx, c.RuangRepository, request.AktifIDUnitKerja, request.IDRuang); err != nil {
+		return nil, err
+	}
 
 	if request.NoFakturSupplier != nil && *request.NoFakturSupplier != "" {
 		exists, err := c.PembelianRepository.ExistsFakturSupplier(
@@ -164,7 +175,7 @@ func (c *PembelianUseCase) Create(ctx context.Context, request *model.CreatePemb
 
 	// Re-read so the response carries the stored row and its joined names rather
 	// than what was sent.
-	return c.detail(ctx, c.DB, pembelian.ID)
+	return c.detail(ctx, c.DB, pembelian.ID, nil)
 }
 
 func (c *PembelianUseCase) Get(ctx context.Context, request *model.GetPembelianRequest) (*model.PembelianResponse, error) {
@@ -172,7 +183,7 @@ func (c *PembelianUseCase) Get(ctx context.Context, request *model.GetPembelianR
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, request.AktifIDUnitKerja)
 }
 
 func (c *PembelianUseCase) Search(ctx context.Context, request *model.ListPembelianRequest) ([]model.PembelianResponse, *model.PageMetadata, error) {
@@ -185,7 +196,7 @@ func (c *PembelianUseCase) Search(ctx context.Context, request *model.ListPembel
 	list, total, err := c.PembelianRepository.Search(
 		ctx, c.DB,
 		request.Search, request.Status, request.StatusPenerimaan, request.IDSupplier,
-		request.TanggalDari, request.TanggalSampai,
+		request.TanggalDari, request.TanggalSampai, request.AktifIDUnitKerja,
 		request.Size, request.Offset(),
 	)
 	if err != nil {
@@ -261,7 +272,7 @@ func (c *PembelianUseCase) Update(ctx context.Context, request *model.UpdatePemb
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // ReplaceDetail swaps the whole line set of a DRAFT.
@@ -309,7 +320,7 @@ func (c *PembelianUseCase) ReplaceDetail(ctx context.Context, request *model.Rep
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Ajukan hands a draft to the approver.
@@ -350,7 +361,7 @@ func (c *PembelianUseCase) Ajukan(ctx context.Context, request *model.AjukanPemb
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Tolak sends a submission back to DRAFT so the operator can fix it.
@@ -379,7 +390,7 @@ func (c *PembelianUseCase) Tolak(ctx context.Context, request *model.TolakPembel
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Posting approves a submission: it allocates freight, computes cost per base unit,
@@ -489,7 +500,7 @@ func (c *PembelianUseCase) Posting(ctx context.Context, request *model.PostingPe
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Batal voids a posted document by appending a reversing row for every movement it
@@ -632,7 +643,7 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // BagiRataKoli spreads total_koli across the lines in proportion to qty_dasar.
@@ -695,7 +706,7 @@ func (c *PembelianUseCase) BagiRataKoli(ctx context.Context, request *model.Bagi
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Sisa lists the lines the supplier still owes.
@@ -709,6 +720,11 @@ func (c *PembelianUseCase) Sisa(ctx context.Context, request *model.GetPembelian
 		return nil, notFoundOnNoRows(err, "pembelian not found")
 	}
 
+	// isu #12 fase 6: same scoping as Get, since Sisa answers for the same id.
+	if diLuarUnitAktif(pembelian.IDUnitKerjaRuang, request.AktifIDUnitKerja) {
+		return nil, model.NotFound("pembelian not found")
+	}
+
 	pembelian.Detail, err = c.PembelianRepository.FindDetail(ctx, c.DB, request.ID)
 	if err != nil {
 		return nil, err
@@ -719,10 +735,20 @@ func (c *PembelianUseCase) Sisa(ctx context.Context, request *model.GetPembelian
 
 // detail loads a header and its lines. Two queries, independent of how many lines
 // come back.
-func (c *PembelianUseCase) detail(ctx context.Context, db repository.DBTX, id int64) (*model.PembelianResponse, error) {
+// detail loads a header and its lines. aktifIDUnitKerja scopes the read for
+// isu #12 fase 6; every write-path caller passes nil (unrestricted), since
+// scoping applies to genuine reads only — a caller who just posted a document
+// must still see the response that posting produced.
+func (c *PembelianUseCase) detail(ctx context.Context, db repository.DBTX, id int64, aktifIDUnitKerja *int64) (*model.PembelianResponse, error) {
 	pembelian, err := c.PembelianRepository.FindByID(ctx, db, id)
 	if err != nil {
 		return nil, notFoundOnNoRows(err, "pembelian not found")
+	}
+
+	// A document outside the caller's active unit answers 404, the same as
+	// one that does not exist — a scoped read must not confirm it is there.
+	if diLuarUnitAktif(pembelian.IDUnitKerjaRuang, aktifIDUnitKerja) {
+		return nil, model.NotFound("pembelian not found")
 	}
 
 	// Non-nil even when empty, so the response carries [] rather than dropping the

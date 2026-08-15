@@ -23,6 +23,7 @@ func NewValidator() *validator.Validate {
 		model.Optional[bool]{},
 		model.Optional[[]int64]{},
 		model.Optional[int64]{},
+		model.Optional[[]model.GrantRequest]{},
 	)
 
 	return validate

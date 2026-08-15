@@ -27,7 +27,8 @@ const mutasiColumns = `id, nomor, tanggal, id_ruang_asal, id_ruang_tujuan, keter
 // mutasiReadColumns adds both room names. Fetching them per row would be an N+1.
 const mutasiReadColumns = `m.id, m.nomor, m.tanggal, m.id_ruang_asal, m.id_ruang_tujuan,
 	m.keterangan, m.status, m.created_by, m.created_at, m.posted_at,
-	m.dibatalkan_oleh, m.alasan_batal, asal.nama_ruang, tujuan.nama_ruang`
+	m.dibatalkan_oleh, m.alasan_batal, asal.nama_ruang, tujuan.nama_ruang,
+	asal.id_unit_kerja`
 
 // mutasiFrom joins INNER twice: both foreign keys are NOT NULL, so a mutasi without a
 // source or destination room cannot exist.
@@ -39,14 +40,20 @@ const mutasiFrom = `
 // mutasiFilter is shared by the COUNT and the row query. Two copies of a filter
 // eventually diverge and total_item starts lying about the data.
 //
-// Placeholder discipline: the filter owns $1..$6 and pagination follows after it.
+// Placeholder discipline: the filter owns $1..$7 and pagination follows after it.
+//
+// $7 is the active-unit scope (isu #12 fase 6), against asal.id_unit_kerja —
+// the source room only, never the destination, mirroring the write-side rule
+// from fase 5. Reaching asal from the filter is why the COUNT query now has to
+// use mutasiFrom too, instead of a bare FROM mutasi m.
 const mutasiFilter = `
 	WHERE ($1 = '' OR m.nomor ILIKE '%' || $1 || '%' OR m.keterangan ILIKE '%' || $1 || '%')
 	  AND ($2 = '' OR m.status = $2)
 	  AND ($3 = 0 OR m.id_ruang_asal = $3)
 	  AND ($4 = 0 OR m.id_ruang_tujuan = $4)
 	  AND ($5::DATE IS NULL OR m.tanggal >= $5::DATE)
-	  AND ($6::DATE IS NULL OR m.tanggal < ($6::DATE + INTERVAL '1 day'))`
+	  AND ($6::DATE IS NULL OR m.tanggal < ($6::DATE + INTERVAL '1 day'))
+	  AND ($7::BIGINT IS NULL OR asal.id_unit_kerja = $7)`
 
 const mutasiDetailReadColumns = `md.id, md.id_mutasi, md.id_product, md.qty_input::TEXT,
 	md.id_satuan_input, md.faktor_konversi, md.qty_dasar,
@@ -185,14 +192,15 @@ func (r *MutasiRepository) Batal(ctx context.Context, db DBTX, id, actorID int64
 // DRAFTs is the whole of SUPERADMIN's work queue — and a queue is read to be worked
 // through, not to see the newest. GET /supplier/{id}/utang made the same choice for the
 // same reason.
-func (r *MutasiRepository) Search(ctx context.Context, db DBTX, search, status string, idRuangAsal, idRuangTujuan int64, dari, sampai *string, terlamaDulu bool, limit, offset int) ([]entity.Mutasi, int64, error) {
+func (r *MutasiRepository) Search(ctx context.Context, db DBTX, search, status string, idRuangAsal, idRuangTujuan int64, dari, sampai *string, aktifIDUnitKerja *int64, terlamaDulu bool, limit, offset int) ([]entity.Mutasi, int64, error) {
 	search = EscapeLike(search)
 
-	// COUNT skips the joins: nothing in the filter needs the room names.
+	// COUNT now needs mutasiFrom too: the active-unit clause in mutasiFilter reaches
+	// asal.id_unit_kerja, which only the join brings into scope.
 	var total int64
 	if err := db.QueryRowContext(
-		ctx, `SELECT COUNT(*) FROM mutasi m`+mutasiFilter,
-		search, status, idRuangAsal, idRuangTujuan, dari, sampai,
+		ctx, `SELECT COUNT(*) `+mutasiFrom+mutasiFilter,
+		search, status, idRuangAsal, idRuangTujuan, dari, sampai, aktifIDUnitKerja,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count mutasi: %w", err)
 	}
@@ -211,9 +219,9 @@ func (r *MutasiRepository) Search(ctx context.Context, db DBTX, search, status s
 
 	query := `SELECT ` + mutasiReadColumns + mutasiFrom + mutasiFilter + `
 		` + urutan + `
-		LIMIT $7 OFFSET $8`
+		LIMIT $8 OFFSET $9`
 
-	rows, err := db.QueryContext(ctx, query, search, status, idRuangAsal, idRuangTujuan, dari, sampai, limit, offset)
+	rows, err := db.QueryContext(ctx, query, search, status, idRuangAsal, idRuangTujuan, dari, sampai, aktifIDUnitKerja, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select mutasi: %w", err)
 	}
@@ -353,5 +361,6 @@ func scanMutasi(row rowScanner, mutasi *entity.Mutasi) error {
 func scanMutasiRead(row rowScanner, mutasi *entity.Mutasi) error {
 	return row.Scan(append(
 		mutasiFields(mutasi), &mutasi.NamaRuangAsal, &mutasi.NamaRuangTujuan,
+		&mutasi.IDUnitKerjaRuangAsal,
 	)...)
 }

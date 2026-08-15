@@ -67,6 +67,7 @@ type app struct {
 	supplier   *usecase.SupplierUseCase
 	pelanggan  *usecase.PelangganUseCase
 	ruang      *usecase.RuangUseCase
+	unitKerja  *usecase.UnitKerjaUseCase
 	role       *usecase.RoleUseCase
 	product    *usecase.ProductUseCase
 	user       *usecase.UserUseCase
@@ -77,6 +78,7 @@ type app struct {
 	pembayaran *usecase.PembayaranUtangUseCase
 	dokumen    *usecase.DokumenUseCase
 	periode    *usecase.PeriodeUseCase
+	auth       *usecase.AuthUseCase
 	// dokumenDir is where this test's attachments land, so a test can check that a
 	// file really was written — or really was removed — rather than trusting the row.
 	dokumenDir string
@@ -89,6 +91,13 @@ type app struct {
 const (
 	testMaxUkuranDokumen = 64 * 1024
 	testOrphanTTL        = 24 * time.Hour
+
+	// testAuthSecret only needs to satisfy NewAuthConfig's 32-character
+	// minimum; nothing signed with it is ever meant to verify against a real
+	// deployment's key.
+	testAuthSecret = "test-only-secret-not-for-prod-32"
+	testAuthTTL    = time.Hour
+	testAuthIssuer = "grand-erp-test"
 )
 
 // newApp wires the same graph config.Bootstrap does, minus Fiber, and empties the
@@ -103,6 +112,9 @@ func newApp(t *testing.T) *app {
 	validate := config.NewValidator()
 
 	roleRepository := repository.NewRoleRepository()
+	unitKerjaRepository := repository.NewUnitKerjaRepository()
+	userRepository := repository.NewUserRepository()
+	ruangRepository := repository.NewRuangRepository()
 	productRepository := repository.NewProductRepository()
 	pembelianRepository := repository.NewPembelianRepository()
 	kartuStokRepository := repository.NewKartuStokRepository()
@@ -137,7 +149,10 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate, repository.NewPelangganRepository(),
 		),
 		ruang: usecase.NewRuangUseCase(
-			testDB, log, validate, repository.NewRuangRepository(),
+			testDB, log, validate, ruangRepository, unitKerjaRepository,
+		),
+		unitKerja: usecase.NewUnitKerjaUseCase(
+			testDB, log, validate, unitKerjaRepository,
 		),
 		role: usecase.NewRoleUseCase(
 			testDB, log, validate, roleRepository,
@@ -147,15 +162,18 @@ func newApp(t *testing.T) *app {
 			kartuStokRepository,
 		),
 		user: usecase.NewUserUseCase(
-			testDB, log, validate, repository.NewUserRepository(), roleRepository,
+			testDB, log, validate, userRepository, roleRepository, unitKerjaRepository,
 		),
 		periode: usecase.NewPeriodeUseCase(
 			testDB, log, validate, periodeRepository,
 		),
+		auth: usecase.NewAuthUseCase(
+			testDB, log, validate, userRepository, testAuthSecret, testAuthTTL, testAuthIssuer,
+		),
 		pembelian: usecase.NewPembelianUseCase(
 			testDB, log, validate,
 			pembelianRepository, productRepository,
-			kartuStokRepository, counterRepository, periodeRepository,
+			kartuStokRepository, counterRepository, periodeRepository, ruangRepository,
 		),
 		susulan: usecase.NewPenerimaanSusulanUseCase(
 			testDB, log, validate,
@@ -170,7 +188,7 @@ func newApp(t *testing.T) *app {
 		mutasi: usecase.NewMutasiUseCase(
 			testDB, log, validate,
 			repository.NewMutasiRepository(), productRepository,
-			kartuStokRepository, counterRepository, periodeRepository,
+			kartuStokRepository, counterRepository, periodeRepository, ruangRepository,
 		),
 		pembayaran: usecase.NewPembayaranUtangUseCase(
 			testDB, log, validate,
@@ -240,8 +258,12 @@ func truncateMaster(t *testing.T) {
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.
 		"product_harga_jual", "product_satuan", "product",
-		"supplier", "pelanggan", "ekspedisi", "satuan", "ruang",
-		"user_role", "users", "role",
+		"supplier", "pelanggan", "ekspedisi", "satuan",
+		// ruang.id_unit_kerja references unit_kerja, so ruang has to go first.
+		// user_role.id_unit_kerja references unit_kerja too (isu #12 fase 3), so
+		// user_role now has to precede unit_kerja as well as users and role —
+		// unit_kerja.created_by references users, so it has to go before that.
+		"ruang", "user_role", "unit_kerja", "users", "role",
 	} {
 		if _, err := testDB.Exec("DELETE FROM " + table); err != nil {
 			t.Fatalf("clear %s: %v", table, err)

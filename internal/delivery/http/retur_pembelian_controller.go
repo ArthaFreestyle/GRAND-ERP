@@ -53,7 +53,9 @@ func (c *ReturPembelianController) Get(ctx fiber.Ctx) error {
 		return model.Invalid("id must be an integer")
 	}
 
-	response, err := c.UseCase.Get(ctx.Context(), &model.GetReturPembelianRequest{ID: id})
+	response, err := c.UseCase.Get(ctx.Context(), &model.GetReturPembelianRequest{
+		ID: id, AktifIDUnitKerja: aktifIDUnitKerja(ctx),
+	})
 	if err != nil {
 		return err
 	}
@@ -66,6 +68,8 @@ func (c *ReturPembelianController) List(ctx fiber.Ctx) error {
 	if err := ctx.Bind().Query(request); err != nil {
 		return model.Invalid("malformed query parameters")
 	}
+
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
 
 	responses, paging, err := c.UseCase.Search(ctx.Context(), request)
 	if err != nil {

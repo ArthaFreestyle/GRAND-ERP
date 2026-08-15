@@ -2,7 +2,7 @@
 
 Backend ERP dengan fokus pada persediaan, pembelian, dan penjualan. Ditulis dengan Go + Fiber v3 di atas PostgreSQL, tanpa ORM.
 
-> **Status: master data, pengguna, produk, siklus barang masuk-keluar dari supplier, dan perpindahan antar ruang berjalan.** Lima belas modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `ruang`, `role`, `user`, `product` (beserta `product_satuan` dan `product_harga_jual`), `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `pembayaran_utang`, `mutasi`, `periode` (tutup buku bulanan), dan `dokumen` (lampiran berkas lintas modul, sekaligus **job pertama di `cmd/worker`**). **`pembelian` adalah dokumen transaksi pertama, dan yang pertama menulis ke `kartu_stok`** — mesin posting dan generator nomor dokumennya dipakai ulang seluruh modul transaksi berikutnya. **`mutasi` yang pertama menulisnya ke dua arah sekaligus**, dan bersamanya datang bacaan saldo pertama atas `kartu_stok` ([stok per ruang](#stok-per-ruang-bacaan-pertama-atas-kartu-stok)) yang akan dipakai penjualan, pemakaian, dan stok opname. **Purchase order sengaja tidak ada**; penggantinya adalah [riwayat harga beli](#riwayat-harga-beli-pengganti-purchase-order), yang terkumpul sendiri dari pembelian yang sudah diposting. Penjualan, retur penjualan, piutang, pemakaian, dan stok opname skemanya sudah termigrasi tetapi belum punya lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
+> **Status: master data, pengguna, produk, siklus barang masuk-keluar dari supplier, dan perpindahan antar ruang berjalan.** Enam belas modul sudah punya kode Go lengkap dari migrasi sampai OpenAPI — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `unit_kerja`, `ruang`, `role`, `user`, `product` (beserta `product_satuan` dan `product_harga_jual`), `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `pembayaran_utang`, `mutasi`, `periode` (tutup buku bulanan), dan `dokumen` (lampiran berkas lintas modul, sekaligus **job pertama di `cmd/worker`**). **Isu #12 (`unit_kerja`, wewenang bertempat) punya kelima fase wajibnya plus bagian opsional fase 6** — lokasi organisasi yang jadi induk setiap `ruang`, `user_role` membawa `id_unit_kerja` sehingga satu role bisa dipegang di lebih dari satu unit, sebuah sesi mengotorisasi sebagai satu grant aktif lewat `POST /api/v1/auth/switch-context`, `id_ruang` pada `pembelian`/`mutasi` divalidasi terhadap unit aktif itu, dan bacaan (`Get`/`List` pada `ruang`, `pembelian`, `penerimaan-susulan`, `retur-pembelian`, `mutasi`, serta `GET /product/{id}/stok`) disaring oleh unit aktif yang sama. Lihat [catatan di bawah](#status--roadmap). **`pembelian` adalah dokumen transaksi pertama, dan yang pertama menulis ke `kartu_stok`** — mesin posting dan generator nomor dokumennya dipakai ulang seluruh modul transaksi berikutnya. **`mutasi` yang pertama menulisnya ke dua arah sekaligus**, dan bersamanya datang bacaan saldo pertama atas `kartu_stok` ([stok per ruang](#stok-per-ruang-bacaan-pertama-atas-kartu-stok)) yang akan dipakai penjualan, pemakaian, dan stok opname. **Purchase order sengaja tidak ada**; penggantinya adalah [riwayat harga beli](#riwayat-harga-beli-pengganti-purchase-order), yang terkumpul sendiri dari pembelian yang sudah diposting. Penjualan, retur penjualan, piutang, pemakaian, dan stok opname skemanya sudah termigrasi tetapi belum punya lapisan Go. Lihat [Status & Roadmap](#status--roadmap).
 
 > [!WARNING]
 > Seeder memasang superadmin bawaan **`admin` / `admin12345`**, password yang tercatat di repositori ini. Itu kredensial untuk mesin sendiri. Ganti atau nonaktifkan sebelum server bisa dijangkau orang lain — lihat [Autentikasi](#autentikasi).
@@ -816,7 +816,38 @@ curl -s http://127.0.0.1:3000/api/v1/supplier -H "Authorization: Bearer $TOKEN"
 >
 > Umur token karena itu adalah satu-satunya batas jendela tersebut. Defaultnya 60 menit (`JWT_TTL_MINUTES`), dan memperpanjangnya berarti memperpanjang jendela itu. Kalau pencabutan seketika dibutuhkan, sesi harus pindah ke Redis — Redis sudah terhubung tapi belum dipakai.
 
-Role ikut di dalam token, jadi otorisasi tidak menyentuh database. Efek sampingnya: **role yang diberikan atau dicabut baru berlaku pada login berikutnya.** Hanya role `is_aktif` yang masuk token, jadi mempensiunkan sebuah role menghentikannya memberi izin pada login berikutnya meski penugasannya masih tercatat.
+Grant ikut di dalam token, jadi otorisasi tidak menyentuh database. Efek sampingnya: **grant yang diberikan atau dicabut baru berlaku pada login berikutnya** (atau lewat `switch-context`, lihat di bawah). Hanya grant *usable* yang masuk token — rolenya `is_aktif`, dan kalau grant-nya menyebut unit, unitnya juga `is_aktif` — jadi mempensiunkan role atau unit menghentikannya memberi izin pada login berikutnya meski penugasannya masih tercatat.
+
+### Konteks aktif per sesi (isu #12 fase 4)
+
+Sejak wewenang bertempat ada (fase 3), satu user bisa memegang lebih dari satu grant sekaligus — kasir di outlet A, inventaris di outlet B. Sebuah token karena itu mengotorisasi sebagai **satu grant aktif**, bukan gabungan seluruhnya:
+
+- **Memegang tepat satu grant usable memilihkannya otomatis.** Tidak ada langkah tambahan untuk kasus paling umum — satu user, satu peran, satu tempat.
+- **Memegang lebih dari satu grant menerbitkan token tanpa konteks aktif** (`aktif: null`). Dengan grant bertempat, tidak ada default yang aman dipilihkan diam-diam — memilihkan salah satunya begitu saja adalah cara termudah membuat orang tidak sadar sedang bertindak sebagai apa, di outlet mana. Token seperti ini **tidak mengotorisasi apa pun**: setiap endpoint berrole guard menjawab 403, termasuk yang sebenarnya dipegang pemanggil lewat salah satu grant-nya.
+- **`POST /api/v1/auth/switch-context`** `{"id_user_role": 12}` menukar token dengan satu yang beraksi sebagai grant itu. `id_user_role` datang dari `grants[].id_user_role` pada respons login atau `GET /auth/me` — id baris `user_role` itu sendiri, bukan id role.
+- **Grant-nya diperiksa ulang ke database saat itu juga**, bukan dipercaya dari klaim token pemanggil — satu-satunya titik di seluruh desain ini di mana kebasian token dibiarkan berpengaruh. Grant yang bukan milik pemanggil, yang rolenya sudah dipensiunkan, atau yang unitnya sudah dipensiunkan, semuanya menjawab **403 yang sama** — membedakannya memberi jalan menebak id grant milik orang lain.
+- **Token lama tetap sah.** Menukar konteks menerbitkan token baru; ia tidak — dan tidak bisa — mencabut yang lama. Konteks aktif adalah kendali kejelasan dan *least privilege*, bukan batas keamanan terhadap pemegang tokennya sendiri. Kalau jendela `JWT_TTL_MINUTES` dianggap terlalu lebar, itu yang disetel — bukan menambah blacklist Redis, yang mengembalikan lookup per request yang justru jadi alasan JWT dipilih.
+- **Ini bukan `RequireRole` atau tabel rute yang berubah.** `switch-context` dan `auth/me` tidak berrole guard karena sesi tanpa konteks aktif memang tidak lolos `RequireRole` apa pun dengan sendirinya — `Session.HasRole` menjawab `false` kalau `Aktif` nil. Setiap route guard di `route.go` persis seperti sebelum fase 4.
+
+### `id_ruang` divalidasi terhadap unit aktif (isu #12 fase 5)
+
+`unit_kerja → ruang` itu satu-ke-banyak — satu outlet bisa punya gudang dan etalase sekaligus — jadi mengetahui unit aktif saja tidak cukup untuk menyimpulkan ruang mana yang dimaksud. Klien tetap memilih; yang berubah, `id_ruang` yang dikirim **divalidasi**, bukan sekadar dipakai apa adanya:
+
+- **Hanya jalur tulis.** `POST /api/v1/pembelian` (field `id_ruang`) dan `POST`/`PATCH /api/v1/mutasi` (field `id_ruang_asal`) — dua-duanya satu-satunya tempat `id_ruang` datang langsung dari body. `penerimaan-susulan` dan `retur-pembelian` menyalin `id_ruang` dari `pembelian` induknya, jadi sudah tervalidasi lewat pembelian itu sendiri. Bacaan (list/get) tidak ikut disaring **di fase ini** — direkomendasikan begitu oleh isu ini untuk fase pertama, dan menutup lubang yang sebenarnya tanpa menyentuh belasan endpoint list. Fase 6 di bawah membangun penyaringan bacaan itu.
+- **`mutasi` hanya memeriksa `id_ruang_asal`, tidak pernah `id_ruang_tujuan`.** Mutasi antar unit sudah diputuskan boleh (fase 1), dan konteks aktif selalu satu unit — mewajibkan kedua ruang cocok dengan unit itu berarti mutasi lintas-unit jadi mustahil, membalik keputusan itu. Yang diperiksa adalah wewenang atas ruang tempat barang dinyatakan **keluar**; ke mana barang itu pergi bukan klaim atas wewenang pemanggil sendiri.
+- **Konteks aktif global (grant tanpa unit, bentuk `SUPERADMIN`) tidak dibatasi sama sekali.** `id_unit_kerja` kosong berarti berlaku di seluruh unit, jadi tidak ada yang perlu dicocokkan.
+- **Di luar unit aktif → 403**, bukan 400: ini soal wewenang, bukan format data yang salah.
+- `PATCH /api/v1/mutasi/{id}` hanya memeriksa ulang saat `id_ruang_asal` benar-benar dikirim di body. `ruang` sendiri tidak punya `PATCH`, jadi unitnya tidak mungkin berubah sejak dibuat — ruang yang tersimpan dan tidak disentuh patch tidak perlu diperiksa lagi.
+- **Ini menutup lima fase yang wajib dibangun.** Fase 6 sendiri dibagi tiga bagian opsional oleh isu ini ("baru kalau terbukti perlu") — penyaringan bacaan, `users.id_ruang_default`, dan peran-sebagai-snapshot di dokumen. Hanya yang pertama diminta dan dibangun; lihat bagian berikutnya.
+
+### Bacaan disaring per unit aktif (isu #12 fase 6)
+
+Bagian opsional dari fase 6 yang diminta dan dibangun; dua lainnya (`users.id_ruang_default`, peran-sebagai-snapshot) tetap ditunda. `Get` dan `List` pada `ruang`, `pembelian`, `penerimaan-susulan`, `retur-pembelian`, dan `mutasi`, plus `GET /product/{id}/stok`, kini disaring oleh unit_kerja aktif sesi pemanggil — konteks aktif global tidak dibatasi, seperti pada fase 5.
+
+- **Bentuk penyaringannya beda menurut bentuk bacaannya.** Sebuah `Get` di luar unit aktif menjawab **404**, bukan 403 — perilaku yang sama seperti id yang memang tidak ada, supaya jawabannya tidak diam-diam mengonfirmasi dokumennya benar ada. Sebuah `List` (dan `stok`, yang berbentuk daftar) diam-diam **melewati** baris di luar unit, tanpa error sama sekali — tidak ada id untuk dijawab 404, dan tidak ada apa pun untuk dikonfirmasi atau disangkal.
+- **`mutasi` mewarisi asimetri yang sama dari fase 5, di sisi bacaan.** Hanya `id_ruang_asal` yang diperiksa; `id_ruang_tujuan` tidak pernah dibatasi. Dokumen yang tujuannya di unit lain tetap terlihat penuh bagi siapa pun yang memegang ruang asalnya — sebaliknya, pemanggil yang hanya memegang ruang tujuan tidak bisa melihatnya sama sekali, meski barangnya menuju ke sana. Ini pilihan yang disengaja: yang menentukan visibilitas adalah ruang yang wewenangnya sedang diklaim pemanggil, bukan setiap ruang yang disentuh dokumen.
+- **`penerimaan-susulan` dan `retur-pembelian` tidak punya `id_ruang` sendiri untuk diperiksa** — keduanya menyalin ruang dari `pembelian` induknya — tapi bacaannya tetap perlu tahu unit ruang itu, jadi query baca kedua modul ikut menyertakan `ruang.id_unit_kerja` lewat join yang sudah ada.
+- **`GET /product/{id}/stok` bukan `Get`, jadi tidak ada 404 untuk ruang yang di luar unit** — sama seperti `List`, baris ruangnya cuma dilewati.
 
 ### Superadmin pertama
 
@@ -839,11 +870,11 @@ Atau buat superadmin sungguhan lalu nonaktifkan yang bawaan dengan `{"is_aktif":
 
 ### Otorisasi
 
-Membaca terbuka untuk siapa pun yang sudah login — operator yang tidak bisa melihat supplier tidak bisa bekerja, apa pun rolenya. Menulis dibagi menurut pemilik datanya. `SUPERADMIN` boleh apa saja.
+Membaca terbuka untuk siapa pun yang sudah login — operator yang tidak bisa melihat supplier tidak bisa bekerja, apa pun rolenya. Ini soal route guard; sejak isu #12 fase 6, sebagian bacaan (lihat "Bacaan disaring per unit aktif" di atas) juga disaring lebih lanjut oleh unit_kerja aktif sesi pemanggil. Menulis dibagi menurut pemilik datanya. `SUPERADMIN` boleh apa saja.
 
 | Resource | Baca | Tulis |
 |---|---|---|
-| `product`, `satuan`, `ruang`, `ekspedisi`, `supplier` | semua yang login | `SUPERADMIN`, `INVENTARIS` |
+| `product`, `satuan`, `unit_kerja`, `ruang`, `ekspedisi`, `supplier` | semua yang login | `SUPERADMIN`, `INVENTARIS` |
 | `pelanggan` | semua yang login | `SUPERADMIN`, `CASHIER` |
 | `dokumen` (lampiran) | semua yang login | semua yang login |
 | `pembelian`, `penerimaan_susulan`, `retur_pembelian` — input, edit, ajukan | semua yang login | `SUPERADMIN`, `INVENTARIS` |
@@ -880,24 +911,33 @@ Migrasi `000010` membetulkan bentuk lama, bukan sekadar menambah kolom:
 - Keunikan `username`, `email`, dan `role.nama` tidak peka huruf besar-kecil, lewat indeks `lower(...)` seperti kode master. `email` nullable, jadi banyak user tanpa email tetap boleh.
 - `role` dapat `is_aktif` dan jejak perubahan; `user_role` dapat jejak kapan dan oleh siapa role diberikan.
 
-Pemberian dan pencabutan role lewat `role_ids` pada `POST`/`PATCH /api/v1/user`, bukan sub-resource tersendiri — supaya baris user dan pemberian rolenya berada dalam satu transaksi. `role_ids` **mengganti seluruh himpunan**:
+Pemberian dan pencabutan lewat `grants` pada `POST`/`PATCH /api/v1/user`, bukan sub-resource tersendiri — supaya baris user dan pemberian grant-nya berada dalam satu transaksi. `grants` **mengganti seluruh himpunan**:
 
 | Body | Artinya |
 |---|---|
-| tidak dikirim | role dibiarkan apa adanya |
-| `[]` | cabut semua role |
-| `[1, 3]` | user berakhir dengan tepat role 1 dan 3 |
-| `null` | ditolak 400 — `[]` sudah berarti "tanpa role" |
+| tidak dikirim | grant dibiarkan apa adanya |
+| `[]` | cabut semua grant |
+| `[{"id_role":1}, {"id_role":3,"id_unit_kerja":2}]` | user berakhir dengan tepat grant yang disebut |
+| `null` | ditolak 400 — `[]` sudah berarti "tanpa grant" |
 
-Beberapa hal yang tidak terlihat dari daftar endpoint:
+**Isu #12 fase 3 — wewenang bertempat.** Sejak migrasi `000020`, satu grant bukan lagi cuma "role apa" tapi "role apa, di unit mana": `user_role.id_unit_kerja` menunjuk `unit_kerja`, dan `id_unit_kerja` kosong (`null`) berarti role itu berlaku di **seluruh** unit — bentuk grant `SUPERADMIN` bawaan. Konsekuensinya:
+
+- **Role yang sama boleh dipegang di lebih dari satu unit**, sebagai dua baris `user_role` yang terpisah — "INVENTARIS di outlet A" dan "INVENTARIS di outlet B" bukan duplikat, dan keduanya boleh muncul sekaligus di `roles` seorang user.
+- **Dua indeks unik, bukan satu**, karena indeks unik biasa tidak membatasi `NULL`: `user_role_grant_uidx` mengunci `(user_id, role_id, id_unit_kerja)`, dan `user_role_grant_global_uidx` — indeks parsial `WHERE id_unit_kerja IS NULL` — menutup celah yang pertama sendirian tidak bisa: tanpanya, grant lintas-unit yang sama bisa disisipkan berkali-kali untuk pasangan yang sama.
+- **Diff-nya NULL-safe.** Mengganti himpunan grant membandingkan `(role_id, id_unit_kerja)` lewat `IS NOT DISTINCT FROM`, bukan `<>` biasa — PostgreSQL menganggap `NULL <> NULL` sebagai `NULL`, bukan benar, jadi perbandingan naif akan gagal mencabut grant lintas-unit yang seharusnya dicabut.
+- **Konteks aktif per sesi** (fase 4, lihat [bagian Autentikasi](#autentikasi)): sebuah token kini mengotorisasi sebagai satu grant aktif, dipilih otomatis kalau cuma satu, atau lewat `POST /api/v1/auth/switch-context` kalau lebih.
+- **`id_ruang` divalidasi terhadap unit aktif** (fase 5, lihat bagian yang sama): `pembelian` dan `mutasi` menolak 403 kalau ruangnya di luar unit_kerja aktif — kelima fase wajib isu #12 selesai di sini.
+- **Bacaan disaring per unit aktif** (fase 6, opsional dan diminta terpisah): `Get`/`List` pada `ruang`, `pembelian`, `penerimaan-susulan`, `retur-pembelian`, `mutasi`, dan `GET /product/{id}/stok` disaring oleh unit_kerja aktif yang sama — 404 pada `Get`, baris dilewati diam-diam pada `List`/`stok`. `users.id_ruang_default` dan peran-sebagai-snapshot tetap ditunda.
+
+Beberapa hal lain yang tidak terlihat dari daftar endpoint:
 
 - **Password di-hash bcrypt** di lapisan usecase, tidak pernah disimpan, dicatat di log, atau dikembalikan. `UserResponse` sama sekali tidak punya field password, jadi kebocoran tidak mungkin secara struktural — bukan soal ingat atau tidak.
-- **Role yang tetap dipegang tidak dicabut lalu diberikan ulang**, sehingga `user_role.created_at` tetap mencatat kapan pemberian itu benar-benar dimulai.
-- Body yang **hanya** berisi `role_ids` tetap menggerakkan `updated_at` user — itu tetap perubahan pada user tersebut.
-- Id role yang tidak ada **atau sudah dipensiunkan** ditolak 400. Foreign key tidak bisa membedakan role mati dari role hidup, jadi pengecekannya di usecase.
-- Daftar role seorang user **termasuk role yang dipensiunkan setelah diberikan** — pemberiannya masih nyata dan masih perlu dicabut. `is_aktif` di dalam `roles` yang membedakannya.
+- **Grant yang tetap dipegang tidak dicabut lalu diberikan ulang**, sehingga `user_role.created_at` tetap mencatat kapan pemberian itu benar-benar dimulai.
+- Body yang **hanya** berisi `grants` tetap menggerakkan `updated_at` user — itu tetap perubahan pada user tersebut.
+- `id_role` yang tidak ada **atau sudah dipensiunkan** ditolak 400, dan begitu juga `id_unit_kerja`. Foreign key tidak bisa membedakan baris mati dari baris hidup, jadi pengecekannya di usecase — dan keduanya diperiksa terpisah, jadi pesannya menyebut yang mana yang salah.
+- Daftar grant seorang user **termasuk yang rolenya, atau unitnya, dipensiunkan setelah diberikan** — pemberiannya masih nyata dan masih perlu dicabut. `is_aktif` di dalam `roles` yang membedakannya.
 - Filter `role_id` di endpoint list memakai `EXISTS`, bukan join: join akan mengembalikan satu baris per role dan melipatgandakan halaman untuk user yang punya beberapa role.
-- **`user_role` satu-satunya tabel yang boleh `DELETE`.** Tabel jembatan ini tidak dirujuk tabel transaksi mana pun, jadi mencabut role tidak memutus foreign key dan tidak menghapus jejak dokumen — `created_by` di dokumen menunjuk `users`, bukan `user_role`.
+- **`user_role` satu-satunya tabel yang boleh `DELETE`.** Tabel jembatan ini tidak dirujuk tabel transaksi mana pun, jadi mencabut grant tidak memutus foreign key dan tidak menghapus jejak dokumen — `created_by` di dokumen menunjuk `users`, bukan `user_role`.
 - **Jangan ganti nama role yang sudah dipakai.** Nama role akan dipakai pengecekan izin begitu middleware otorisasi dibangun, dan tidak ada constraint database yang bisa mencegah nama diganti. Pensiunkan dengan `is_aktif: false` lalu buat role baru.
 
 ## Model data persediaan
@@ -938,6 +978,7 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `GET` | `/health` | Liveness probe |
 | `POST` | `/api/v1/auth/login` | Tukar kredensial dengan token — satu-satunya `/api/v1` tanpa token |
 | `GET` | `/api/v1/auth/me` | Sesi yang sedang berlaku menurut token |
+| `POST` | `/api/v1/auth/switch-context` | Tukar token dengan yang beraksi sebagai satu grant tertentu — tanpa role guard |
 | `POST` | `/api/v1/dokumen` | Unggah lampiran (`multipart/form-data`, field `berkas`); barisnya lahir yatim |
 | `GET` | `/api/v1/dokumen` | Lampiran satu dokumen (`ref_table` + `ref_id`), atau berkas yatim milik sendiri |
 | `GET` | `/api/v1/dokumen/{id}` | Unduh isinya — selalu `attachment`, tetap butuh token |
@@ -952,7 +993,7 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `GET` | `/api/v1/product/{id}/riwayat-beli` | Harga beli terakhir per supplier — `page`, `size`, `id_supplier` |
 | `GET` | `/api/v1/product/{id}/stok` | Saldo dan nilai per ruang; tanpa paginasi |
 | `GET` | `/api/v1/pembelian` | List — `page`, `size`, `search`, `status`, `status_penerimaan`, `id_supplier`, `tanggal_dari`, `tanggal_sampai` |
-| `POST` | `/api/v1/pembelian` | Buat draft beserta barisnya; nomor digenerate server |
+| `POST` | `/api/v1/pembelian` | Buat draft beserta barisnya; nomor digenerate server; `id_ruang` divalidasi terhadap unit aktif |
 | `GET` | `/api/v1/pembelian/{id}` | Detail beserta baris, selisih, dan alokasi ongkir |
 | `PATCH` | `/api/v1/pembelian/{id}` | Ubah header — hanya saat `DRAFT` |
 | `PUT` | `/api/v1/pembelian/{id}/detail` | Ganti seluruh baris — hanya saat `DRAFT` |
@@ -990,9 +1031,9 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `POST` | `/api/v1/pembayaran-utang/{id}/cair` | Giro cair — di sinilah utang giro berkurang — `SUPERADMIN` |
 | `POST` | `/api/v1/pembayaran-utang/{id}/tolak-giro` | Giro ditolak bank; utangnya tidak pernah berkurang — `SUPERADMIN` |
 | `GET` | `/api/v1/mutasi` | List — `page`, `size`, `search`, `status`, `id_ruang_asal`, `id_ruang_tujuan`, `tanggal_dari`, `tanggal_sampai`, `terlama_dulu` |
-| `POST` | `/api/v1/mutasi` | Buat draft; `detail` boleh kosong, kedua ruang wajib berbeda |
+| `POST` | `/api/v1/mutasi` | Buat draft; `detail` boleh kosong, kedua ruang wajib berbeda; `id_ruang_asal` divalidasi terhadap unit aktif |
 | `GET` | `/api/v1/mutasi/{id}` | Detail beserta barisnya |
-| `PATCH` | `/api/v1/mutasi/{id}` | Ubah header termasuk kedua ruang — hanya saat `DRAFT` |
+| `PATCH` | `/api/v1/mutasi/{id}` | Ubah header termasuk kedua ruang — hanya saat `DRAFT`; `id_ruang_asal` baru divalidasi terhadap unit aktif kalau dikirim |
 | `PUT` | `/api/v1/mutasi/{id}/detail` | Ganti seluruh baris — hanya saat `DRAFT` |
 | `POST` | `/api/v1/mutasi/{id}/posting` | Tulis 2×N baris `kartu_stok`, set `POSTED` — `SUPERADMIN` |
 | `POST` | `/api/v1/mutasi/{id}/batal` | Baris pembalik ke dua arah, wajib `alasan_batal` — `SUPERADMIN` |
@@ -1017,19 +1058,23 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `GET` | `/api/v1/periode/{tahun}/{bulan}` | Status satu bulan; bulan tanpa baris menjawab `BUKA` sintetis |
 | `POST` | `/api/v1/periode/{tahun}/{bulan}/tutup` | Tutup buku bulan itu |
 | `POST` | `/api/v1/periode/{tahun}/{bulan}/buka` | Buka kembali |
+| `GET` | `/api/v1/unit-kerja` | List — `page`, `size`, `search`, `is_aktif` |
+| `POST` | `/api/v1/unit-kerja` | Create |
+| `GET` | `/api/v1/unit-kerja/{id}` | Get by id |
+| `PATCH` | `/api/v1/unit-kerja/{id}` | Update parsial |
 | `GET` | `/api/v1/ruang` | List — `page`, `size`, `search`, `is_aktif` |
-| `POST` | `/api/v1/ruang` | Create |
+| `POST` | `/api/v1/ruang` | Create; `id_unit_kerja` wajib dan harus unit yang `is_aktif` |
 | `GET` | `/api/v1/ruang/{id}` | Get by id |
 | `GET` | `/api/v1/role` | List — `page`, `size`, `search`, `is_aktif` |
 | `POST` | `/api/v1/role` | Create |
 | `GET` | `/api/v1/role/{id}` | Get by id |
 | `PATCH` | `/api/v1/role/{id}` | Update parsial |
 | `GET` | `/api/v1/user` | List — `page`, `size`, `search`, `is_aktif`, `role_id` |
-| `POST` | `/api/v1/user` | Create, sekalian memberi role |
+| `POST` | `/api/v1/user` | Create, sekalian memberi grant (role + unit_kerja opsional) |
 | `GET` | `/api/v1/user/{id}` | Get by id |
-| `PATCH` | `/api/v1/user/{id}` | Update parsial, termasuk mengatur ulang role |
+| `PATCH` | `/api/v1/user/{id}` | Update parsial, termasuk mengatur ulang grant |
 
-`ruang` belum punya PATCH. `page` default 1, `size` default 20 dengan batas 100. **Satu-satunya `DELETE` ada di `dokumen`, dan itu pun soft delete** — barisnya bertahan dengan `deleted_at` terisi, yang hilang cuma berkasnya. Selebihnya tidak ada penghapusan: master data dipensiunkan dengan `is_aktif = false`, dokumen yang sudah diposting dibatalkan dengan baris pembalik.
+`ruang` belum punya PATCH, jadi unitnya tidak bisa diganti lewat API. `page` default 1, `size` default 20 dengan batas 100. **Satu-satunya `DELETE` ada di `dokumen`, dan itu pun soft delete** — barisnya bertahan dengan `deleted_at` terisi, yang hilang cuma berkasnya. Selebihnya tidak ada penghapusan: master data dipensiunkan dengan `is_aktif = false`, dokumen yang sudah diposting dibatalkan dengan baris pembalik.
 
 Semua respons memakai satu amplop, `model.WebResponse[T]`:
 
@@ -1061,10 +1106,15 @@ Sudah ada:
 - **Modul `periode`** (isu #6): tutup buku bulanan yang menolak posting ke bulan tertutup untuk setiap modul yang menulis `kartu_stok`, sekarang maupun nanti — dengan advisory lock yang membuat menutup dan memposting tidak bisa saling menyalip, pembukaan kembali yang meninggalkan jejaknya sendiri, dan pembalikan yang tetap bisa dibukukan di periode berjalan
 - **Modul `mutasi`** (isu #7): perpindahan antar ruang sebagai satu dokumen yang menulis dua baris `kartu_stok` per baris detail, dengan nilai yang masuk ke ruang tujuan persis sebesar yang tercatat keluar dari ruang asal — sehingga total nilai persediaan tidak bergerak hanya karena barang pindah rak — alur tanpa `DIAJUKAN`, dan penguncian saldo di muka dalam urutan kanonik yang membuat dua mutasi berlawanan arah tidak bisa saling deadlock
 - **Bacaan saldo `kartu_stok`** (`SaldoTerakhir`, `SaldoBatch`, `SaldoPerRuang`) beserta `GET /product/{id}/stok` — yang pertama membaca kembali kartu stok, dan dipakai ulang penjualan, pemakaian, serta stok opname
-- Tujuh modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `role`, `user` (create/get/list/patch) dan `ruang` (create/get/list)
-- User dengan banyak role, `role_ids` yang mengganti seluruh himpunan dalam satu transaksi, password ter-hash bcrypt
+- **Modul `unit_kerja`** (isu #12 fase 1–2): lokasi organisasi tempat setiap `ruang` bernaung, `id_unit_kerja` wajib dan divalidasi aktif saat sebuah ruang dibuat, dan tiga keputusan yang ditulis sebelum kodenya — seri `document_counter` per unit (implementasinya ditunda), `periode` tetap global, dan `mutasi` antar unit diperbolehkan
+- **Wewenang bertempat** (isu #12 fase 3): `user_role.id_unit_kerja`, dua indeks unik (satu penuh, satu parsial untuk grant lintas-unit), `ReplaceRoles` yang mendiff pasangan `(role, unit)` dengan `IS NOT DISTINCT FROM`, dan `grants` menggantikan `role_ids` di `POST`/`PATCH /api/v1/user`
+- **Konteks aktif per sesi** (isu #12 fase 4): sebuah token mengotorisasi sebagai satu grant, dipilih otomatis kalau tepat satu dipegang, lewat `POST /api/v1/auth/switch-context` kalau lebih. Grant-nya diperiksa ulang ke database saat menukar — bukan dipercaya dari token pemanggil — dan setiap kegagalan (bukan milik pemanggil, role pensiun, unit pensiun, tidak ada) menjawab 403 yang sama. Token lama tetap sah sampai kedaluwarsa; menukar konteks tidak mencabutnya. `RequireRole` dan `route.go` tidak berubah satu baris pun — `Session.HasRole` yang menjawab `false` saat konteks belum dipilih sudah cukup
+- **`id_ruang` divalidasi terhadap unit aktif** (isu #12 fase 5, penutup lima fase wajib): `POST /api/v1/pembelian` dan `POST`/`PATCH /api/v1/mutasi` (hanya `id_ruang_asal`) menolak 403 kalau ruangnya di luar unit_kerja aktif sesi pemanggil. Konteks global (tanpa unit) tidak dibatasi; `id_ruang_tujuan` pada `mutasi` tidak pernah dibatasi karena mutasi antar unit sengaja diperbolehkan; bacaan sengaja tidak ikut disaring di fase ini — rekomendasi isu ini untuk fase pertama
+- **Bacaan disaring per unit aktif** (isu #12 fase 6, bagian opsional yang diminta): `Get`/`List` pada `ruang`, `pembelian`, `penerimaan-susulan`, `retur-pembelian`, `mutasi`, dan `GET /product/{id}/stok` disaring oleh unit_kerja aktif sesi pemanggil — `Get` menjawab 404 di luar unit, `List`/`stok` melewati baris di luar unit tanpa error. `mutasi` mewarisi asimetri fase 5: hanya `id_ruang_asal` diperiksa. `users.id_ruang_default` dan peran-sebagai-snapshot di dokumen tetap ditunda, sesuai isu ini
+- Delapan modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `unit_kerja`, `role`, `user` (create/get/list/patch) dan `ruang` (create/get/list)
+- User dengan banyak grant (role + unit_kerja opsional), `grants` yang mengganti seluruh himpunan dalam satu transaksi dengan diff `NULL`-safe, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
-- Autentikasi bearer JWT, otorisasi berbasis role per route, dan superadmin bawaan dari seeder
+- Autentikasi bearer JWT, otorisasi berbasis role per route, konteks aktif per sesi dengan `switch-context` (isu #12 fase 4), `id_ruang` divalidasi terhadap unit aktif (fase 5), bacaan disaring per unit aktif (fase 6), dan superadmin bawaan dari seeder
 - Modul `product` beserta satuan konversi dan harga jual berversi, dengan satuan dasar otomatis dan periode harga yang tidak boleh tumpang tindih
 - Wiring aplikasi penuh, graceful shutdown, penanganan error terpusat
 - Test: unit test untuk `Optional`, validator, `EscapeLike`, dan amplop response; test usecase melawan PostgreSQL sungguhan

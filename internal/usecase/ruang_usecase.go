@@ -22,6 +22,11 @@ type RuangUseCase struct {
 	Log             *logrus.Logger
 	Validate        *validator.Validate
 	RuangRepository *repository.RuangRepository
+	// UnitKerjaRepository is borrowed to validate id_unit_kerja is an active
+	// unit before Create writes — isu #12 fase 2. The same reasoning
+	// RoleRepository.CountActiveByIDs applies to role grants: the foreign key
+	// alone cannot tell a retired unit from a live one.
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewRuangUseCase(
@@ -29,12 +34,14 @@ func NewRuangUseCase(
 	log *logrus.Logger,
 	validate *validator.Validate,
 	ruangRepository *repository.RuangRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *RuangUseCase {
 	return &RuangUseCase{
-		DB:              db,
-		Log:             log,
-		Validate:        validate,
-		RuangRepository: ruangRepository,
+		DB:                  db,
+		Log:                 log,
+		Validate:            validate,
+		RuangRepository:     ruangRepository,
+		UnitKerjaRepository: unitKerjaRepository,
 	}
 }
 
@@ -62,14 +69,29 @@ func (c *RuangUseCase) Create(ctx context.Context, request *model.CreateRuangReq
 		}
 	}
 
+	// FindByID doubles as the active-unit check: the foreign key alone cannot
+	// tell a retired unit from one that never existed, and its message names a
+	// constraint rather than the field — checked here for the same reason role
+	// ids are checked before granting. It also supplies the unit's name, which
+	// the response needs and Create's own RETURNING (id only) does not provide.
+	unit, err := c.UnitKerjaRepository.FindByID(ctx, tx, request.IDUnitKerja)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	if err != nil || !unit.IsAktif {
+		return nil, model.Invalid("id_unit_kerja is not a known active unit kerja")
+	}
+
 	ruang := &entity.Ruang{
-		Kode:      request.Kode,
-		NamaRuang: request.NamaRuang,
-		IsAktif:   true,
+		Kode:          request.Kode,
+		NamaRuang:     request.NamaRuang,
+		IsAktif:       true,
+		IDUnitKerja:   request.IDUnitKerja,
+		NamaUnitKerja: unit.Nama,
 	}
 
 	if err := c.RuangRepository.Create(ctx, tx, ruang); err != nil {
-		return nil, err
+		return nil, invalidOnForeignKey(err, "id_unit_kerja is not a known active unit kerja")
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -93,6 +115,13 @@ func (c *RuangUseCase) Get(ctx context.Context, request *model.GetRuangRequest) 
 		return nil, err
 	}
 
+	// isu #12 fase 6: a room outside the caller's active unit answers 404, the
+	// same as one that does not exist — a scoped read must not confirm the
+	// room is there.
+	if diLuarUnitAktif(ruang.IDUnitKerja, request.AktifIDUnitKerja) {
+		return nil, model.NotFound("ruang not found")
+	}
+
 	return converter.RuangToResponse(ruang), nil
 }
 
@@ -104,7 +133,8 @@ func (c *RuangUseCase) Search(ctx context.Context, request *model.ListRuangReque
 	}
 
 	list, total, err := c.RuangRepository.Search(
-		ctx, c.DB, request.Search, request.IsAktif, request.Size, request.Offset(),
+		ctx, c.DB, request.Search, request.IsAktif, request.AktifIDUnitKerja,
+		request.Size, request.Offset(),
 	)
 	if err != nil {
 		return nil, nil, err

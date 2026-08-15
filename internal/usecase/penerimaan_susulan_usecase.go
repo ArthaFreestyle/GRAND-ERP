@@ -127,7 +127,7 @@ func (c *PenerimaanSusulanUseCase) Create(ctx context.Context, request *model.Cr
 
 	// Re-read so the response carries the stored rows and their joined names rather
 	// than what was sent.
-	return c.detail(ctx, c.DB, susulan.ID)
+	return c.detail(ctx, c.DB, susulan.ID, nil)
 }
 
 func (c *PenerimaanSusulanUseCase) Get(ctx context.Context, request *model.GetPenerimaanSusulanRequest) (*model.PenerimaanSusulanResponse, error) {
@@ -135,7 +135,7 @@ func (c *PenerimaanSusulanUseCase) Get(ctx context.Context, request *model.GetPe
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, request.AktifIDUnitKerja)
 }
 
 func (c *PenerimaanSusulanUseCase) Search(ctx context.Context, request *model.ListPenerimaanSusulanRequest) ([]model.PenerimaanSusulanResponse, *model.PageMetadata, error) {
@@ -148,7 +148,7 @@ func (c *PenerimaanSusulanUseCase) Search(ctx context.Context, request *model.Li
 	list, total, err := c.SusulanRepository.Search(
 		ctx, c.DB,
 		request.Search, request.Status, request.IDPembelian,
-		request.TanggalDari, request.TanggalSampai,
+		request.TanggalDari, request.TanggalSampai, request.AktifIDUnitKerja,
 		request.Size, request.Offset(),
 	)
 	if err != nil {
@@ -207,7 +207,7 @@ func (c *PenerimaanSusulanUseCase) Update(ctx context.Context, request *model.Up
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // ReplaceDetail swaps the whole line set of a DRAFT.
@@ -250,7 +250,7 @@ func (c *PenerimaanSusulanUseCase) ReplaceDetail(ctx context.Context, request *m
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 func (c *PenerimaanSusulanUseCase) Ajukan(ctx context.Context, request *model.AjukanPenerimaanSusulanRequest) (*model.PenerimaanSusulanResponse, error) {
@@ -287,7 +287,7 @@ func (c *PenerimaanSusulanUseCase) Ajukan(ctx context.Context, request *model.Aj
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 func (c *PenerimaanSusulanUseCase) Tolak(ctx context.Context, request *model.TolakPenerimaanSusulanRequest) (*model.PenerimaanSusulanResponse, error) {
@@ -315,7 +315,7 @@ func (c *PenerimaanSusulanUseCase) Tolak(ctx context.Context, request *model.Tol
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Posting writes the goods into stock and closes the document.
@@ -420,7 +420,7 @@ func (c *PenerimaanSusulanUseCase) Posting(ctx context.Context, request *model.P
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Batal voids a posted follow-up receipt by appending a reversing row for every
@@ -508,15 +508,22 @@ func (c *PenerimaanSusulanUseCase) Batal(ctx context.Context, request *model.Bat
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // detail loads a header and its lines. Two queries, independent of how many lines
 // come back.
-func (c *PenerimaanSusulanUseCase) detail(ctx context.Context, db repository.DBTX, id int64) (*model.PenerimaanSusulanResponse, error) {
+// detail loads a header and its lines. aktifIDUnitKerja scopes the read for
+// isu #12 fase 6; every write-path caller passes nil (unrestricted) — see
+// PembelianUseCase.detail for the full reasoning.
+func (c *PenerimaanSusulanUseCase) detail(ctx context.Context, db repository.DBTX, id int64, aktifIDUnitKerja *int64) (*model.PenerimaanSusulanResponse, error) {
 	susulan, err := c.SusulanRepository.FindByID(ctx, db, id)
 	if err != nil {
 		return nil, notFoundOnNoRows(err, "penerimaan susulan not found")
+	}
+
+	if diLuarUnitAktif(susulan.IDUnitKerjaRuang, aktifIDUnitKerja) {
+		return nil, model.NotFound("penerimaan susulan not found")
 	}
 
 	// Non-nil even when empty, so the response carries [] rather than dropping the

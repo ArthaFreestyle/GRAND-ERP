@@ -16,12 +16,13 @@ import (
 // is NOT NULL on both pembelian and kartu_stok), a room, a supplier, and a product
 // sold in PCS with a 12-per DUS conversion.
 type fixture struct {
-	actor    int64
-	ruang    int64
-	supplier int64
-	product  int64
-	pcs      int64
-	dus      int64
+	actor     int64
+	unitKerja int64
+	ruang     int64
+	supplier  int64
+	product   int64
+	pcs       int64
+	dus       int64
 }
 
 func pembelianFixture(t *testing.T, testApp *app) fixture {
@@ -35,7 +36,15 @@ func pembelianFixture(t *testing.T, testApp *app) fixture {
 		t.Fatalf("create actor: %v", err)
 	}
 
-	ruang, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{NamaRuang: "Gudang Utama"})
+	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Fixture"})
+	if err != nil {
+		t.Fatalf("create unit kerja: %v", err)
+	}
+
+	ruang, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		NamaRuang:   "Gudang Utama",
+		IDUnitKerja: unit.ID,
+	})
 	if err != nil {
 		t.Fatalf("create ruang: %v", err)
 	}
@@ -67,12 +76,13 @@ func pembelianFixture(t *testing.T, testApp *app) fixture {
 	}
 
 	return fixture{
-		actor:    user.ID,
-		ruang:    ruang.ID,
-		supplier: supplier.ID,
-		product:  product.ID,
-		pcs:      pcs.ID,
-		dus:      dus.ID,
+		actor:     user.ID,
+		unitKerja: unit.ID,
+		ruang:     ruang.ID,
+		supplier:  supplier.ID,
+		product:   product.ID,
+		pcs:       pcs.ID,
+		dus:       dus.ID,
 	}
 }
 

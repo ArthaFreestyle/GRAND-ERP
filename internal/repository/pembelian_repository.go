@@ -39,7 +39,7 @@ const pembelianReadColumns = `p.id, p.nomor, p.tanggal, p.id_supplier, p.id_ruan
 	p.ditanggung_supplier, p.metode_alokasi_angkut, p.jenis_pembayaran,
 	p.status_pembayaran, p.status_penerimaan, p.status, p.created_by, p.created_at,
 	p.diajukan_oleh, p.diajukan_pada, p.disetujui_oleh, p.disetujui_pada, p.posted_at,
-	p.dibatalkan_oleh, p.alasan_batal, p.alasan_tolak, s.nama, r.nama_ruang,
+	p.dibatalkan_oleh, p.alasan_batal, p.alasan_tolak, s.nama, r.nama_ruang, r.id_unit_kerja,
 	(` + pembelianAlokasiEfektif + `)::TEXT, (` + pembelianKreditRetur + `)::TEXT`
 
 // pembelianAlokasiEfektif totals what has actually been paid against an invoice.
@@ -93,12 +93,16 @@ const pembelianFrom = `
 // pembelianFilter is shared by the COUNT and the row query. Two copies of a filter
 // eventually diverge and total_item starts lying about the data.
 //
-// Placeholder discipline: the filter owns $1..$6 and pagination follows after it.
+// Placeholder discipline: the filter owns $1..$7 and pagination follows after it.
 //
 // The date range is inclusive at both ends even though tanggal is TIMESTAMPTZ: an
 // operator asking for 1 August to 31 August means the whole of the 31st, so the
 // upper bound is `< the next day` rather than `<= the day`, which would cut the
 // last day off at midnight.
+//
+// $7 is the active-unit scope (isu #12 fase 6), against r.id_unit_kerja — which
+// is why both the COUNT and the row query now run through pembelianFrom rather
+// than a bare `FROM pembelian p`.
 const pembelianFilter = `
 	WHERE ($1 = '' OR p.nomor ILIKE '%' || $1 || '%'
 	                OR p.no_faktur_supplier ILIKE '%' || $1 || '%')
@@ -106,7 +110,8 @@ const pembelianFilter = `
 	  AND ($3 = '' OR p.status_penerimaan = $3)
 	  AND ($4 = 0 OR p.id_supplier = $4)
 	  AND ($5::DATE IS NULL OR p.tanggal >= $5::DATE)
-	  AND ($6::DATE IS NULL OR p.tanggal < ($6::DATE + INTERVAL '1 day'))`
+	  AND ($6::DATE IS NULL OR p.tanggal < ($6::DATE + INTERVAL '1 day'))
+	  AND ($7::BIGINT IS NULL OR r.id_unit_kerja = $7)`
 
 // pembelianDetailReadColumns joins three names onto each line. satuan appears
 // twice: once for the unit the operator typed in, once for the product's base unit,
@@ -436,13 +441,16 @@ func execTransisi(ctx context.Context, db DBTX, query, what string, args ...any)
 // Search returns one page of headers plus the total matching count. Details are not
 // attached: a page of 20 documents with their lines would be a second query per row
 // for data the list view does not show.
-func (r *PembelianRepository) Search(ctx context.Context, db DBTX, search, status, statusPenerimaan string, idSupplier int64, dari, sampai *string, limit, offset int) ([]entity.Pembelian, int64, error) {
+func (r *PembelianRepository) Search(ctx context.Context, db DBTX, search, status, statusPenerimaan string, idSupplier int64, dari, sampai *string, aktifIDUnitKerja *int64, limit, offset int) ([]entity.Pembelian, int64, error) {
 	search = EscapeLike(search)
 
+	// COUNT now runs through pembelianFrom, not a bare `FROM pembelian p`: the
+	// unit scope in $7 is against r.id_unit_kerja, which only pembelianFrom's
+	// join makes visible.
 	var total int64
 	if err := db.QueryRowContext(
-		ctx, `SELECT COUNT(*) FROM pembelian p`+pembelianFilter,
-		search, status, statusPenerimaan, idSupplier, dari, sampai,
+		ctx, `SELECT COUNT(*) `+pembelianFrom+pembelianFilter,
+		search, status, statusPenerimaan, idSupplier, dari, sampai, aktifIDUnitKerja,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count pembelian: %w", err)
 	}
@@ -457,11 +465,12 @@ func (r *PembelianRepository) Search(ctx context.Context, db DBTX, search, statu
 	// pembelian_tanggal_id_idx from migration 000012 supports exactly this.
 	query := `SELECT ` + pembelianReadColumns + pembelianFrom + pembelianFilter + `
 		ORDER BY p.tanggal DESC, p.id DESC
-		LIMIT $7 OFFSET $8`
+		LIMIT $8 OFFSET $9`
 
 	rows, err := db.QueryContext(
 		ctx, query,
-		search, status, statusPenerimaan, idSupplier, dari, sampai, limit, offset,
+		search, status, statusPenerimaan, idSupplier, dari, sampai, aktifIDUnitKerja,
+		limit, offset,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select pembelian: %w", err)
@@ -1037,6 +1046,7 @@ func scanPembelian(row rowScanner, pembelian *entity.Pembelian) error {
 func scanPembelianRead(row rowScanner, pembelian *entity.Pembelian) error {
 	return row.Scan(append(
 		pembelianFields(pembelian), &pembelian.NamaSupplier, &pembelian.NamaRuang,
+		&pembelian.IDUnitKerjaRuang,
 		&pembelian.JumlahDialokasikan, &pembelian.NilaiKreditRetur,
 	)...)
 }

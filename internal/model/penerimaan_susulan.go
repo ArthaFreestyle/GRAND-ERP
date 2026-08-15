@@ -101,6 +101,11 @@ type PenerimaanSusulanDetailRequest struct {
 
 type GetPenerimaanSusulanRequest struct {
 	ID int64 `param:"id" validate:"required,gt=0"`
+
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the request — isu #12 fase 6. Nil means
+	// unrestricted; otherwise a document outside this unit answers 404.
+	AktifIDUnitKerja *int64 `json:"-"`
 }
 
 // UpdatePenerimaanSusulanRequest patches the header of a DRAFT. Only the two fields
@@ -151,4 +156,7 @@ type ListPenerimaanSusulanRequest struct {
 	IDPembelian   int64   `query:"id_pembelian" validate:"omitempty,gt=0"`
 	TanggalDari   *string `query:"tanggal_dari" validate:"omitempty,datetime=2006-01-02"`
 	TanggalSampai *string `query:"tanggal_sampai" validate:"omitempty,datetime=2006-01-02"`
+
+	// AktifIDUnitKerja, same rule as GetPenerimaanSusulanRequest.
+	AktifIDUnitKerja *int64 `query:"-"`
 }

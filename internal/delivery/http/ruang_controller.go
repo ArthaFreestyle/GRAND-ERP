@@ -41,7 +41,9 @@ func (c *RuangController) Get(ctx fiber.Ctx) error {
 		return model.Invalid("id must be an integer")
 	}
 
-	response, err := c.UseCase.Get(ctx.Context(), &model.GetRuangRequest{ID: id})
+	response, err := c.UseCase.Get(ctx.Context(), &model.GetRuangRequest{
+		ID: id, AktifIDUnitKerja: aktifIDUnitKerja(ctx),
+	})
 	if err != nil {
 		return err
 	}
@@ -54,6 +56,10 @@ func (c *RuangController) List(ctx fiber.Ctx) error {
 	if err := ctx.Bind().Query(request); err != nil {
 		return model.Invalid("malformed query parameters")
 	}
+
+	// Bound first, then overwritten: a query string carrying its own value
+	// cannot pick which unit scopes the list.
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
 
 	responses, paging, err := c.UseCase.Search(ctx.Context(), request)
 	if err != nil {

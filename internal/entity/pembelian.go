@@ -119,7 +119,11 @@ type Pembelian struct {
 	// Product.NamaSatuanDasar is.
 	NamaSupplier string
 	NamaRuang    string
-	Detail       []PembelianDetail
+	// IDUnitKerjaRuang is IDRuang's own unit_kerja, joined in for isu #12 fase 6
+	// so a Get can tell whether this document falls outside the caller's active
+	// unit without a second query.
+	IDUnitKerjaRuang int64
+	Detail           []PembelianDetail
 }
 
 // PembelianDetail maps one invoice line.

@@ -218,12 +218,70 @@ func masterModules(a *app) []masterModule {
 			},
 		},
 		{
+			name:           "unit_kerja",
+			table:          "unit_kerja",
+			namesAreUnique: false,
+			createNamed: func(nama string) (int64, error) {
+				response, err := a.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: nama})
+				if err != nil {
+					return 0, err
+				}
+
+				return response.ID, nil
+			},
+			list: func(search string, page, size int) ([]int64, []string, int64, any, error) {
+				responses, paging, err := a.unitKerja.Search(ctx(), &model.ListUnitKerjaRequest{
+					PageRequest: model.PageRequest{Page: page, Size: size},
+					Search:      search,
+				})
+				if err != nil {
+					return nil, nil, 0, nil, err
+				}
+
+				ids := make([]int64, len(responses))
+				names := make([]string, len(responses))
+				for i, response := range responses {
+					ids[i], names[i] = response.ID, response.Nama
+				}
+
+				return ids, names, paging.TotalItem, responses, nil
+			},
+			get: func(id int64) error {
+				_, err := a.unitKerja.Get(ctx(), &model.GetUnitKerjaRequest{ID: id})
+
+				return err
+			},
+			patchAktif: func(id int64, aktif bool) (string, error) {
+				response, err := a.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{
+					ID:      id,
+					IsAktif: model.Optional[bool]{Present: true, Value: &aktif},
+				})
+				if err != nil {
+					return "", err
+				}
+
+				return response.Nama, nil
+			},
+		},
+		{
 			// ruang has no PATCH endpoint, but it is included because the two bugs
 			// fixed in section 1 of the issue live in its Search.
+			//
+			// Every ruang needs an id_unit_kerja since isu #12 fase 2, and
+			// truncateMaster wipes unit_kerja along with ruang between subtests, so a
+			// unit is created fresh on every call rather than reused across them.
 			name:  "ruang",
 			table: "ruang",
 			createNamed: func(nama string) (int64, error) {
-				response, err := a.ruang.Create(ctx(), &model.CreateRuangRequest{NamaRuang: nama})
+				unit, err := a.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit " + nama})
+				if err != nil {
+					return 0, err
+				}
+
+				response, err := a.ruang.Create(ctx(), &model.CreateRuangRequest{
+					NamaRuang:   nama,
+					IDUnitKerja: unit.ID,
+				})
 				if err != nil {
 					return 0, err
 				}

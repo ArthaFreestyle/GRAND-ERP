@@ -28,7 +28,8 @@ const susulanColumns = `id, nomor, tanggal, id_pembelian, id_supplier, id_ruang,
 const susulanReadColumns = `s.id, s.nomor, s.tanggal, s.id_pembelian, s.id_supplier,
 	s.id_ruang, s.keterangan, s.total_nilai::TEXT, s.status, s.created_by, s.created_at,
 	s.diajukan_oleh, s.diajukan_pada, s.disetujui_oleh, s.disetujui_pada, s.posted_at,
-	s.dibatalkan_oleh, s.alasan_batal, s.alasan_tolak, p.nomor, sup.nama, r.nama_ruang`
+	s.dibatalkan_oleh, s.alasan_batal, s.alasan_tolak, p.nomor, sup.nama, r.nama_ruang,
+	r.id_unit_kerja`
 
 // susulanFrom joins INNER throughout: every one of these foreign keys is NOT NULL,
 // so a follow-up receipt without a purchase, a supplier, or a room cannot exist.
@@ -41,13 +42,17 @@ const susulanFrom = `
 // susulanFilter is shared by the COUNT and the row query. Two copies of a filter
 // eventually diverge and total_item starts lying about the data.
 //
-// Placeholder discipline: the filter owns $1..$5 and pagination follows after it.
+// Placeholder discipline: the filter owns $1..$6 and pagination follows after it.
+//
+// $6 is the active-unit scope (isu #12 fase 6), against r.id_unit_kerja — which
+// is why the COUNT query now has to join ruang too, not just pembelian.
 const susulanFilter = `
 	WHERE ($1 = '' OR s.nomor ILIKE '%' || $1 || '%' OR p.nomor ILIKE '%' || $1 || '%')
 	  AND ($2 = '' OR s.status = $2)
 	  AND ($3 = 0 OR s.id_pembelian = $3)
 	  AND ($4::DATE IS NULL OR s.tanggal >= $4::DATE)
-	  AND ($5::DATE IS NULL OR s.tanggal < ($5::DATE + INTERVAL '1 day'))`
+	  AND ($5::DATE IS NULL OR s.tanggal < ($5::DATE + INTERVAL '1 day'))
+	  AND ($6::BIGINT IS NULL OR r.id_unit_kerja = $6)`
 
 // susulanDetailReadColumns reaches the product through pembelian_detail: a
 // follow-up line names the invoice line it completes, not the product directly, so
@@ -202,14 +207,16 @@ func (r *PenerimaanSusulanRepository) Batal(ctx context.Context, db DBTX, id, ac
 	return execTransisi(ctx, db, query, "batal penerimaan_susulan", id, actorID, alasan)
 }
 
-func (r *PenerimaanSusulanRepository) Search(ctx context.Context, db DBTX, search, status string, idPembelian int64, dari, sampai *string, limit, offset int) ([]entity.PenerimaanSusulan, int64, error) {
+func (r *PenerimaanSusulanRepository) Search(ctx context.Context, db DBTX, search, status string, idPembelian int64, dari, sampai *string, aktifIDUnitKerja *int64, limit, offset int) ([]entity.PenerimaanSusulan, int64, error) {
 	search = EscapeLike(search)
 
+	// COUNT now runs through susulanFrom rather than a hand-rolled join, since
+	// $6 needs r.id_unit_kerja alongside p.nomor.
 	var total int64
 	if err := db.QueryRowContext(
 		ctx,
-		`SELECT COUNT(*) FROM penerimaan_susulan s JOIN pembelian p ON p.id = s.id_pembelian`+susulanFilter,
-		search, status, idPembelian, dari, sampai,
+		`SELECT COUNT(*) `+susulanFrom+susulanFilter,
+		search, status, idPembelian, dari, sampai, aktifIDUnitKerja,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count penerimaan_susulan: %w", err)
 	}
@@ -222,9 +229,11 @@ func (r *PenerimaanSusulanRepository) Search(ctx context.Context, db DBTX, searc
 	// documents cannot repeat or skip one.
 	query := `SELECT ` + susulanReadColumns + susulanFrom + susulanFilter + `
 		ORDER BY s.tanggal DESC, s.id DESC
-		LIMIT $6 OFFSET $7`
+		LIMIT $7 OFFSET $8`
 
-	rows, err := db.QueryContext(ctx, query, search, status, idPembelian, dari, sampai, limit, offset)
+	rows, err := db.QueryContext(
+		ctx, query, search, status, idPembelian, dari, sampai, aktifIDUnitKerja, limit, offset,
+	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select penerimaan_susulan: %w", err)
 	}
@@ -347,5 +356,6 @@ func scanSusulanRead(row rowScanner, susulan *entity.PenerimaanSusulan) error {
 	return row.Scan(append(
 		susulanFields(susulan),
 		&susulan.NomorPembelian, &susulan.NamaSupplier, &susulan.NamaRuang,
+		&susulan.IDUnitKerjaRuang,
 	)...)
 }

@@ -24,7 +24,12 @@ type User struct {
 	UpdatedAt   time.Time
 	UpdatedBy   *int64
 
-	// Roles is not a column of users. It comes from user_role joined to role and
-	// is filled by the read queries, the same way Supplier.NamaPembuat is.
-	Roles []Role
+	// Roles is not a column of users. It comes from user_role joined to role
+	// (and, since isu #12 fase 3, to unit_kerja) and is filled by the read
+	// queries, the same way Supplier.NamaPembuat is.
+	//
+	// The same role may appear more than once: a grant is now (role, unit), not
+	// just role, so "INVENTARIS in unit A" and "INVENTARIS in unit B" are two
+	// distinct entries here rather than one.
+	Roles []RoleGrant
 }

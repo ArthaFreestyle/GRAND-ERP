@@ -131,7 +131,7 @@ func (c *ReturPembelianUseCase) Create(ctx context.Context, request *model.Creat
 
 	// Re-read so the response carries the stored rows and their joined names rather
 	// than what was sent.
-	return c.detail(ctx, c.DB, retur.ID)
+	return c.detail(ctx, c.DB, retur.ID, nil)
 }
 
 func (c *ReturPembelianUseCase) Get(ctx context.Context, request *model.GetReturPembelianRequest) (*model.ReturPembelianResponse, error) {
@@ -139,7 +139,7 @@ func (c *ReturPembelianUseCase) Get(ctx context.Context, request *model.GetRetur
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, request.AktifIDUnitKerja)
 }
 
 func (c *ReturPembelianUseCase) Search(ctx context.Context, request *model.ListReturPembelianRequest) ([]model.ReturPembelianResponse, *model.PageMetadata, error) {
@@ -152,7 +152,7 @@ func (c *ReturPembelianUseCase) Search(ctx context.Context, request *model.ListR
 	list, total, err := c.ReturRepository.Search(
 		ctx, c.DB,
 		request.Search, request.Status, request.IDPembelian, request.IDSupplier,
-		request.TanggalDari, request.TanggalSampai,
+		request.TanggalDari, request.TanggalSampai, request.AktifIDUnitKerja,
 		request.Size, request.Offset(),
 	)
 	if err != nil {
@@ -218,7 +218,7 @@ func (c *ReturPembelianUseCase) Update(ctx context.Context, request *model.Updat
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // ReplaceDetail swaps the whole line set of a DRAFT.
@@ -261,7 +261,7 @@ func (c *ReturPembelianUseCase) ReplaceDetail(ctx context.Context, request *mode
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 func (c *ReturPembelianUseCase) Ajukan(ctx context.Context, request *model.AjukanReturPembelianRequest) (*model.ReturPembelianResponse, error) {
@@ -298,7 +298,7 @@ func (c *ReturPembelianUseCase) Ajukan(ctx context.Context, request *model.Ajuka
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 func (c *ReturPembelianUseCase) Tolak(ctx context.Context, request *model.TolakReturPembelianRequest) (*model.ReturPembelianResponse, error) {
@@ -326,7 +326,7 @@ func (c *ReturPembelianUseCase) Tolak(ctx context.Context, request *model.TolakR
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Posting takes the goods out of stock and closes the document.
@@ -472,7 +472,7 @@ func (c *ReturPembelianUseCase) Posting(ctx context.Context, request *model.Post
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Batal voids a posted return by appending a reversing row for every movement it made:
@@ -563,7 +563,7 @@ func (c *ReturPembelianUseCase) Batal(ctx context.Context, request *model.BatalR
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // hitungKreditUtang works out what the supplier is credited for the returned goods.
@@ -622,11 +622,17 @@ func (c *ReturPembelianUseCase) hitungKreditUtang(ctx context.Context, tx reposi
 }
 
 // detail loads a header and its lines. Two queries, independent of how many lines come
-// back.
-func (c *ReturPembelianUseCase) detail(ctx context.Context, db repository.DBTX, id int64) (*model.ReturPembelianResponse, error) {
+// back. aktifIDUnitKerja scopes the read for isu #12 fase 6; every write-path
+// caller passes nil (unrestricted) — see PembelianUseCase.detail for the full
+// reasoning.
+func (c *ReturPembelianUseCase) detail(ctx context.Context, db repository.DBTX, id int64, aktifIDUnitKerja *int64) (*model.ReturPembelianResponse, error) {
 	retur, err := c.ReturRepository.FindByID(ctx, db, id)
 	if err != nil {
 		return nil, notFoundOnNoRows(err, "retur pembelian not found")
+	}
+
+	if diLuarUnitAktif(retur.IDUnitKerjaRuang, aktifIDUnitKerja) {
+		return nil, model.NotFound("retur pembelian not found")
 	}
 
 	// Non-nil even when empty, so the response carries [] rather than dropping the key

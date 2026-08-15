@@ -20,10 +20,28 @@ type RoleResponse struct {
 // IsAktif is kept because a user's role list includes assignments to roles that
 // were retired after being granted — the assignment is still real and still needs
 // revoking. Without this flag such a row is indistinguishable from a live one.
+//
+// IDUnitKerja is where the grant applies — nil means every unit_kerja (isu #12
+// fase 3). The same rule as IsAktif applies to a retired unit: the grant still
+// needs to be visible so it can be revoked, so a retired unit's grant is not
+// hidden. IsAktifUnitKerja is the unit's own version of IsAktif — nil exactly
+// when IDUnitKerja is nil, since a global grant has no unit row to be retired.
+//
+// IDUserRole is the user_role row's own id — isu #12 fase 4's grant identity,
+// what POST /auth/switch-context's id_user_role names. It is what makes each
+// entry in a session's switcher menu addressable, since two grants can share
+// the same role and even the same unit is never possible (the unique indexes
+// forbid it) but nothing else here identifies the row itself.
 type RoleRef struct {
 	ID      int64  `json:"id"`
 	Nama    string `json:"nama"`
 	IsAktif bool   `json:"is_aktif"`
+
+	IDUserRole int64 `json:"id_user_role"`
+
+	IDUnitKerja      *int64  `json:"id_unit_kerja"`
+	NamaUnitKerja    *string `json:"nama_unit_kerja"`
+	IsAktifUnitKerja *bool   `json:"is_aktif_unit_kerja"`
 }
 
 // Nama is unique case-insensitively (role_nama_lower_uidx), so "Cashier" and

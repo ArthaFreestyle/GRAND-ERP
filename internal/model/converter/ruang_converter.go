@@ -9,10 +9,12 @@ import (
 
 func RuangToResponse(ruang *entity.Ruang) *model.RuangResponse {
 	return &model.RuangResponse{
-		ID:        ruang.ID,
-		Kode:      ruang.Kode,
-		NamaRuang: ruang.NamaRuang,
-		IsAktif:   ruang.IsAktif,
+		ID:            ruang.ID,
+		Kode:          ruang.Kode,
+		NamaRuang:     ruang.NamaRuang,
+		IsAktif:       ruang.IsAktif,
+		IDUnitKerja:   ruang.IDUnitKerja,
+		NamaUnitKerja: ruang.NamaUnitKerja,
 	}
 }
 

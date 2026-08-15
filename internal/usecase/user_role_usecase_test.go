@@ -28,6 +28,18 @@ func seedRoles(t *testing.T, testApp *app) map[string]int64 {
 	return ids
 }
 
+// grants builds a []model.GrantRequest granting each role id globally (every
+// unit_kerja) — the shape most of these tests want, since grant scoping to one
+// unit (isu #12 fase 3) is exercised by its own tests further down.
+func grants(roleIDs ...int64) []model.GrantRequest {
+	list := make([]model.GrantRequest, len(roleIDs))
+	for i, id := range roleIDs {
+		list[i] = model.GrantRequest{IDRole: id}
+	}
+
+	return list
+}
+
 // roleNames flattens a user's roles for comparison.
 func roleNames(user *model.UserResponse) []string {
 	names := make([]string, len(user.Roles))
@@ -60,7 +72,7 @@ func TestUserHoldsManyRoles(t *testing.T) {
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 		Username: "kasir_gudang",
 		Password: "rahasia123",
-		RoleIDs:  []int64{roles["CASHIER"], roles["INVENTARIS"]},
+		Grants:   grants(roles["CASHIER"], roles["INVENTARIS"]),
 	})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -96,7 +108,7 @@ func TestManyUsersShareTheSameRole(t *testing.T) {
 		user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 			Username: username,
 			Password: "rahasia123",
-			RoleIDs:  []int64{roles["CASHIER"]},
+			Grants:   grants(roles["CASHIER"]),
 		})
 		if err != nil {
 			t.Fatalf("create %s: %v", username, err)
@@ -170,7 +182,7 @@ func TestUserPasswordIsHashedAndNeverReturned(t *testing.T) {
 	}
 }
 
-// role_ids replaces the set rather than adding to it, and the three Optional states
+// grants replaces the set rather than adding to it, and the three Optional states
 // have to stay distinguishable: absent, [], and a list.
 func TestUserPatchReplacesRoleSet(t *testing.T) {
 	testApp := newApp(t)
@@ -179,13 +191,13 @@ func TestUserPatchReplacesRoleSet(t *testing.T) {
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 		Username: "siti",
 		Password: "rahasia123",
-		RoleIDs:  []int64{roles["CASHIER"]},
+		Grants:   grants(roles["CASHIER"]),
 	})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	// Absent role_ids: a patch touching another field leaves the grants alone.
+	// Absent grants: a patch touching another field leaves the grants alone.
 	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
 		ID:          user.ID,
 		NamaLengkap: model.Optional[string]{Present: true, Value: ptr("Siti Aminah")},
@@ -199,11 +211,11 @@ func TestUserPatchReplacesRoleSet(t *testing.T) {
 	}
 
 	// A list replaces the whole set: CASHIER goes away, the two named arrive.
-	replaced := []int64{roles["SUPERADMIN"], roles["INVENTARIS"]}
+	replaced := grants(roles["SUPERADMIN"], roles["INVENTARIS"])
 
 	patched, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{
-		ID:      user.ID,
-		RoleIDs: model.Optional[[]int64]{Present: true, Value: &replaced},
+		ID:     user.ID,
+		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &replaced},
 	})
 	if err != nil {
 		t.Fatalf("replace roles: %v", err)
@@ -214,11 +226,11 @@ func TestUserPatchReplacesRoleSet(t *testing.T) {
 	}
 
 	// An empty array revokes everything, and serialises as [] rather than null.
-	empty := []int64{}
+	empty := []model.GrantRequest{}
 
 	patched, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{
-		ID:      user.ID,
-		RoleIDs: model.Optional[[]int64]{Present: true, Value: &empty},
+		ID:     user.ID,
+		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &empty},
 	})
 	if err != nil {
 		t.Fatalf("revoke roles: %v", err)
@@ -233,8 +245,8 @@ func TestUserPatchReplacesRoleSet(t *testing.T) {
 	}
 }
 
-// An explicit null is not a third way to say "no roles" — [] already says it.
-func TestUserPatchRejectsNullRoleIDs(t *testing.T) {
+// An explicit null is not a third way to say "no grants" — [] already says it.
+func TestUserPatchRejectsNullGrants(t *testing.T) {
 	testApp := newApp(t)
 
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
@@ -246,14 +258,14 @@ func TestUserPatchRejectsNullRoleIDs(t *testing.T) {
 	}
 
 	_, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{
-		ID:      user.ID,
-		RoleIDs: model.Optional[[]int64]{Present: true}, // present, Value nil = null
+		ID:     user.ID,
+		Grants: model.Optional[[]model.GrantRequest]{Present: true}, // present, Value nil = null
 	})
 
 	assertKind(t, err, model.KindInvalid)
 }
 
-// A patch carrying only role_ids changes no column of users, but it is still a
+// A patch carrying only grants changes no column of users, but it is still a
 // change to the user: updated_at has to move, and an unknown id still has to 404.
 func TestUserRolesOnlyPatchBumpsUpdatedAt(t *testing.T) {
 	testApp := newApp(t)
@@ -267,11 +279,11 @@ func TestUserRolesOnlyPatchBumpsUpdatedAt(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	granted := []int64{roles["INVENTARIS"]}
+	granted := grants(roles["INVENTARIS"])
 
 	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
-		ID:      user.ID,
-		RoleIDs: model.Optional[[]int64]{Present: true, Value: &granted},
+		ID:     user.ID,
+		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &granted},
 	})
 	if err != nil {
 		t.Fatalf("roles-only patch: %v", err)
@@ -287,8 +299,8 @@ func TestUserRolesOnlyPatchBumpsUpdatedAt(t *testing.T) {
 
 	// Same shape of patch against an id that does not exist.
 	_, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{
-		ID:      user.ID + 10_000,
-		RoleIDs: model.Optional[[]int64]{Present: true, Value: &granted},
+		ID:     user.ID + 10_000,
+		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &granted},
 	})
 
 	assertKind(t, err, model.KindNotFound)
@@ -303,7 +315,7 @@ func TestUserRoleGrantTimestampSurvivesReplace(t *testing.T) {
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 		Username: "agus",
 		Password: "rahasia123",
-		RoleIDs:  []int64{roles["CASHIER"]},
+		Grants:   grants(roles["CASHIER"]),
 	})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -326,11 +338,11 @@ func TestUserRoleGrantTimestampSurvivesReplace(t *testing.T) {
 	before := grantedAt()
 
 	// CASHIER stays, INVENTARIS is added.
-	replaced := []int64{roles["CASHIER"], roles["INVENTARIS"]}
+	replaced := grants(roles["CASHIER"], roles["INVENTARIS"])
 
 	if _, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
-		ID:      user.ID,
-		RoleIDs: model.Optional[[]int64]{Present: true, Value: &replaced},
+		ID:     user.ID,
+		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &replaced},
 	}); err != nil {
 		t.Fatalf("replace roles: %v", err)
 	}
@@ -340,16 +352,16 @@ func TestUserRoleGrantTimestampSurvivesReplace(t *testing.T) {
 	}
 }
 
-// A body repeating an id plainly means "grant that role". It is not a conflict, and
-// it must not trip the count check that validates the ids.
-func TestUserDuplicateRoleIDsAreCollapsed(t *testing.T) {
+// A body repeating a pair plainly means "grant that once". It is not a conflict,
+// and it must not trip the count check that validates the ids.
+func TestUserDuplicateGrantsAreCollapsed(t *testing.T) {
 	testApp := newApp(t)
 	roles := seedRoles(t, testApp)
 
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 		Username: "rina",
 		Password: "rahasia123",
-		RoleIDs:  []int64{roles["CASHIER"], roles["CASHIER"], roles["CASHIER"]},
+		Grants:   grants(roles["CASHIER"], roles["CASHIER"], roles["CASHIER"]),
 	})
 	if err != nil {
 		t.Fatalf("create user with repeated role: %v", err)
@@ -367,7 +379,7 @@ func TestUserUnknownRoleIDIsInvalid(t *testing.T) {
 	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 		Username: "hendra",
 		Password: "rahasia123",
-		RoleIDs:  []int64{roles["CASHIER"], roles["CASHIER"] + 10_000},
+		Grants:   grants(roles["CASHIER"], roles["CASHIER"]+10_000),
 	})
 
 	assertKind(t, err, model.KindInvalid)
@@ -401,7 +413,7 @@ func TestUserCannotBeGrantedRetiredRole(t *testing.T) {
 	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 		Username: "wawan",
 		Password: "rahasia123",
-		RoleIDs:  []int64{roles["INVENTARIS"]},
+		Grants:   grants(roles["INVENTARIS"]),
 	})
 
 	assertKind(t, err, model.KindInvalid)
@@ -417,7 +429,7 @@ func TestRetiringRoleKeepsExistingGrantVisible(t *testing.T) {
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 		Username: "tono",
 		Password: "rahasia123",
-		RoleIDs:  []int64{roles["CASHIER"]},
+		Grants:   grants(roles["CASHIER"]),
 	})
 	if err != nil {
 		t.Fatalf("create user: %v", err)
@@ -530,7 +542,7 @@ func TestUserListDoesNotDuplicateUsersWithManyRoles(t *testing.T) {
 	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
 		Username: "serba_bisa",
 		Password: "rahasia123",
-		RoleIDs:  []int64{roles["SUPERADMIN"], roles["CASHIER"], roles["INVENTARIS"]},
+		Grants:   grants(roles["SUPERADMIN"], roles["CASHIER"], roles["INVENTARIS"]),
 	}); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -791,5 +803,272 @@ func TestRoleListIsOrderedAndPaged(t *testing.T) {
 
 	if len(seen) != 3 {
 		t.Errorf("saw %d distinct roles across both pages, want 3", len(seen))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// isu #12 fase 3: wewenang bertempat — a grant is now (role, unit_kerja), not
+// just role.
+// ---------------------------------------------------------------------------
+
+// createUnit is a small helper so each of the tests below can build its own
+// unit_kerja without repeating the boilerplate.
+func createUnit(t *testing.T, testApp *app, nama string) int64 {
+	t.Helper()
+
+	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: nama})
+	if err != nil {
+		t.Fatalf("create unit kerja %s: %v", nama, err)
+	}
+
+	return unit.ID
+}
+
+// The design's whole point: the same role, held at two different units, is two
+// grants — not a duplicate to collapse and not a conflict to reject.
+func TestUserHoldsSameRoleInTwoUnits(t *testing.T) {
+	testApp := newApp(t)
+	roles := seedRoles(t, testApp)
+	outletA := createUnit(t, testApp, "Outlet A")
+	outletB := createUnit(t, testApp, "Outlet B")
+
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		Username: "budi_dua_outlet",
+		Password: "rahasia123",
+		Grants: []model.GrantRequest{
+			{IDRole: roles["INVENTARIS"], IDUnitKerja: &outletA},
+			{IDRole: roles["INVENTARIS"], IDUnitKerja: &outletB},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	if len(user.Roles) != 2 {
+		t.Fatalf("roles = %v, want two distinct grants of INVENTARIS", user.Roles)
+	}
+
+	seenUnits := make(map[int64]bool, 2)
+	for _, role := range user.Roles {
+		if role.Nama != "INVENTARIS" {
+			t.Errorf("role = %s, want INVENTARIS on both grants", role.Nama)
+		}
+		if role.IDUnitKerja == nil {
+			t.Fatal("id_unit_kerja is nil on a scoped grant")
+		}
+		seenUnits[*role.IDUnitKerja] = true
+	}
+
+	if !seenUnits[outletA] || !seenUnits[outletB] {
+		t.Errorf("units seen = %v, want both %d and %d", seenUnits, outletA, outletB)
+	}
+}
+
+// A nil id_unit_kerja grants the role everywhere — the shape the seeded
+// SUPERADMIN grant takes. The response must carry that back as a nil
+// id_unit_kerja, not as some sentinel value.
+func TestUserGlobalGrantHasNilUnitKerja(t *testing.T) {
+	testApp := newApp(t)
+	roles := seedRoles(t, testApp)
+
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		Username: "admin_kedua",
+		Password: "rahasia123",
+		Grants:   []model.GrantRequest{{IDRole: roles["SUPERADMIN"]}},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	if len(user.Roles) != 1 {
+		t.Fatalf("roles = %v, want exactly one grant", user.Roles)
+	}
+
+	if user.Roles[0].IDUnitKerja != nil {
+		t.Errorf("id_unit_kerja = %d, want nil for a global grant", *user.Roles[0].IDUnitKerja)
+	}
+}
+
+// A grant naming a retired unit_kerja must be refused, the same as a grant
+// naming a retired role — the foreign key alone cannot tell a retired unit from
+// a live one.
+func TestUserCannotBeGrantedRetiredUnitKerja(t *testing.T) {
+	testApp := newApp(t)
+	roles := seedRoles(t, testApp)
+	unit := createUnit(t, testApp, "Unit Pensiun")
+
+	if _, err := testApp.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{
+		ID:      unit,
+		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
+	}); err != nil {
+		t.Fatalf("retire unit: %v", err)
+	}
+
+	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		Username: "grant_unit_mati",
+		Password: "rahasia123",
+		Grants:   []model.GrantRequest{{IDRole: roles["INVENTARIS"], IDUnitKerja: &unit}},
+	})
+
+	assertKind(t, err, model.KindInvalid)
+}
+
+// An unknown unit_kerja id is rejected the same way an unknown role id is.
+func TestUserUnknownUnitKerjaIDIsInvalid(t *testing.T) {
+	testApp := newApp(t)
+	roles := seedRoles(t, testApp)
+
+	unknown := int64(999_999)
+
+	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		Username: "unit_tidak_ada",
+		Password: "rahasia123",
+		Grants:   []model.GrantRequest{{IDRole: roles["INVENTARIS"], IDUnitKerja: &unknown}},
+	})
+
+	assertKind(t, err, model.KindInvalid)
+}
+
+// This is the regression test for the trap the issue calls out explicitly:
+// `role_id <> ALL($2)` against a NULL array deletes nothing, because any
+// comparison with NULL is NULL rather than true. ReplaceRoles' anti-join has to
+// use IS NOT DISTINCT FROM so a cross-unit (nil id_unit_kerja) grant is really
+// revoked when it is left out of a replacement set — not silently kept because
+// nothing could prove it should go.
+func TestUserRevokingGlobalGrantActuallyDeletesIt(t *testing.T) {
+	testApp := newApp(t)
+	roles := seedRoles(t, testApp)
+
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		Username: "cabut_global",
+		Password: "rahasia123",
+		Grants:   []model.GrantRequest{{IDRole: roles["SUPERADMIN"]}},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	empty := []model.GrantRequest{}
+
+	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+		ID:     user.ID,
+		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &empty},
+	})
+	if err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	if len(patched.Roles) != 0 {
+		t.Fatalf("roles after revoke = %v, want none", patched.Roles)
+	}
+
+	var count int64
+	if err := testDB.QueryRow(
+		"SELECT COUNT(*) FROM user_role WHERE user_id = $1", user.ID,
+	).Scan(&count); err != nil {
+		t.Fatalf("count user_role: %v", err)
+	}
+
+	if count != 0 {
+		t.Errorf("user_role still has %d row(s) after revoking the only (global) grant", count)
+	}
+}
+
+// Replacing a set that keeps one scoped grant and drops another, in the
+// presence of a global grant too, has to sort out all three kinds of row
+// (kept, deleted, inserted) correctly under the NULL-safe diff.
+func TestUserReplaceGrantsMixesGlobalAndScoped(t *testing.T) {
+	testApp := newApp(t)
+	roles := seedRoles(t, testApp)
+	outletA := createUnit(t, testApp, "Mixed Outlet A")
+	outletB := createUnit(t, testApp, "Mixed Outlet B")
+
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		Username: "campuran",
+		Password: "rahasia123",
+		Grants: []model.GrantRequest{
+			{IDRole: roles["SUPERADMIN"]},                        // global, should be kept
+			{IDRole: roles["INVENTARIS"], IDUnitKerja: &outletA}, // should be dropped
+		},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	replaced := []model.GrantRequest{
+		{IDRole: roles["SUPERADMIN"]},                        // kept
+		{IDRole: roles["INVENTARIS"], IDUnitKerja: &outletB}, // new
+	}
+
+	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+		ID:     user.ID,
+		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &replaced},
+	})
+	if err != nil {
+		t.Fatalf("replace: %v", err)
+	}
+
+	if len(patched.Roles) != 2 {
+		t.Fatalf("roles = %v, want exactly 2 grants", patched.Roles)
+	}
+
+	var sawGlobalSuperadmin, sawOutletB, sawOutletA bool
+	for _, role := range patched.Roles {
+		switch {
+		case role.Nama == "SUPERADMIN" && role.IDUnitKerja == nil:
+			sawGlobalSuperadmin = true
+		case role.Nama == "INVENTARIS" && role.IDUnitKerja != nil && *role.IDUnitKerja == outletB:
+			sawOutletB = true
+		case role.Nama == "INVENTARIS" && role.IDUnitKerja != nil && *role.IDUnitKerja == outletA:
+			sawOutletA = true
+		}
+	}
+
+	if !sawGlobalSuperadmin {
+		t.Error("the kept global SUPERADMIN grant is missing")
+	}
+	if !sawOutletB {
+		t.Error("the new INVENTARIS-at-outlet-B grant is missing")
+	}
+	if sawOutletA {
+		t.Error("the dropped INVENTARIS-at-outlet-A grant is still present")
+	}
+}
+
+// Retiring the unit a grant points at does not revoke the grant, the same rule
+// that already applies to a retired role: the assignment is still real and
+// still needs to be visible so an operator can remove it.
+func TestRetiringUnitKerjaKeepsExistingGrantVisible(t *testing.T) {
+	testApp := newApp(t)
+	roles := seedRoles(t, testApp)
+	unit := createUnit(t, testApp, "Unit Akan Pensiun")
+
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		Username: "grant_unit_pensiun",
+		Password: "rahasia123",
+		Grants:   []model.GrantRequest{{IDRole: roles["INVENTARIS"], IDUnitKerja: &unit}},
+	})
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+
+	if _, err := testApp.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{
+		ID:      unit,
+		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
+	}); err != nil {
+		t.Fatalf("retire unit: %v", err)
+	}
+
+	fetched, err := testApp.user.Get(ctx(), &model.GetUserRequest{ID: user.ID})
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+
+	if len(fetched.Roles) != 1 {
+		t.Fatalf("roles = %v, want the grant at the retired unit still listed", fetched.Roles)
+	}
+
+	if fetched.Roles[0].IDUnitKerja == nil || *fetched.Roles[0].IDUnitKerja != unit {
+		t.Errorf("id_unit_kerja = %v, want %d", fetched.Roles[0].IDUnitKerja, unit)
 	}
 }

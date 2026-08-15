@@ -55,7 +55,10 @@ type PenerimaanSusulan struct {
 	NomorPembelian string
 	NamaSupplier   string
 	NamaRuang      string
-	Detail         []PenerimaanSusulanDetail
+	// IDUnitKerjaRuang is IDRuang's own unit_kerja — isu #12 fase 6, same
+	// reasoning as entity.Pembelian.IDUnitKerjaRuang.
+	IDUnitKerjaRuang int64
+	Detail           []PenerimaanSusulanDetail
 }
 
 // PenerimaanSusulanDetail maps one line, pointing at the pembelian_detail row it
