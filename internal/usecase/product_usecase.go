@@ -17,6 +17,35 @@ import (
 // dateOnly parses berlaku_dari, which is a DATE: no time, no zone.
 const dateOnly = "2006-01-02"
 
+// zonaHargaJual is Asia/Jakarta (WIB), used only to decide which calendar date a
+// point in time falls on for product_harga_jual purposes — isu #8 fase 1.
+//
+// A fixed UTC+7 offset rather than time.LoadLocation("Asia/Jakarta"): Indonesia's
+// western zone observes no daylight saving, so the offset never changes, and a fixed
+// zone does not depend on a tzdata database being present in whatever image this
+// runs in. If WIB is ever redefined, this is the one place to change.
+var zonaHargaJual = time.FixedZone("WIB", 7*60*60)
+
+// tanggalHargaJual truncates a point in time to the calendar date that decides which
+// product_harga_jual version applies, in the store's own calendar (WIB) rather than
+// the server's or UTC's.
+//
+// This is the trap isu #8 calls out by name: a transaction at 00:30 WIB on the 15th
+// is 17:30 UTC on the 14th. Truncating in UTC would price it against the 14th's
+// version even though the till and the customer both agree it is the 15th. Today
+// only GET .../harga-jual's default date goes through this — penjualan.tanggal is a
+// TIMESTAMPTZ and will need the same conversion once that module exists, which is why
+// this lives as its own function rather than inlined at the one call site that uses
+// it so far.
+//
+// The returned time is midnight UTC on that date, which is how every DATE column in
+// this codebase is already represented in Go (see berlakuDari in AddHargaJual).
+func tanggalHargaJual(t time.Time) time.Time {
+	tahun, bulan, hari := t.In(zonaHargaJual).Date()
+
+	return time.Date(tahun, bulan, hari, 0, 0, 0, 0, time.UTC)
+}
+
 // ProductUseCase holds the business rules for product and its two child tables.
 //
 // It needs no SatuanRepository: a bad id_satuan arrives as a foreign-key violation,
@@ -381,6 +410,165 @@ func (c *ProductUseCase) AddHargaJual(ctx context.Context, request *model.AddPro
 	}
 
 	return c.detail(ctx, request.IDProduct)
+}
+
+// HargaBerlaku answers which price version applies, per satuan, on one date — isu #8
+// fase 1. This is the piece that actually unblocks penjualan: penjualan_detail.id_harga_jual
+// needs a version, not a number, and until this existed the only way to find one was
+// GET /product/{id} handing back the entire history and leaving "which one is current"
+// to the client.
+//
+// The product is looked up first so an unknown id answers 404 rather than an empty
+// list — "this product does not exist" and "this product has no price yet" are
+// different facts, same argument as riwayat_beli.
+func (c *ProductUseCase) HargaBerlaku(ctx context.Context, request *model.ListHargaJualBerlakuRequest) ([]model.HargaJualBerlakuResponse, error) {
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, err
+	}
+
+	tanggal := tanggalHargaJual(time.Now())
+
+	if request.Tanggal != "" {
+		parsed, err := time.Parse(dateOnly, request.Tanggal)
+		if err != nil {
+			return nil, model.Invalid("tanggal harus tanggal YYYY-MM-DD")
+		}
+
+		tanggal = parsed
+	}
+
+	if _, err := c.ProductRepository.FindByID(ctx, c.DB, request.IDProduct); err != nil {
+		return nil, notFoundOnNoRows(err, "product not found")
+	}
+
+	list, err := c.ProductRepository.FindHargaBerlaku(ctx, c.DB, request.IDProduct, tanggal)
+	if err != nil {
+		return nil, err
+	}
+
+	return converter.HargaJualBerlakuToResponses(list), nil
+}
+
+// UpdateHargaJual corrects the price on an existing version — isu #8 fase 2.
+//
+// Refused once a penjualan_detail line references it: the master row would then no
+// longer describe the version that document actually charged from, and that is the
+// only trace left of which price-list entry a past sale came from. Wrapped in a
+// transaction because the check and the write must see the same row — a version
+// could be claimed by a document between the two otherwise.
+func (c *ProductUseCase) UpdateHargaJual(ctx context.Context, request *model.UpdateProductHargaJualRequest) (*model.ProductResponse, error) {
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, err
+	}
+
+	tx, err := c.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	dipakai, err := c.ProductRepository.HargaJualDipakaiDokumen(ctx, tx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if dipakai {
+		return nil, model.Conflict("versi harga ini sudah dipakai dokumen penjualan")
+	}
+
+	if _, err := c.ProductRepository.UpdateHargaJual(ctx, tx, request.ID, request.IDProduct, request.Harga); err != nil {
+		return nil, notFoundOnNoRows(err, "harga jual not found")
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return c.detail(ctx, request.IDProduct)
+}
+
+// DeleteHargaJual removes a price version outright and reopens whatever version came
+// before it — isu #8 fase 2. Both writes are one transaction, the same rule
+// AddHargaJual follows in the other direction: closing without opening, or here
+// deleting without reopening, both leave the product with a date range no price
+// covers.
+//
+// FindHargaJualByID takes FOR UPDATE first so the row cannot change shape between
+// reading what to hand back to the previous version and actually deleting it.
+func (c *ProductUseCase) DeleteHargaJual(ctx context.Context, request *model.DeleteProductHargaJualRequest) (*model.ProductResponse, error) {
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, err
+	}
+
+	tx, err := c.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback()
+	}()
+
+	harga, err := c.ProductRepository.FindHargaJualByID(ctx, tx, request.ID, request.IDProduct)
+	if err != nil {
+		return nil, notFoundOnNoRows(err, "harga jual not found")
+	}
+
+	dipakai, err := c.ProductRepository.HargaJualDipakaiDokumen(ctx, tx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if dipakai {
+		return nil, model.Conflict("versi harga ini sudah dipakai dokumen penjualan")
+	}
+
+	if err := c.ProductRepository.DeleteHargaJual(ctx, tx, request.ID, request.IDProduct); err != nil {
+		return nil, notFoundOnNoRows(err, "harga jual not found")
+	}
+
+	if err := c.ProductRepository.ReopenPreviousHargaJual(
+		ctx, tx, request.IDProduct, harga.IDSatuan, harga.BerlakuDari, harga.BerlakuSampai,
+	); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return c.detail(ctx, request.IDProduct)
+}
+
+// DaftarHargaJual lists the price in force across every product, one row per product
+// and satuan — isu #8 fase 3. This is what gets printed as a price list, and it is
+// also the only way to find a product with no price registered at all without opening
+// products one at a time.
+func (c *ProductUseCase) DaftarHargaJual(ctx context.Context, request *model.ListDaftarHargaJualRequest) ([]model.DaftarHargaJualResponse, *model.PageMetadata, error) {
+	request.Normalize()
+
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, nil, err
+	}
+
+	tanggal := tanggalHargaJual(time.Now())
+
+	if request.Tanggal != "" {
+		parsed, err := time.Parse(dateOnly, request.Tanggal)
+		if err != nil {
+			return nil, nil, model.Invalid("tanggal harus tanggal YYYY-MM-DD")
+		}
+
+		tanggal = parsed
+	}
+
+	list, total, err := c.ProductRepository.SearchDaftarHargaJual(
+		ctx, c.DB, request.Search, request.IsAktif, tanggal, request.Size, request.Offset(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return converter.DaftarHargaJualToResponses(list), pageMetadata(&request.PageRequest, total), nil
 }
 
 // RiwayatBeli answers what each supplier last charged for this product.

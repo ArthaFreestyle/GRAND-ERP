@@ -122,3 +122,77 @@ type ListProductRequest struct {
 	// Nil lists every product; set it to filter on is_aktif.
 	IsAktif *bool `query:"is_aktif"`
 }
+
+// HargaJualBerlakuResponse is one satuan's price version in force on the requested
+// date — isu #8 fase 1. id_harga_jual is what a sales screen has to send back as
+// penjualan_detail.id_harga_jual; the rest is what it displays.
+type HargaJualBerlakuResponse struct {
+	IDHargaJual   int64   `json:"id_harga_jual"`
+	IDSatuan      int64   `json:"id_satuan"`
+	NamaSatuan    string  `json:"nama_satuan,omitempty"`
+	Harga         string  `json:"harga"`
+	BerlakuDari   string  `json:"berlaku_dari"`
+	BerlakuSampai *string `json:"berlaku_sampai"`
+}
+
+// ListHargaJualBerlakuRequest asks which price version is in force for a product, one
+// row per satuan, on one date.
+//
+// Tanggal is a plain calendar date the caller names directly (YYYY-MM-DD), so there is
+// no timezone to resolve here — that question only exists once a TIMESTAMPTZ has to be
+// cut down to a date, which is what tanggalHargaJual in the usecase package is for.
+// Omitted, Tanggal defaults to today in WIB, resolved the same way.
+//
+// IDProduct comes from the path, never the query string, so the two cannot disagree.
+type ListHargaJualBerlakuRequest struct {
+	IDProduct int64  `json:"-" validate:"required,gt=0"`
+	Tanggal   string `query:"tanggal" validate:"omitempty,datetime=2006-01-02"`
+}
+
+// UpdateProductHargaJualRequest corrects the price on an existing version — isu #8
+// fase 2. Only harga: id_satuan and berlaku_dari would shift what date range the
+// version covers and can collide with a neighbour, so that correction is
+// delete-and-retype rather than a field this DTO exposes.
+type UpdateProductHargaJualRequest struct {
+	ID        int64  `json:"-" validate:"required,gt=0"`
+	IDProduct int64  `json:"-" validate:"required,gt=0"`
+	Harga     string `json:"harga" validate:"required,numeric,max=21"`
+}
+
+// DeleteProductHargaJualRequest removes a price version outright — isu #8 fase 2, the
+// third exception to "master data has no DELETE". Both ids come from the path.
+type DeleteProductHargaJualRequest struct {
+	ID        int64 `json:"-" validate:"required,gt=0"`
+	IDProduct int64 `json:"-" validate:"required,gt=0"`
+}
+
+// DaftarHargaJualResponse is one product+satuan row in the cross-product price list —
+// isu #8 fase 3. The harga_jual fields are all nullable together: nil means this
+// product has no version in force for that satuan on the requested date, including a
+// product that has never had a price at all.
+type DaftarHargaJualResponse struct {
+	IDProduct   int64  `json:"id_product"`
+	KodeBarang  string `json:"kode_barang"`
+	NamaProduct string `json:"nama_product"`
+	IsAktif     bool   `json:"is_aktif"`
+
+	IDSatuan   *int64  `json:"id_satuan"`
+	NamaSatuan *string `json:"nama_satuan"`
+
+	IDHargaJual   *int64  `json:"id_harga_jual"`
+	Harga         *string `json:"harga"`
+	BerlakuDari   *string `json:"berlaku_dari"`
+	BerlakuSampai *string `json:"berlaku_sampai"`
+}
+
+// ListDaftarHargaJualRequest asks for the price list across every product — isu #8
+// fase 3. It is what gets printed as a price list and what finds a product with no
+// price registered at all, a question today only answerable by opening products one
+// at a time.
+type ListDaftarHargaJualRequest struct {
+	PageRequest
+	Search  string `query:"search" validate:"omitempty,max=255"`
+	Tanggal string `query:"tanggal" validate:"omitempty,datetime=2006-01-02"`
+	// Nil lists every product; set it to filter on is_aktif.
+	IsAktif *bool `query:"is_aktif"`
+}

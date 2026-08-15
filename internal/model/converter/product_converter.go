@@ -95,3 +95,65 @@ func ProductHargaJualToResponses(list []entity.ProductHargaJual) []model.Product
 
 	return responses
 }
+
+func HargaJualBerlakuToResponse(harga *entity.HargaJualBerlaku) *model.HargaJualBerlakuResponse {
+	response := &model.HargaJualBerlakuResponse{
+		IDHargaJual: harga.IDHargaJual,
+		IDSatuan:    harga.IDSatuan,
+		NamaSatuan:  harga.NamaSatuan,
+		Harga:       harga.Harga,
+		BerlakuDari: harga.BerlakuDari.Format(dateOnly),
+	}
+
+	if harga.BerlakuSampai != nil {
+		sampai := harga.BerlakuSampai.Format(dateOnly)
+		response.BerlakuSampai = &sampai
+	}
+
+	return response
+}
+
+func HargaJualBerlakuToResponses(list []entity.HargaJualBerlaku) []model.HargaJualBerlakuResponse {
+	// make, not var: a product with no price in force on the date asked about is
+	// exactly the case a client reading data.length would hit first.
+	responses := make([]model.HargaJualBerlakuResponse, len(list))
+	for i := range list {
+		responses[i] = *HargaJualBerlakuToResponse(&list[i])
+	}
+
+	return responses
+}
+
+func DaftarHargaJualToResponse(row *entity.DaftarHargaJual) *model.DaftarHargaJualResponse {
+	response := &model.DaftarHargaJualResponse{
+		IDProduct:   row.IDProduct,
+		KodeBarang:  row.KodeBarang,
+		NamaProduct: row.NamaProduct,
+		IsAktif:     row.IsAktif,
+		IDSatuan:    row.IDSatuan,
+		NamaSatuan:  row.NamaSatuan,
+		IDHargaJual: row.IDHargaJual,
+		Harga:       row.Harga,
+	}
+
+	if row.BerlakuDari != nil {
+		dari := row.BerlakuDari.Format(dateOnly)
+		response.BerlakuDari = &dari
+	}
+
+	if row.BerlakuSampai != nil {
+		sampai := row.BerlakuSampai.Format(dateOnly)
+		response.BerlakuSampai = &sampai
+	}
+
+	return response
+}
+
+func DaftarHargaJualToResponses(list []entity.DaftarHargaJual) []model.DaftarHargaJualResponse {
+	responses := make([]model.DaftarHargaJualResponse, len(list))
+	for i := range list {
+		responses[i] = *DaftarHargaJualToResponse(&list[i])
+	}
+
+	return responses
+}

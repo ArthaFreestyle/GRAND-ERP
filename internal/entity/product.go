@@ -65,3 +65,45 @@ type ProductHargaJual struct {
 
 	NamaSatuan string
 }
+
+// HargaJualBerlaku is the product_harga_jual version in force for one product and
+// satuan on a given date — isu #8 fase 1. Resolving it is a plain WHERE, never a
+// DISTINCT ON: product_harga_jual_no_overlap guarantees at most one row can match, so
+// if that exclusion constraint is ever relaxed this resolver becomes ambiguous right
+// along with it.
+type HargaJualBerlaku struct {
+	IDHargaJual   int64
+	IDSatuan      int64
+	NamaSatuan    string
+	Harga         string
+	BerlakuDari   time.Time
+	BerlakuSampai *time.Time
+}
+
+// HargaBerlaku is the batch resolver's answer for one (product, satuan) pair — just
+// enough to fill penjualan_detail.id_harga_jual and the price to charge, the same way
+// FindFaktorBatch returns a bare faktor rather than a full product_satuan row.
+type HargaBerlaku struct {
+	IDHargaJual int64
+	Harga       string
+}
+
+// DaftarHargaJual is one product+satuan row in the cross-product price list — isu #8
+// fase 3. IDSatuan, IDHargaJual, and the price columns are nil when the product has no
+// version in force for that satuan on the requested date — including a product with
+// no price registered at all, which the LEFT JOIN behind this projection keeps
+// findable rather than letting it fall out of the list.
+type DaftarHargaJual struct {
+	IDProduct   int64
+	KodeBarang  string
+	NamaProduct string
+	IsAktif     bool
+
+	IDSatuan   *int64
+	NamaSatuan *string
+
+	IDHargaJual   *int64
+	Harga         *string
+	BerlakuDari   *time.Time
+	BerlakuSampai *time.Time
+}

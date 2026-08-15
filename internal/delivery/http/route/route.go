@@ -196,12 +196,27 @@ func (c *RouteConfig) setupAuthRoute() {
 	// grouped here too rather than with CASHIER, because product_harga_jual only feeds
 	// the default price on an input screen — the price actually charged is a snapshot
 	// on penjualan_detail, which is a different module's decision.
+	//
+	// /product/harga-jual (isu #8 fase 3) is registered ahead of /product/:id so the
+	// literal segment cannot be swallowed by the :id parameter — Fiber's router
+	// prefers a static match at the same position regardless of order, but naming the
+	// order here removes any doubt.
 	api.Get("/product", c.ProductController.List)
+	api.Get("/product/harga-jual", c.ProductController.DaftarHargaJual)
 	api.Get("/product/:id", c.ProductController.Get)
 	api.Post("/product", inventaris, c.ProductController.Create)
 	api.Patch("/product/:id", inventaris, c.ProductController.Update)
 	api.Post("/product/:id/satuan", inventaris, c.ProductController.AddSatuan)
+
+	// harga-jual (isu #8): GET resolves which version is in force, open to any
+	// authenticated caller like every other read; POST/PATCH/DELETE mutate the price
+	// list and sit with INVENTARIS same as the rest of this block. PATCH and DELETE
+	// are refused once a penjualan_detail line references the version — enforced in
+	// the usecase, not the route.
+	api.Get("/product/:id/harga-jual", c.ProductController.HargaBerlaku)
 	api.Post("/product/:id/harga-jual", inventaris, c.ProductController.AddHargaJual)
+	api.Patch("/product/:id/harga-jual/:id_harga", inventaris, c.ProductController.UpdateHargaJual)
+	api.Delete("/product/:id/harga-jual/:id_harga", inventaris, c.ProductController.DeleteHargaJual)
 
 	// riwayat-beli is a read, so it follows the read rule and is open to any
 	// authenticated caller. It is the replacement for a purchase order: what an

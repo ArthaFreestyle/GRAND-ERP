@@ -255,6 +255,13 @@ func truncateMaster(t *testing.T) {
 		// matters more than most: a row left behind here does not fail a later test's
 		// insert, it silently refuses its posting.
 		"periode",
+		// penjualan_detail.id_harga_jual references product_harga_jual, and
+		// penjualan_detail.id_product/penjualan.id_ruang reference product/ruang, so
+		// both have to precede all three. There is no Go layer for either table yet
+		// (isu #8 fase 2's tests insert them with raw SQL to prove the
+		// already-used-by-a-document guard), but the schema has existed since
+		// migration 000006 and truncateMaster has to know about it regardless.
+		"penjualan_detail", "penjualan",
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.
 		"product_harga_jual", "product_satuan", "product",
