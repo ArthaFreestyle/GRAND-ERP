@@ -38,6 +38,7 @@ type RouteConfig struct {
 	SusulanController    *deliveryhttp.PenerimaanSusulanController
 	ReturController      *deliveryhttp.ReturPembelianController
 	MutasiController     *deliveryhttp.MutasiController
+	PemakaianController  *deliveryhttp.PemakaianController
 	PembayaranController *deliveryhttp.PembayaranUtangController
 	ProductController    *deliveryhttp.ProductController
 	UnitKerjaController  *deliveryhttp.UnitKerjaController
@@ -305,6 +306,24 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Put("/mutasi/:id/detail", inventaris, c.MutasiController.ReplaceDetail)
 	api.Post("/mutasi/:id/posting", superadmin, c.MutasiController.Posting)
 	api.Post("/mutasi/:id/batal", superadmin, c.MutasiController.Batal)
+
+	// pemakaian is the fifth module to write kartu_stok, and the first to take goods
+	// out with no counterparty at all — no supplier, no customer, no destination room.
+	// It keeps DIAJUKAN, unlike mutasi, and adds a further DISETUJUI stage on top of
+	// it: approval decides HOW MUCH may leave, posting records that it actually did.
+	// INVENTARIS types the request and submits it; SUPERADMIN approves, rejects,
+	// posts, and voids — the same split every other kartu_stok writer uses, along the
+	// workflow stage rather than the data.
+	api.Get("/pemakaian", c.PemakaianController.List)
+	api.Get("/pemakaian/:id", c.PemakaianController.Get)
+	api.Post("/pemakaian", inventaris, c.PemakaianController.Create)
+	api.Patch("/pemakaian/:id", inventaris, c.PemakaianController.Update)
+	api.Put("/pemakaian/:id/detail", inventaris, c.PemakaianController.ReplaceDetail)
+	api.Post("/pemakaian/:id/ajukan", inventaris, c.PemakaianController.Ajukan)
+	api.Post("/pemakaian/:id/setujui", superadmin, c.PemakaianController.Setujui)
+	api.Post("/pemakaian/:id/tolak", superadmin, c.PemakaianController.Tolak)
+	api.Post("/pemakaian/:id/posting", superadmin, c.PemakaianController.Posting)
+	api.Post("/pemakaian/:id/batal", superadmin, c.PemakaianController.Batal)
 
 	// pembayaran-utang is the first module that touches no stock at all, so the reason the
 	// three above split by workflow stage does not apply to it — nothing it writes is
