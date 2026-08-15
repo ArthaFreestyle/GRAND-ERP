@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -410,6 +411,299 @@ func (r *ProductRepository) InsertHargaJual(ctx context.Context, db DBTX, harga 
 //
 // harga is cast to TEXT so NUMERIC(20,2) arrives as the exact decimal PostgreSQL
 // stored. Scanning it into a float64 would round money on the way out.
+// FindHargaBerlaku answers which price version is in force, per satuan, for one
+// product on one date — isu #8 fase 1. The database's own decision, not something
+// resolved in Go: because product_harga_jual_no_overlap forbids two versions from
+// ever being valid at once, "which one applies" is a plain WHERE rather than a
+// DISTINCT ON "latest wins" — there is never more than one candidate to pick from.
+func (r *ProductRepository) FindHargaBerlaku(ctx context.Context, db DBTX, productID int64, tanggal time.Time) ([]entity.HargaJualBerlaku, error) {
+	const query = `
+		SELECT h.id, h.id_satuan, s.nama, h.harga::TEXT, h.berlaku_dari, h.berlaku_sampai
+		FROM product_harga_jual h
+		JOIN satuan s ON s.id = h.id_satuan
+		WHERE h.id_product = $1
+		  AND h.berlaku_dari <= $2
+		  AND (h.berlaku_sampai IS NULL OR h.berlaku_sampai > $2)
+		ORDER BY s.nama, h.id_satuan`
+
+	rows, err := db.QueryContext(ctx, query, productID, tanggal)
+	if err != nil {
+		return nil, fmt.Errorf("select harga berlaku: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.HargaJualBerlaku, 0, 4)
+
+	for rows.Next() {
+		var harga entity.HargaJualBerlaku
+
+		if err := rows.Scan(
+			&harga.IDHargaJual, &harga.IDSatuan, &harga.NamaSatuan,
+			&harga.Harga, &harga.BerlakuDari, &harga.BerlakuSampai,
+		); err != nil {
+			return nil, fmt.Errorf("scan harga berlaku: %w", err)
+		}
+
+		list = append(list, harga)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate harga berlaku: %w", err)
+	}
+
+	return list, nil
+}
+
+// HargaBerlakuKey identifies one (product, unit) pair in the batch price lookup,
+// mirroring FaktorKey.
+type HargaBerlakuKey struct {
+	IDProduct int64
+	IDSatuan  int64
+}
+
+// FindHargaBerlakuBatch resolves the price in force for many (product, unit) pairs at
+// once, on one date — isu #8 fase 1, built for penjualan to fill a whole basket of
+// lines in one query rather than one round trip per line, exactly like
+// FindFaktorBatch and KartuStokRepository.SaldoBatch.
+//
+// A pair missing from the result has no price in force on that date — including a
+// product that has never had one — and the caller decides what that means: this
+// codebase already promises a price is a proposal, not a requirement, so an absent
+// entry is not itself an error.
+func (r *ProductRepository) FindHargaBerlakuBatch(ctx context.Context, db DBTX, productIDs, satuanIDs []int64, tanggal time.Time) (map[HargaBerlakuKey]entity.HargaBerlaku, error) {
+	const query = `
+		SELECT h.id_product, h.id_satuan, h.id, h.harga::TEXT
+		FROM product_harga_jual h
+		JOIN unnest($1::BIGINT[], $2::BIGINT[]) AS pasangan(id_product, id_satuan)
+			ON h.id_product = pasangan.id_product AND h.id_satuan = pasangan.id_satuan
+		WHERE h.berlaku_dari <= $3
+		  AND (h.berlaku_sampai IS NULL OR h.berlaku_sampai > $3)`
+
+	rows, err := db.QueryContext(ctx, query, productIDs, satuanIDs, tanggal)
+	if err != nil {
+		return nil, fmt.Errorf("select harga berlaku batch: %w", err)
+	}
+	defer rows.Close()
+
+	hasil := make(map[HargaBerlakuKey]entity.HargaBerlaku, len(productIDs))
+
+	for rows.Next() {
+		var key HargaBerlakuKey
+		var harga entity.HargaBerlaku
+
+		if err := rows.Scan(&key.IDProduct, &key.IDSatuan, &harga.IDHargaJual, &harga.Harga); err != nil {
+			return nil, fmt.Errorf("scan harga berlaku batch: %w", err)
+		}
+
+		hasil[key] = harga
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate harga berlaku batch: %w", err)
+	}
+
+	return hasil, nil
+}
+
+// HargaJualDipakaiDokumen reports whether a price version has already been used by a
+// penjualan_detail line — isu #8 fase 2, the one guard both UpdateHargaJual and
+// DeleteHargaJual are refused by. penjualan_detail already snapshots
+// harga_satuan_input, so touching the master row here would never change what a past
+// document billed — but it would leave id_harga_jual pointing at a row that no longer
+// says which price-list version that document came from, and that trace is the only
+// one this system keeps.
+func (r *ProductRepository) HargaJualDipakaiDokumen(ctx context.Context, db DBTX, idHargaJual int64) (bool, error) {
+	const query = `SELECT EXISTS (SELECT 1 FROM penjualan_detail WHERE id_harga_jual = $1)`
+
+	var dipakai bool
+	if err := db.QueryRowContext(ctx, query, idHargaJual).Scan(&dipakai); err != nil {
+		return false, fmt.Errorf("check penjualan_detail id_harga_jual: %w", err)
+	}
+
+	return dipakai, nil
+}
+
+// FindHargaJualByID locks and returns one price version, scoped to its own product so
+// a caller cannot reach across products with a bare id. Used by DeleteHargaJual to
+// read the row's id_satuan and berlaku_dari/berlaku_sampai before removing it — the
+// facts ReopenPreviousHargaJual needs to know what to hand back to the version before
+// it.
+func (r *ProductRepository) FindHargaJualByID(ctx context.Context, db DBTX, id, productID int64) (*entity.ProductHargaJual, error) {
+	const query = `
+		SELECT id, id_product, id_satuan, harga::TEXT, berlaku_dari, berlaku_sampai,
+		       created_at, created_by
+		FROM product_harga_jual
+		WHERE id = $1 AND id_product = $2
+		FOR UPDATE`
+
+	harga := new(entity.ProductHargaJual)
+
+	err := db.QueryRowContext(ctx, query, id, productID).Scan(
+		&harga.ID, &harga.IDProduct, &harga.IDSatuan, &harga.Harga,
+		&harga.BerlakuDari, &harga.BerlakuSampai, &harga.CreatedAt, &harga.CreatedBy,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return harga, nil
+}
+
+// UpdateHargaJual corrects the price on an existing version. id_satuan and
+// berlaku_dari are absent on purpose — see model.UpdateProductHargaJualRequest:
+// berlaku_dari shifts a range and can collide with a neighbour, so the correction for
+// that is delete-and-retype, which is what should show up in the trail anyway.
+func (r *ProductRepository) UpdateHargaJual(ctx context.Context, db DBTX, id, productID int64, harga string) (*entity.ProductHargaJual, error) {
+	const query = `
+		UPDATE product_harga_jual
+		SET harga = $3
+		WHERE id = $1 AND id_product = $2
+		RETURNING id, id_product, id_satuan, harga::TEXT, berlaku_dari, berlaku_sampai,
+		          created_at, created_by`
+
+	updated := new(entity.ProductHargaJual)
+
+	err := db.QueryRowContext(ctx, query, id, productID, harga).Scan(
+		&updated.ID, &updated.IDProduct, &updated.IDSatuan, &updated.Harga,
+		&updated.BerlakuDari, &updated.BerlakuSampai, &updated.CreatedAt, &updated.CreatedBy,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return updated, nil
+}
+
+// DeleteHargaJual removes one price version outright — the third exception to
+// "master data has no DELETE", after user_role and dokumen. The row it is allowed to
+// remove is one no document references (HargaJualDipakaiDokumen guards that before
+// this is ever called), so there is no audit trail to lose: nothing ever depended on
+// it. sql.ErrNoRows means the id does not exist under this product.
+func (r *ProductRepository) DeleteHargaJual(ctx context.Context, db DBTX, id, productID int64) error {
+	const query = `DELETE FROM product_harga_jual WHERE id = $1 AND id_product = $2`
+
+	result, err := db.ExecContext(ctx, query, id, productID)
+	if err != nil {
+		return fmt.Errorf("delete product_harga_jual: %w", err)
+	}
+
+	n, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected delete product_harga_jual: %w", err)
+	}
+	if n == 0 {
+		return sql.ErrNoRows
+	}
+
+	return nil
+}
+
+// ReopenPreviousHargaJual undoes what CloseOpenHargaJual did to the version
+// immediately before the one being deleted: it hands berlaku_sampai back to whatever
+// the deleted version's own berlaku_sampai was (NULL if the deleted version was the
+// open-ended one). The version to reopen is identified by berlaku_sampai equalling
+// the deleted row's berlaku_dari — that is exactly the date CloseOpenHargaJual closed
+// it to when the now-deleted version was opened.
+//
+// Without this, deleting a version leaves a gap: a date range covered by no price at
+// all, which FindHargaBerlaku would then read back as "no price" for a product that
+// plainly has one. A product with no earlier version simply has nothing to reopen —
+// zero rows affected is not an error, it means the deleted version was the first ever.
+func (r *ProductRepository) ReopenPreviousHargaJual(ctx context.Context, db DBTX, productID, satuanID int64, berlakuDariDihapus time.Time, berlakuSampaiDihapus *time.Time) error {
+	const query = `
+		UPDATE product_harga_jual
+		SET berlaku_sampai = $4
+		WHERE id_product = $1 AND id_satuan = $2 AND berlaku_sampai = $3`
+
+	if _, err := db.ExecContext(
+		ctx, query, productID, satuanID, berlakuDariDihapus, berlakuSampaiDihapus,
+	); err != nil {
+		return fmt.Errorf("reopen previous product_harga_jual: %w", err)
+	}
+
+	return nil
+}
+
+// daftarHargaFrom is shared by SearchDaftarHargaJual's COUNT and row query — isu #8
+// fase 3. The date filter lives in the LEFT JOIN's ON clause, not in a WHERE: a
+// product with no version in force on the requested date must still produce one row
+// with null price columns, which is the entire point of using LEFT JOIN over JOIN
+// here — putting the date check in WHERE would silently turn it back into an inner
+// join and drop exactly the products this list exists to surface.
+const daftarHargaFrom = `
+	FROM product p
+	LEFT JOIN product_harga_jual h
+		ON h.id_product = p.id
+		AND h.berlaku_dari <= $3
+		AND (h.berlaku_sampai IS NULL OR h.berlaku_sampai > $3)
+	LEFT JOIN satuan s ON s.id = h.id_satuan`
+
+// daftarHargaFilter is shared by the COUNT and the row query, same discipline as
+// productFilter: two copies drift and total_item stops agreeing with the rows.
+const daftarHargaFilter = `
+	WHERE ($1 = '' OR p.nama ILIKE '%' || $1 || '%' OR p.kode_barang ILIKE '%' || $1 || '%')
+	  AND ($2::BOOLEAN IS NULL OR p.is_aktif = $2)`
+
+const daftarHargaColumns = `p.id, p.kode_barang, p.nama, p.is_aktif,
+	h.id_satuan, s.nama, h.id, h.harga::TEXT, h.berlaku_dari, h.berlaku_sampai`
+
+// SearchDaftarHargaJual lists one row per product and satuan with a price in force on
+// tanggal, plus every product with none at all — isu #8 fase 3. It is a read that is
+// not its own module: no new table, no migration, one query in the repository that
+// already owns product_harga_jual, following the shape riwayat_beli set for a
+// projection over rows that already exist.
+func (r *ProductRepository) SearchDaftarHargaJual(ctx context.Context, db DBTX, search string, isAktif *bool, tanggal time.Time, limit, offset int) ([]entity.DaftarHargaJual, int64, error) {
+	search = EscapeLike(search)
+
+	var total int64
+	if err := db.QueryRowContext(
+		ctx, `SELECT COUNT(*) `+daftarHargaFrom+daftarHargaFilter, search, isAktif, tanggal,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count daftar harga jual: %w", err)
+	}
+
+	if total == 0 {
+		return []entity.DaftarHargaJual{}, 0, nil
+	}
+
+	// ORDER BY ends in (p.id, h.id_satuan): p.id alone is unique per product, and
+	// h.id_satuan is what makes a multi-satuan product's own rows deterministic —
+	// the no-overlap constraint keeps at most one price row per (product, satuan) on
+	// any given date, so that pair is never ambiguous even with h.id_satuan NULL for
+	// a priceless product, which can only ever produce that one row.
+	query := `SELECT ` + daftarHargaColumns + daftarHargaFrom + daftarHargaFilter + `
+		ORDER BY p.nama, p.id, h.id_satuan
+		LIMIT $4 OFFSET $5`
+
+	rows, err := db.QueryContext(ctx, query, search, isAktif, tanggal, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("select daftar harga jual: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.DaftarHargaJual, 0, limit)
+
+	for rows.Next() {
+		var row entity.DaftarHargaJual
+
+		if err := rows.Scan(
+			&row.IDProduct, &row.KodeBarang, &row.NamaProduct, &row.IsAktif,
+			&row.IDSatuan, &row.NamaSatuan, &row.IDHargaJual, &row.Harga,
+			&row.BerlakuDari, &row.BerlakuSampai,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan daftar harga jual: %w", err)
+		}
+
+		list = append(list, row)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate daftar harga jual: %w", err)
+	}
+
+	return list, total, nil
+}
+
 func (r *ProductRepository) FindHargaJual(ctx context.Context, db DBTX, productID int64) ([]entity.ProductHargaJual, error) {
 	const query = `
 		SELECT h.id, h.id_product, h.id_satuan, h.harga::TEXT, h.berlaku_dari,

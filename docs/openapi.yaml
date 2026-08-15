@@ -54,6 +54,25 @@ info:
     dokumen transaksi tetap ditunda.
 
 
+    Isu #8 menambah sisi baca dan koreksi `product_harga_jual`, yang sebelumnya cuma
+    bisa ditambah lewat `POST .../harga-jual`. `GET /product/{id}/harga-jual`
+    menjawab versi yang **berlaku** pada satu tanggal, satu baris per satuan —
+    bukan seluruh riwayat seperti `GET /product/{id}`. Penentuannya `WHERE`
+    biasa, bukan "yang terbaru menang": `product_harga_jual_no_overlap` menjamin
+    tidak pernah ada dua versi berlaku bersamaan, jadi tidak pernah ada lebih
+    dari satu kandidat untuk dipilih. `PATCH`/`DELETE
+    .../harga-jual/{id_harga}` mengoreksi atau menghapus satu versi, ditolak
+    **409** begitu ada baris `penjualan_detail` yang merujuknya — snapshot di
+    dokumen itu tidak pernah berubah, tapi `id_harga_jual` yang menunjuk baris
+    yang sudah beda makna bukan snapshot lagi. `DELETE` di sini **keras**, bukan
+    lunak seperti master data lain: baris yang boleh dihapus adalah baris yang
+    tidak satu dokumen pun merujuknya, jadi tidak ada jejak audit yang hilang.
+    Menghapus selalu membuka kembali versi sebelumnya (`berlaku_sampai`-nya)
+    supaya tidak meninggalkan rentang tanggal tanpa harga sama sekali.
+    `GET /product/harga-jual` (tanpa `{id}`) adalah daftar harga lintas produk,
+    `LEFT JOIN` supaya produk yang belum punya harga tetap muncul.
+
+
     Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`. Ambil
     tokennya dari endpoint itu lalu kirim sebagai `Authorization: Bearer <token>`.
 
@@ -783,6 +802,57 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/product/{id}/harga-jual:
+    get:
+      tags: [product]
+      summary: Versi harga yang berlaku, per satuan, pada satu tanggal
+      operationId: getHargaJualBerlaku
+      description: >
+        Isu #8 fase 1 — ini yang sebelumnya tidak ada dan menghalangi `penjualan`:
+        `penjualan_detail.id_harga_jual` mereferensi satu baris versi, bukan sebuah
+        angka, dan sebelum endpoint ini satu-satunya cara mengetahuinya adalah membuka
+        `GET /product/{id}` dan menyerahkan pemilihan "mana yang berlaku" ke klien.
+
+
+        Satu baris per satuan yang punya harga berlaku pada `tanggal`.
+        Penentuannya `WHERE` biasa (`berlaku_dari <= tanggal AND (berlaku_sampai IS
+        NULL OR berlaku_sampai > tanggal)`), bukan "yang terbaru menang" — karena
+        `product_harga_jual_no_overlap` menjamin tidak pernah ada dua versi berlaku
+        bersamaan, tidak pernah ada lebih dari satu kandidat untuk dipilih. Kalau
+        exclusion constraint itu suatu hari dilonggarkan, resolver ini ikut jadi
+        ambigu.
+
+
+        `tanggal` opsional, format `YYYY-MM-DD`, default hari ini di WIB
+        (`Asia/Jakarta`, offset tetap +7 karena tidak ada DST). Ini bukan konversi
+        `TIMESTAMPTZ` — pemanggil menyebut tanggal kalender secara langsung — tapi
+        default "hari ini" tetap harus diputuskan di zona waktu yang sama supaya
+        transaksi lewat tengah malam WIB tidak salah harga.
+
+
+        Produk yang tidak dikenal menjawab **404**; produk yang belum punya harga
+        berlaku pada tanggal itu — termasuk yang belum punya harga sama sekali —
+        menjawab daftar kosong. Dua fakta berbeda, sama seperti argumen di
+        `riwayat_beli`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: tanggal
+          in: query
+          description: Default hari ini di WIB.
+          schema: { type: string, format: date, example: "2026-08-14" }
+      responses:
+        "200":
+          description: Versi yang berlaku, satu baris per satuan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/HargaJualBerlaku" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
     post:
       tags: [product]
       summary: Buka versi harga jual baru
@@ -833,6 +903,132 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/{id}/harga-jual/{id_harga}:
+    patch:
+      tags: [product]
+      summary: Koreksi harga pada versi yang sudah ada
+      operationId: updateProductHargaJual
+      description: >
+        Isu #8 fase 2. Hanya `harga`: `id_satuan` dan `berlaku_dari` tidak ada di body
+        dan tidak bisa diubah lewat endpoint ini, karena `berlaku_dari` menggeser
+        rentang tanggal dan bisa menabrak versi tetangganya. Koreksi untuk itu adalah
+        hapus lalu ketik ulang (`DELETE` di path yang sama), dan itu memang yang
+        seharusnya terlihat di jejak.
+
+
+        Ditolak **409** begitu ada baris `penjualan_detail` yang merujuk
+        `id_harga`. `penjualan_detail.harga_satuan_input` sudah menyimpan snapshot,
+        jadi mengubah baris master ini tidak pernah mengubah nilai nota mana pun —
+        tapi ia membuat `id_harga_jual` menunjuk baris yang tidak lagi menyatakan apa
+        yang ditagih, dan itu satu-satunya jejak "harga ini datang dari daftar harga
+        versi mana".
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/IDHarga"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [harga]
+              properties:
+                harga: { $ref: "#/components/schemas/Harga" }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+    delete:
+      tags: [product]
+      summary: Hapus satu versi harga dan buka kembali versi sebelumnya
+      operationId: deleteProductHargaJual
+      description: >
+        Isu #8 fase 2. **`DELETE` di sini keras, bukan lunak** — pengecualian ketiga
+        atas aturan "master data tidak punya `DELETE`", setelah `user_role` dan
+        `dokumen`. Baris yang boleh dihapus adalah baris yang tidak satu dokumen pun
+        merujuknya (dijaga syarat 409 yang sama seperti `PATCH`), jadi tidak ada jejak
+        audit yang hilang — tidak ada yang pernah memakainya.
+
+
+        Menghapus **selalu** membuka kembali versi sebelumnya dalam transaksi yang
+        sama: `berlaku_sampai` versi itu dikembalikan ke `berlaku_sampai` milik versi
+        yang dihapus (`null` kalau versi yang dihapus itu yang terbuka). Tanpa ini,
+        menghapus versi yang baru akan meninggalkan **lubang** — rentang tanggal tanpa
+        harga sama sekali, dan `GET .../harga-jual` akan menjawab "tidak ada harga"
+        untuk produk yang jelas-jelas punya. Versi paling pertama sebuah produk tidak
+        punya versi sebelumnya untuk dibuka kembali — itu bukan galat, cuma tidak ada
+        apa-apa untuk dilakukan.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/IDHarga"
+      responses:
+        "200":
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/harga-jual:
+    get:
+      tags: [product]
+      summary: Daftar harga lintas produk
+      operationId: listDaftarHargaJual
+      description: >
+        Isu #8 fase 3 — sebuah read yang bukan modul, ikut pola `riwayat_beli`: tidak
+        ada tabel baru, tidak ada migrasi, satu query di repository yang sudah
+        memiliki `product_harga_jual`.
+
+
+        Satu baris per produk + satuan yang punya harga berlaku pada `tanggal`
+        (default hari ini di WIB, sama seperti `GET /product/{id}/harga-jual`),
+        **plus** satu baris per produk yang belum punya harga sama sekali —
+        `LEFT JOIN`, bukan `JOIN`, karena produk tanpa harga justru yang paling perlu
+        muncul di sini. Untuk baris seperti itu, `id_satuan`, `id_harga_jual`, `harga`,
+        `berlaku_dari`, dan `berlaku_sampai` semuanya `null`.
+
+
+        Ini yang dicetak jadi daftar harga dan yang dipakai memeriksa produk mana yang
+        belum punya harga sama sekali — pertanyaan yang tanpa endpoint ini hanya bisa
+        dijawab dengan membuka produk satu per satu.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: tanggal
+          in: query
+          description: Default hari ini di WIB.
+          schema: { type: string, format: date, example: "2026-08-14" }
+        - $ref: "#/components/parameters/IsAktif"
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/DaftarHargaJual" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
 
   /api/v1/product/{id}/riwayat-beli:
     get:
@@ -4125,6 +4321,13 @@ components:
       required: true
       schema: { type: integer, format: int64 }
 
+    IDHarga:
+      name: id_harga
+      in: path
+      required: true
+      description: Id baris `product_harga_jual`, bukan id product — lihat `{id}` di path yang sama.
+      schema: { type: integer, format: int64 }
+
     # periode dikunci (tahun, bulan) dan bukan id, menyimpang dari pola /{id} di modul
     # lain dengan sengaja: pasangan itulah identitas sebenarnya sebuah periode, seperti
     # yang sudah dinyatakan periode_tahun_bulan_uidx. Rute ber-id malah tidak bisa
@@ -4528,6 +4731,46 @@ components:
         String desimal, bukan angka floating point, supaya NUMERIC(20,2) yang disimpan
         PostgreSQL sampai ke klien tanpa pembulatan biner.
       example: "50000.00"
+
+    HargaJualBerlaku:
+      type: object
+      description: >
+        Isu #8 fase 1. Satu versi `product_harga_jual` yang berlaku pada tanggal yang
+        diminta — bukan seluruh riwayat seperti `ProductHargaJual` di dalam `Product`.
+      properties:
+        id_harga_jual:
+          type: integer
+          format: int64
+          description: Ini yang dikirim balik sebagai `penjualan_detail.id_harga_jual`.
+        id_satuan: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        harga: { $ref: "#/components/schemas/Harga" }
+        berlaku_dari: { type: string, format: date }
+        berlaku_sampai:
+          type: string
+          format: date
+          nullable: true
+          description: Eksklusif; `null` berarti tanpa batas akhir. Sama seperti `ProductHargaJual`.
+
+    DaftarHargaJual:
+      type: object
+      description: >
+        Isu #8 fase 3. Satu baris per produk + satuan yang punya harga berlaku pada
+        `tanggal`, plus satu baris per produk yang belum punya harga sama sekali —
+        untuk baris itu setiap field di bawah `id_satuan` bernilai `null`.
+      properties:
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string, example: BRG-001 }
+        nama_product: { type: string }
+        is_aktif: { type: boolean }
+        id_satuan: { type: integer, format: int64, nullable: true }
+        nama_satuan: { type: string, nullable: true }
+        id_harga_jual: { type: integer, format: int64, nullable: true }
+        harga:
+          allOf: [{ $ref: "#/components/schemas/Harga" }]
+          nullable: true
+        berlaku_dari: { type: string, format: date, nullable: true }
+        berlaku_sampai: { type: string, format: date, nullable: true }
 
     Pembelian:
       type: object

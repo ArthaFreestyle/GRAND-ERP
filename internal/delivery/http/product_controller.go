@@ -171,6 +171,98 @@ func (c *ProductController) AddHargaJual(ctx fiber.Ctx) error {
 	return ctx.Status(fiber.StatusCreated).JSON(model.WebResponse[*model.ProductResponse]{Data: response})
 }
 
+// HargaBerlaku reports which price version applies, per satuan, on one date.
+//
+// The id is bound from the path after the query string, so an id_product smuggled
+// into the query cannot point the answer at a different product than the URL names.
+func (c *ProductController) HargaBerlaku(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	request := new(model.ListHargaJualBerlakuRequest)
+	if err := ctx.Bind().Query(request); err != nil {
+		return model.Invalid("malformed query parameters")
+	}
+
+	request.IDProduct = id
+
+	responses, err := c.UseCase.HargaBerlaku(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[[]model.HargaJualBerlakuResponse]{Data: responses})
+}
+
+// UpdateHargaJual corrects the price on an existing version.
+func (c *ProductController) UpdateHargaJual(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	idHarga, err := strconv.ParseInt(ctx.Params("id_harga"), 10, 64)
+	if err != nil {
+		return model.Invalid("id_harga must be an integer")
+	}
+
+	request := new(model.UpdateProductHargaJualRequest)
+	if err := ctx.Bind().Body(request); err != nil {
+		return model.Invalid("malformed request body")
+	}
+
+	request.ID = idHarga
+	request.IDProduct = id
+
+	response, err := c.UseCase.UpdateHargaJual(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.ProductResponse]{Data: response})
+}
+
+// DeleteHargaJual removes a price version outright and reopens whatever version came
+// before it, so no date range is left with no price at all.
+func (c *ProductController) DeleteHargaJual(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	idHarga, err := strconv.ParseInt(ctx.Params("id_harga"), 10, 64)
+	if err != nil {
+		return model.Invalid("id_harga must be an integer")
+	}
+
+	response, err := c.UseCase.DeleteHargaJual(ctx.Context(), &model.DeleteProductHargaJualRequest{
+		ID: idHarga, IDProduct: id,
+	})
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.ProductResponse]{Data: response})
+}
+
+// DaftarHargaJual lists the price in force across every product, one row per product
+// and satuan.
+func (c *ProductController) DaftarHargaJual(ctx fiber.Ctx) error {
+	request := new(model.ListDaftarHargaJualRequest)
+	if err := ctx.Bind().Query(request); err != nil {
+		return model.Invalid("malformed query parameters")
+	}
+
+	responses, paging, err := c.UseCase.DaftarHargaJual(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[[]model.DaftarHargaJualResponse]{Data: responses, Paging: paging})
+}
+
 // RiwayatBeli reports the last posted purchase of this product from each supplier.
 //
 // The id is bound from the path after the query string, so an id_product smuggled into
