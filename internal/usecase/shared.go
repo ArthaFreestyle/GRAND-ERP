@@ -155,6 +155,50 @@ func periksaRuangUnitAktif(ctx context.Context, db repository.DBTX, ruang *repos
 	return nil
 }
 
+// conflictOnRuangBeku maps the kartu_stok trigger's room-freeze rejection (isu
+// #15, SQLSTATE 55000 — object_not_in_prerequisite_state) to a 409, leaving
+// anything else untouched.
+//
+// 409 rather than 400: the request itself is not malformed, the room it names is
+// simply not ready yet, the same reasoning conflictOnTransisi already applies to a
+// document that moved out from under a caller.
+func conflictOnRuangBeku(err error, message string) error {
+	if repository.IsObjectNotInPrerequisiteState(err) {
+		return model.Conflict(message)
+	}
+
+	return err
+}
+
+// periksaRuangBeku refuses a posting into a ruang currently frozen by an open
+// stok_opname, before the kartu_stok trigger has to — isu #15.
+//
+// This is not the guard and must not be mistaken for one — the trigger is, and it
+// decides under the ruang: advisory lock that no reader can get in front of. What
+// this buys is a message naming the opname's own nomor and the room, which a
+// trigger's RAISE cannot: an operator whose posting was refused has to know who to
+// chase, not just that something is wrong.
+//
+// Called at Posting and Batal in every module that writes kartu_stok —
+// stokOpname.FindOpenByRuang answers sql.ErrNoRows for a free room, which this
+// reads as "nothing to check", the same shape periksaPeriode and
+// periksaRuangUnitAktif already use for their own "nothing to check" case.
+func periksaRuangBeku(ctx context.Context, db repository.DBTX, stokOpname *repository.StokOpnameRepository, idRuang int64) error {
+	opname, err := stokOpname.FindOpenByRuang(ctx, db, idRuang)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+
+		return err
+	}
+
+	return model.Conflict(fmt.Sprintf(
+		"ruang %s sedang diopname (nomor %s); transaksi tidak dapat diposting",
+		opname.NamaRuang, opname.Nomor,
+	))
+}
+
 // diLuarUnitAktif reports whether a room's unit_kerja falls outside the
 // caller's active unit — isu #12 fase 6, the read-side counterpart of
 // periksaRuangUnitAktif. A nil aktifIDUnitKerja (global grant, or

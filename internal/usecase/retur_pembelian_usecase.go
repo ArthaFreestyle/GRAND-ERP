@@ -41,6 +41,8 @@ type ReturPembelianUseCase struct {
 	// Read for the error message only; the kartu_stok trigger is the guard. See
 	// PembelianUseCase.
 	PeriodeRepository *repository.PeriodeRepository
+	// StokOpnameRepository is the same narrow borrow, for periksaRuangBeku (isu #15).
+	StokOpnameRepository *repository.StokOpnameRepository
 }
 
 func NewReturPembelianUseCase(
@@ -53,17 +55,19 @@ func NewReturPembelianUseCase(
 	kartuStokRepository *repository.KartuStokRepository,
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
+	stokOpnameRepository *repository.StokOpnameRepository,
 ) *ReturPembelianUseCase {
 	return &ReturPembelianUseCase{
-		DB:                  db,
-		Log:                 log,
-		Validate:            validate,
-		ReturRepository:     returRepository,
-		PembelianRepository: pembelianRepository,
-		ProductRepository:   productRepository,
-		KartuStokRepository: kartuStokRepository,
-		CounterRepository:   counterRepository,
-		PeriodeRepository:   periodeRepository,
+		DB:                   db,
+		Log:                  log,
+		Validate:             validate,
+		ReturRepository:      returRepository,
+		PembelianRepository:  pembelianRepository,
+		ProductRepository:    productRepository,
+		KartuStokRepository:  kartuStokRepository,
+		CounterRepository:    counterRepository,
+		StokOpnameRepository: stokOpnameRepository,
+		PeriodeRepository:    periodeRepository,
 	}
 }
 
@@ -393,6 +397,12 @@ func (c *ReturPembelianUseCase) Posting(ctx context.Context, request *model.Post
 		return nil, err
 	}
 
+	// Same relationship to the freeze that periksaPeriode has to a closed period —
+	// isu #15.
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, retur.IDRuang); err != nil {
+		return nil, err
+	}
+
 	// The invoice value of the goods going back, accumulated as the lines are walked. It
 	// is not the same as their cost: cost carries the freight share, which the supplier
 	// never received. See hitungKreditUtang.
@@ -505,6 +515,10 @@ func (c *ReturPembelianUseCase) Batal(ctx context.Context, request *model.BatalR
 	// not the document's.
 	tanggalPembalik := time.Now()
 	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, tanggalPembalik); err != nil {
+		return nil, err
+	}
+
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, retur.IDRuang); err != nil {
 		return nil, err
 	}
 

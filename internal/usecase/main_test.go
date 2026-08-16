@@ -78,6 +78,7 @@ type app struct {
 	pemakaian  *usecase.PemakaianUseCase
 	penjualan  *usecase.PenjualanUseCase
 	pembayaran *usecase.PembayaranUtangUseCase
+	stokOpname *usecase.StokOpnameUseCase
 	dokumen    *usecase.DokumenUseCase
 	periode    *usecase.PeriodeUseCase
 	auth       *usecase.AuthUseCase
@@ -123,6 +124,7 @@ func newApp(t *testing.T) *app {
 	kartuStokRepository := repository.NewKartuStokRepository()
 	counterRepository := repository.NewDocumentCounterRepository()
 	periodeRepository := repository.NewPeriodeRepository()
+	stokOpnameRepository := repository.NewStokOpnameRepository()
 
 	// t.TempDir is removed when the test ends, so attachments never land in the
 	// developer's real dokumen.storage_path and one test cannot see another's files.
@@ -177,31 +179,42 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate,
 			pembelianRepository, productRepository,
 			kartuStokRepository, counterRepository, periodeRepository, ruangRepository,
+			stokOpnameRepository,
 		),
 		susulan: usecase.NewPenerimaanSusulanUseCase(
 			testDB, log, validate,
 			repository.NewPenerimaanSusulanRepository(), pembelianRepository,
 			productRepository, kartuStokRepository, counterRepository, periodeRepository,
+			stokOpnameRepository,
 		),
 		retur: usecase.NewReturPembelianUseCase(
 			testDB, log, validate,
 			repository.NewReturPembelianRepository(), pembelianRepository,
 			productRepository, kartuStokRepository, counterRepository, periodeRepository,
+			stokOpnameRepository,
 		),
 		mutasi: usecase.NewMutasiUseCase(
 			testDB, log, validate,
 			repository.NewMutasiRepository(), productRepository,
 			kartuStokRepository, counterRepository, periodeRepository, ruangRepository,
+			stokOpnameRepository,
 		),
 		pemakaian: usecase.NewPemakaianUseCase(
 			testDB, log, validate,
 			repository.NewPemakaianRepository(), productRepository,
 			kartuStokRepository, counterRepository, periodeRepository,
+			ruangRepository, stokOpnameRepository,
 		),
 		penjualan: usecase.NewPenjualanUseCase(
 			testDB, log, validate,
 			penjualanRepository, productRepository, repository.NewPelangganRepository(),
 			kartuStokRepository, counterRepository, periodeRepository,
+			ruangRepository, stokOpnameRepository,
+		),
+		stokOpname: usecase.NewStokOpnameUseCase(
+			testDB, log, validate,
+			stokOpnameRepository, kartuStokRepository, counterRepository,
+			periodeRepository, ruangRepository,
 		),
 		pembayaran: usecase.NewPembayaranUtangUseCase(
 			testDB, log, validate,
@@ -245,6 +258,13 @@ func truncateMaster(t *testing.T) {
 	}()
 
 	for _, table := range []string{
+		// stok_opname_detail points AT kartu_stok (id_kartu_stok_cutoff,
+		// id_kartu_stok_penyesuaian), the reverse of every other table below it —
+		// so it has to go before kartu_stok is cleared, not after, or its rows are
+		// left pointing at deleted kartu_stok rows and the DELETE on kartu_stok
+		// itself fails on the foreign key. stok_opname_detail before stok_opname for
+		// the ordinary child-before-parent reason.
+		"stok_opname_detail", "stok_opname",
 		// Children before parents. kartu_stok references product, ruang, satuan and
 		// users; penerimaan_susulan_detail references pembelian_detail, so it has to
 		// go before it.

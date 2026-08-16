@@ -52,6 +52,7 @@ func Bootstrap(config *BootstrapConfig) {
 	penjualanRepository := repository.NewPenjualanRepository()
 	dokumenRepository := repository.NewDokumenRepository()
 	periodeRepository := repository.NewPeriodeRepository()
+	stokOpnameRepository := repository.NewStokOpnameRepository()
 
 	unitKerjaUseCase := usecase.NewUnitKerjaUseCase(
 		config.DB, config.Log, config.Validate, unitKerjaRepository,
@@ -102,22 +103,24 @@ func Bootstrap(config *BootstrapConfig) {
 	periodeUseCase := usecase.NewPeriodeUseCase(
 		config.DB, config.Log, config.Validate, periodeRepository,
 	)
-	// PembelianUseCase takes six repositories: posting a purchase writes the
-	// header, its lines, a reserved document number, and one kartu_stok row per
-	// received line — all in one transaction, because a partial posting would leave
-	// stock that no document explains and kartu_stok cannot be edited afterwards.
+	// PembelianUseCase writes the header, its lines, a reserved document number,
+	// and one kartu_stok row per received line — all in one transaction, because a
+	// partial posting would leave stock that no document explains and kartu_stok
+	// cannot be edited afterwards.
 	//
-	// PeriodeRepository is the fifth and is only there for the error message: the
-	// kartu_stok trigger is what actually refuses a closed month, but its RAISE carries
+	// PeriodeRepository is only there for the error message: the kartu_stok
+	// trigger is what actually refuses a closed month, but its RAISE carries
 	// no constraint name, so without a read of its own this module could only tell an
 	// operator that either the period is closed or the stock is short.
 	//
-	// RuangRepository is the sixth, borrowed to validate Create's id_ruang against the
-	// caller's active unit_kerja (isu #12 fase 5).
+	// RuangRepository is borrowed to validate Create's id_ruang against the
+	// caller's active unit_kerja (isu #12 fase 5). StokOpnameRepository is the same
+	// narrow borrow every kartu_stok writer gets, for periksaRuangBeku's message
+	// (isu #15).
 	pembelianUseCase := usecase.NewPembelianUseCase(
 		config.DB, config.Log, config.Validate,
 		pembelianRepository, productRepository, kartuStokRepository, counterRepository,
-		periodeRepository, ruangRepository,
+		periodeRepository, ruangRepository, stokOpnameRepository,
 	)
 	// PenerimaanSusulanUseCase reaches into pembelian on purpose: a follow-up
 	// receipt is defined as the remainder of a purchase, so it reads that document's
@@ -127,51 +130,55 @@ func Bootstrap(config *BootstrapConfig) {
 	susulanUseCase := usecase.NewPenerimaanSusulanUseCase(
 		config.DB, config.Log, config.Validate,
 		susulanRepository, pembelianRepository, productRepository,
-		kartuStokRepository, counterRepository, periodeRepository,
+		kartuStokRepository, counterRepository, periodeRepository, stokOpnameRepository,
 	)
-	// ReturPembelianUseCase takes the same five as the follow-up receipt above, and for
-	// the same reasons — it is the mirror document. It reads the purchase's lines for
+	// ReturPembelianUseCase takes the same repositories as the follow-up receipt
+	// above, and for the same reasons — it is the mirror document. It reads the purchase's lines for
 	// the cost to copy and locks the purchase to serialise returns against each other.
 	// What it does NOT do is rewrite status_penerimaan: sending goods back does not make
 	// a delivery incomplete.
 	returUseCase := usecase.NewReturPembelianUseCase(
 		config.DB, config.Log, config.Validate,
 		returRepository, pembelianRepository, productRepository,
-		kartuStokRepository, counterRepository, periodeRepository,
+		kartuStokRepository, counterRepository, periodeRepository, stokOpnameRepository,
 	)
-	// MutasiUseCase takes six repositories. A transfer points at no parent document, so
-	// nothing here reads or rewrites another module's rows except for two narrow reads:
-	// product for the conversion factors, and ruang to validate id_ruang_asal against
-	// the caller's active unit_kerja (isu #12 fase 5) — never id_ruang_tujuan, since
-	// cross-unit transfers are allowed by design. kartu_stok is for two rows per line
+	// MutasiUseCase: a transfer points at no parent document, so nothing here reads
+	// or rewrites another module's rows except for narrow reads: product for the
+	// conversion factors, ruang to validate id_ruang_asal against the caller's
+	// active unit_kerja (isu #12 fase 5) — never id_ruang_tujuan, since cross-unit
+	// transfers are allowed by design — and, since isu #15, both rooms' ruang:
+	// locks and periksaRuangBeku's message. kartu_stok is for two rows per line
 	// plus the balance locks that keep two opposite transfers of the same goods from
 	// deadlocking each other.
 	mutasiUseCase := usecase.NewMutasiUseCase(
 		config.DB, config.Log, config.Validate,
 		mutasiRepository, productRepository, kartuStokRepository, counterRepository,
-		periodeRepository, ruangRepository,
+		periodeRepository, ruangRepository, stokOpnameRepository,
 	)
-	// PemakaianUseCase takes five repositories, one fewer than pembelian and mutasi:
-	// unlike those two it has no RuangRepository, because isu #9 does not ask for
-	// id_ruang to be validated against the caller's active unit_kerja. It reaches into
-	// product for the conversion factors and kartu_stok for the outgoing rows plus the
-	// balance locks — the same ABBA risk mutasi guards against, even though every line
-	// here shares one room.
+	// PemakaianUseCase has no use for periksaRuangUnitAktif, unlike pembelian and
+	// mutasi: isu #9 does not ask for id_ruang to be validated against the caller's
+	// active unit_kerja. It reaches into product for the conversion factors and
+	// kartu_stok for the outgoing rows plus the balance locks — the same ABBA risk
+	// mutasi guards against, even though every line here shares one room. Its
+	// RuangRepository is for LockShared alone (isu #15), and StokOpnameRepository is
+	// the narrow borrow for periksaRuangBeku's message.
 	pemakaianUseCase := usecase.NewPemakaianUseCase(
 		config.DB, config.Log, config.Validate,
 		pemakaianRepository, productRepository, kartuStokRepository, counterRepository,
-		periodeRepository,
+		periodeRepository, ruangRepository, stokOpnameRepository,
 	)
-	// PenjualanUseCase takes six repositories, one more than pemakaian: the extra
-	// one is PelangganRepository, borrowed for exactly one narrow read — a
-	// customer's plafon_kredit and running receivable, checked at Posting for a
-	// KREDIT nota (isu #10 fase 2). Like pemakaian it holds no RuangRepository:
-	// isu #10 does not ask for id_ruang to be validated against the caller's
-	// active unit_kerja.
+	// PenjualanUseCase's PelangganRepository is borrowed for exactly one narrow
+	// read — a customer's plafon_kredit and running receivable, checked at Posting
+	// for a KREDIT nota (isu #10 fase 2). Like pemakaian it has no use for
+	// periksaRuangUnitAktif: isu #10 does not ask for id_ruang to be validated
+	// against the caller's active unit_kerja. RuangRepository and
+	// StokOpnameRepository are the same isu #15 additions pemakaian got, for
+	// LockShared and periksaRuangBeku's message.
 	penjualanUseCase := usecase.NewPenjualanUseCase(
 		config.DB, config.Log, config.Validate,
 		penjualanRepository, productRepository, pelangganRepository,
 		kartuStokRepository, counterRepository, periodeRepository,
+		ruangRepository, stokOpnameRepository,
 	)
 	// PembayaranUtangUseCase is the first transaction usecase that needs no
 	// KartuStokRepository at all: money moving to a supplier changes no stock. It reaches
@@ -181,6 +188,17 @@ func Bootstrap(config *BootstrapConfig) {
 	pembayaranUseCase := usecase.NewPembayaranUtangUseCase(
 		config.DB, config.Log, config.Validate,
 		pembayaranRepository, pembelianRepository, counterRepository,
+	)
+	// StokOpnameUseCase is the seventh module to write kartu_stok, and the only one
+	// whose Posting/Batal need RuangRepository for its exclusive/shared ruang: lock
+	// rather than only the narrow read every other module borrows it for — isu #15.
+	// It holds no ProductRepository: unlike every other document, a count is always
+	// in the base unit, compared directly against kartu_stok, so there is no
+	// conversion factor to resolve.
+	stokOpnameUseCase := usecase.NewStokOpnameUseCase(
+		config.DB, config.Log, config.Validate,
+		stokOpnameRepository, kartuStokRepository, counterRepository,
+		periodeRepository, ruangRepository,
 	)
 	// DokumenUseCase is the first usecase holding a store that is not the database.
 	// The storage interface is what keeps that fact from spreading: swapping local
@@ -230,6 +248,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pemakaianController := deliveryhttp.NewPemakaianController(config.Log, pemakaianUseCase)
 	penjualanController := deliveryhttp.NewPenjualanController(config.Log, penjualanUseCase)
 	pembayaranController := deliveryhttp.NewPembayaranUtangController(config.Log, pembayaranUseCase)
+	stokOpnameController := deliveryhttp.NewStokOpnameController(config.Log, stokOpnameUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
 
@@ -255,6 +274,7 @@ func Bootstrap(config *BootstrapConfig) {
 		PemakaianController:  pemakaianController,
 		PenjualanController:  penjualanController,
 		PembayaranController: pembayaranController,
+		StokOpnameController: stokOpnameController,
 		ProductController:    productController,
 		UnitKerjaController:  unitKerjaController,
 		RuangController:      ruangController,

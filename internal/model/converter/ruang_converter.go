@@ -15,6 +15,8 @@ func RuangToResponse(ruang *entity.Ruang) *model.RuangResponse {
 		IsAktif:       ruang.IsAktif,
 		IDUnitKerja:   ruang.IDUnitKerja,
 		NamaUnitKerja: ruang.NamaUnitKerja,
+
+		NomorOpnameBeku: ruang.NomorOpnameBeku,
 	}
 }
 

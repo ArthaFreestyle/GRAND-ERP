@@ -200,6 +200,7 @@ tags:
   - name: mutasi
   - name: pemakaian
   - name: penjualan
+  - name: stok-opname
   - name: product
   - name: periode
   - name: docs
@@ -3964,6 +3965,428 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
+  /api/v1/stok-opname:
+    get:
+      tags: [stok-opname]
+      summary: List stok opname
+      operationId: listStokOpname
+      description: >
+        Tidak menyertakan `detail`; kuncinya hilang sama sekali, bukan array kosong.
+
+
+        `status=DIAJUKAN` dengan `terlama_dulu=true` adalah antrean verifikasi, dan
+        sejak isu #15 juga daftar ruang yang sedang berhenti bekerja.
+
+
+        Isu #12 fase 6: dokumen yang `id_ruang`-nya di luar unit_kerja aktif sesi
+        pemanggil dilewati begitu saja, tanpa error.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        - name: id_ruang
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+        - name: terlama_dulu
+          in: query
+          description: Urutkan paling lama dulu, untuk dibaca sebagai antrean.
+          schema: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/StokOpname" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [stok-opname]
+      summary: Buka sesi hitung fisik
+      operationId: createStokOpname
+      description: >
+        Nomor diambil dari `document_counter` dengan prefix `SO`. `ts_cutoff` diisi
+        server dari `now()`, tidak pernah dari body. Ruang yang disebut **mulai beku
+        seketika**: sejak baris ini ada, trigger `kartu_stok` menolak posting apa pun
+        ke ruang itu dari modul mana pun, sampai dokumen ini `POSTED` atau `BATAL`
+        (isu #15).
+
+
+        Ditolak 409 kalau ruang itu masih punya opname lain yang belum selesai
+        (`stok_opname_ruang_terbuka_uidx`).
+
+
+        **Isu #12 fase 5:** `id_ruang` divalidasi terhadap unit_kerja aktif sesi
+        pemanggil, kalau tidak → 403.
+
+
+        Role: `INVENTARIS`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id_ruang]
+              properties:
+                id_ruang: { type: integer, format: int64, minimum: 1 }
+                uraian_so: { type: string, maxLength: 1000, nullable: true }
+      responses:
+        "201":
+          description: Sesi dibuka
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stok-opname/{id}:
+    get:
+      tags: [stok-opname]
+      summary: Detail stok opname beserta barisnya
+      operationId: getStokOpname
+      description: >
+        Isu #12 fase 6: menjawab 404 kalau ruangnya di luar unit_kerja aktif sesi
+        pemanggil, seperti id yang benar-benar tidak ada.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Detail
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [stok-opname]
+      summary: Ubah uraian_so
+      operationId: updateStokOpname
+      description: >
+        Satu-satunya field header yang boleh diubah lewat PATCH — `id_ruang` tidak
+        bisa berubah, karena snapshot cutoff dan seluruh barisnya sudah menunjuk
+        ruang tempat dokumen ini dibuka.
+
+
+        Hanya saat `DRAFT`. Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                uraian_so: { type: string, maxLength: 1000, nullable: true }
+      responses:
+        "200":
+          description: Diubah
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stok-opname/{id}/tarik-saldo:
+    post:
+      tags: [stok-opname]
+      summary: Isi baris dari saldo ruang saat ini
+      operationId: tarikSaldoStokOpname
+      description: >
+        Mengisi satu baris untuk setiap produk yang pernah bergerak di ruang ini:
+        `stok_awal` = saldo saat ini, `id_kartu_stok_cutoff` = baris `kartu_stok`
+        acuannya, `stok_so` dibiarkan `null` (belum dihitung). Karena ruangnya sudah
+        beku sejak dokumen dibuka, "saldo sekarang" dan "saldo saat cutoff" adalah
+        angka yang sama.
+
+
+        Hanya boleh sekali — ditolak 409 kalau dokumen sudah punya baris. Barang
+        yang terlewat tetap bisa ditambah manual lewat `PUT .../detail`.
+
+
+        Hanya saat `DRAFT`. Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Baris terisi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stok-opname/{id}/detail:
+    put:
+      tags: [stok-opname]
+      summary: Ganti seluruh baris stok opname
+      operationId: replaceStokOpnameDetail
+      description: >
+        Mengganti seluruh baris sekaligus — juga cara menambah barang yang terlewat
+        `tarik-saldo` secara manual. Setiap `id_product` yang disebut harus sudah
+        punya baris `kartu_stok` untuk `(produk, ruang ini)`; yang belum pernah
+        bergerak di ruang ini ditolak 400 — lihat "Barang yang sistem belum pernah
+        lihat" di CLAUDE.md.
+
+
+        `stok_so` setiap baris kembali ke `null` (belum dihitung) — isi ulang lewat
+        `PATCH .../detail/{id_detail}`.
+
+
+        Hanya saat `DRAFT`. Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [detail]
+              properties:
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 1000
+                  items: { $ref: "#/components/schemas/StokOpnameDetailInput" }
+      responses:
+        "200":
+          description: Baris diganti
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stok-opname/{id}/detail/{id_detail}:
+    patch:
+      tags: [stok-opname]
+      summary: Isi hasil hitung satu baris
+      operationId: updateStokOpnameDetail
+      description: >
+        **Satu-satunya pengecualian di seluruh API ini** terhadap "baris diganti
+        sekaligus, tidak pernah satu-satu" — diisi bertahap oleh orang yang berjalan
+        menyusuri rak, bukan diketik ulang sekali seperti baris `pembelian`.
+
+
+        `stok_selisih_lebih`/`stok_selisih_kurang` **selalu dihitung ulang** dari
+        `stok_so` terhadap `stok_awal` oleh statement ini sendiri — tidak pernah
+        diterima dari body.
+
+
+        Hanya saat `DRAFT`. Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: id_detail
+          in: path
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                stok_so:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  nullable: true
+                  description: >
+                    `null` berarti "belum dihitung", bukan nol — lihat `StokOpnameDetail`.
+                keterangan: { type: string, maxLength: 500, nullable: true }
+      responses:
+        "200":
+          description: Baris diisi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stok-opname/{id}/ajukan:
+    post:
+      tags: [stok-opname]
+      summary: Ajukan draft hitung untuk diverifikasi
+      operationId: ajukanStokOpname
+      description: >
+        `DRAFT` → `DIAJUKAN`. Ditolak 400 kalau tidak satu pun baris punya `stok_so`
+        terisi — dokumen kosong, bukan hitungan. Tidak ditolak karena masih ada
+        baris `null`: hitung sebagian (satu rak, satu kategori) sah, dan responsnya
+        melaporkan `jumlah_belum_dihitung` supaya verifikator memutuskan dengan
+        sadar. Ruangnya tetap beku setelah ini.
+
+
+        Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diajukan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stok-opname/{id}/tolak:
+    post:
+      tags: [stok-opname]
+      summary: Kembalikan hitungan ke DRAFT untuk dihitung ulang
+      operationId: tolakStokOpname
+      description: >
+        `DIAJUKAN` → `DRAFT` — koreksi kertas, bukan keputusan bisnis seperti
+        penolakan `pemakaian`, sehingga bukan status terminal. Ruangnya **tetap
+        beku**: `DRAFT` dan `DIAJUKAN` sama-sama membekukan. Tidak menerima body —
+        skemanya tidak punya kolom alasan penolakan untuk dokumen ini.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Dikembalikan ke DRAFT
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stok-opname/{id}/posting:
+    post:
+      tags: [stok-opname]
+      summary: Posting selisih ke kartu stok dan lepas beku
+      operationId: postingStokOpname
+      description: >
+        `DIAJUKAN` → `POSTED`. Menulis `SO_SURPLUS`/`SO_DEFISIT` untuk setiap baris
+        yang selisihnya tidak nol; baris `null` atau berselisih nol tidak menulis
+        apa pun ke `kartu_stok`. Kalau semua baris nol/belum dihitung, dokumen tetap
+        boleh diposting tanpa satu baris pun — beda dengan `pemakaian` yang menolak
+        nota kosong.
+
+
+        Sebelum menulis, saldo ruang saat ini diverifikasi ulang di bawah kunci
+        saldo terhadap `stok_awal` yang dibekukan saat `tarik-saldo` — menolak 409
+        kalau berbeda. Di bawah pembekuan yang utuh cabang ini tidak akan pernah
+        menyala.
+
+
+        Baris penyesuaian bertanggal `ts_cutoff`, bukan hari ini, sehingga ditolak
+        400 kalau periode `ts_cutoff` sudah `TUTUP`.
+
+
+        Ruangnya **lepas beku** setelah ini.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diposting
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/stok-opname/{id}/batal:
+    post:
+      tags: [stok-opname]
+      summary: Batalkan dari status mana pun
+      operationId: batalStokOpname
+      description: >
+        **Boleh dipanggil dari status apa pun, bukan hanya `POSTED`** — satu-satunya
+        transisi yang begitu di seluruh API ini, supaya opname yang ditinggalkan di
+        `DRAFT`/`DIAJUKAN` tidak membekukan ruangnya selamanya.
+
+
+        Dari `DRAFT`/`DIAJUKAN`: belum ada baris `kartu_stok`, jadi hanya status yang
+        berubah. Dari `POSTED`: menambah baris pembalik `PEMBATALAN_TRANSAKSI`
+        bertanggal hari ini untuk setiap penyesuaian yang ditulis, dinilai dengan
+        rata-rata bergerak ruang itu saat ini.
+
+
+        Ruangnya **selalu lepas beku** setelah ini, dari status mana pun ia berasal.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_batal]
+              properties:
+                alasan_batal: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/StokOpname" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
   /api/v1/periode:
     get:
       tags: [periode]
@@ -5305,6 +5728,14 @@ components:
         nama_unit_kerja:
           type: string
           description: Diambil sekalian lewat JOIN ke unit_kerja, bukan query terpisah.
+        nomor_opname_beku:
+          type: string
+          nullable: true
+          description: >
+            Nomor `stok_opname` yang sedang membekukan ruang ini — `null` kalau bebas
+            (isu #15). Diambil lewat satu `LEFT JOIN` ke opname berstatus terbuka, bukan
+            endpoint terpisah.
+          example: SO/2026/08/0001
 
     UnitKerja:
       type: object
@@ -6296,6 +6727,120 @@ components:
             Setelah dikonversi ke satuan dasar, jumlah seluruh baris untuk satu produk
             tidak boleh melebihi saldo ruang asal. `qty x faktor` wajib bilangan bulat.
           example: "30"
+
+    StokOpname:
+      type: object
+      description: >
+        Satu sesi hitung fisik terhadap satu `ruang` — isu #15. Dokumen ketujuh yang
+        menulis `kartu_stok`, dan satu-satunya yang tidak memindahkan barang ke mana
+        pun: yang berubah cuma pengakuan sistem atas apa yang ada di rak.
+
+
+        Selama `status` `DRAFT` atau `DIAJUKAN`, `id_ruang` **beku**: trigger
+        `kartu_stok` menolak posting apa pun ke ruang itu dari modul mana pun.
+        `GET /api/v1/ruang` menyertakan `nomor_opname_beku` untuk melihat sebabnya.
+      properties:
+        id: { type: integer, format: int64 }
+        nomor:
+          type: string
+          description: Seri sendiri, terpisah dari dokumen lain.
+          example: SO/2026/08/0001
+        id_ruang: { type: integer, format: int64 }
+        nama_ruang: { type: string }
+        tgl_buka: { type: string, format: date }
+        tgl_tutup:
+          type: string
+          format: date
+          nullable: true
+          description: Diisi saat `ajukan` — tanggal hitungannya selesai, bukan dibukukan.
+        ts_cutoff:
+          type: string
+          format: date-time
+          description: >
+            Diisi server dari `now()` saat dokumen dibuka, tidak pernah dari body.
+            Titik waktu snapshot saldo yang ditarik `tarik-saldo`.
+        uraian_so: { type: string, nullable: true }
+        status: { type: string, enum: [DRAFT, DIAJUKAN, POSTED, BATAL] }
+        jumlah_baris:
+          type: integer
+          description: Hanya pada endpoint detail, dari panjang `detail`.
+        jumlah_belum_dihitung:
+          type: integer
+          description: Baris yang `stok_so`-nya masih `null`. Hanya pada endpoint detail.
+        detail:
+          type: array
+          description: Hanya pada endpoint detail. Kuncinya hilang pada list.
+          items: { $ref: "#/components/schemas/StokOpnameDetail" }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        verified_by:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            Diisi oleh `posting` **dan** `tolak` — skemanya tidak punya kolom
+            terpisah untuk penolak.
+        ts_verified: { type: string, format: date-time, nullable: true }
+        posted_at: { type: string, format: date-time, nullable: true }
+        dibatalkan_oleh: { type: integer, format: int64, nullable: true }
+        alasan_batal: { type: string, nullable: true }
+        ts_batal: { type: string, format: date-time, nullable: true }
+
+    StokOpnameDetail:
+      type: object
+      description: >
+        Satu baris terhitung: satu produk di ruang header, saldo sistem saat
+        cutoff, dan hasil hitung fisik terhadapnya.
+      properties:
+        id: { type: integer, format: int64 }
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        nama_satuan_dasar: { type: string }
+        stok_awal:
+          type: integer
+          format: int64
+          description: >
+            Saldo sistem dibekukan saat `tarik-saldo` (atau saat baris ditambah
+            manual), tidak pernah berubah lagi. Selisih selalu dihitung terhadap
+            angka ini, bukan terhadap saldo saat ini.
+        stok_so:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            **`null` berarti belum dihitung, bukan nol.** Baris `null` dilewati
+            sepenuhnya saat posting — membacanya sebagai nol menghapus seluruh stok
+            tercatat produk itu.
+        stok_selisih_lebih:
+          type: integer
+          format: int64
+          description: Selalu dihitung ulang dari `stok_so` terhadap `stok_awal`.
+        stok_selisih_kurang:
+          type: integer
+          format: int64
+          description: Selalu dihitung ulang. Tidak pernah positif bersamaan dengan yang di atas.
+        keterangan: { type: string, nullable: true }
+        id_kartu_stok_penyesuaian:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            `null` sampai diposting, dan tetap `null` selamanya untuk baris yang
+            selisihnya nol — tidak ada baris `kartu_stok` yang ditulis untuknya.
+
+    StokOpnameDetailInput:
+      type: object
+      required: [id_product]
+      properties:
+        id_product:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Pasangan `(produk, ruang header)` harus sudah punya baris `kartu_stok` —
+            produk yang belum pernah bergerak di ruang ini tidak bisa diopname di
+            sini sama sekali.
 
     Pemakaian:
       type: object

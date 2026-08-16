@@ -55,6 +55,15 @@ type PenjualanUseCase struct {
 	KartuStokRepository *repository.KartuStokRepository
 	CounterRepository   *repository.DocumentCounterRepository
 	PeriodeRepository   *repository.PeriodeRepository
+	// RuangRepository is borrowed only for LockShared — isu #15, the same narrow
+	// addition pemakaian got: penjualan's own Posting already pre-locks balances via
+	// KunciSaldo, so the freeze it must not race against needs the same ruang: lock
+	// taken first. Still no use for periksaRuangUnitAktif here — isu #10 does not
+	// ask for id_ruang to be scoped to the caller's active unit_kerja.
+	RuangRepository *repository.RuangRepository
+	// StokOpnameRepository is the same narrow borrow every kartu_stok writer gets,
+	// for periksaRuangBeku's message.
+	StokOpnameRepository *repository.StokOpnameRepository
 }
 
 func NewPenjualanUseCase(
@@ -67,17 +76,21 @@ func NewPenjualanUseCase(
 	kartuStokRepository *repository.KartuStokRepository,
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
+	ruangRepository *repository.RuangRepository,
+	stokOpnameRepository *repository.StokOpnameRepository,
 ) *PenjualanUseCase {
 	return &PenjualanUseCase{
-		DB:                  db,
-		Log:                 log,
-		Validate:            validate,
-		PenjualanRepository: penjualanRepository,
-		ProductRepository:   productRepository,
-		PelangganRepository: pelangganRepository,
-		KartuStokRepository: kartuStokRepository,
-		CounterRepository:   counterRepository,
-		PeriodeRepository:   periodeRepository,
+		DB:                   db,
+		Log:                  log,
+		Validate:             validate,
+		PenjualanRepository:  penjualanRepository,
+		ProductRepository:    productRepository,
+		PelangganRepository:  pelangganRepository,
+		KartuStokRepository:  kartuStokRepository,
+		CounterRepository:    counterRepository,
+		PeriodeRepository:    periodeRepository,
+		RuangRepository:      ruangRepository,
+		StokOpnameRepository: stokOpnameRepository,
 	}
 }
 
@@ -379,6 +392,13 @@ func (c *PenjualanUseCase) Posting(ctx context.Context, request *model.PostingPe
 		return nil, err
 	}
 
+	// Same relationship to the freeze that periksaPeriode has to a closed period —
+	// isu #15. Penjualan inherits this without a line of its own asking for it, the
+	// same way mutasi and pemakaian already did.
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, penjualan.IDRuang); err != nil {
+		return nil, err
+	}
+
 	if err := c.periksaSaldo(ctx, tx, penjualan.IDRuang, detail); err != nil {
 		return nil, err
 	}
@@ -477,7 +497,8 @@ func (c *PenjualanUseCase) Batal(ctx context.Context, request *model.BatalPenjua
 		_ = tx.Rollback()
 	}()
 
-	if _, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusPenjualanPosted); err != nil {
+	penjualan, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusPenjualanPosted)
+	if err != nil {
 		return nil, err
 	}
 
@@ -488,11 +509,15 @@ func (c *PenjualanUseCase) Batal(ctx context.Context, request *model.BatalPenjua
 
 	tanggalPembalik := time.Now()
 
-	if err := c.kunciJalurPembalik(ctx, tx, asal, tanggalPembalik); err != nil {
+	if err := c.kunciJalurPembalik(ctx, tx, penjualan.IDRuang, asal, tanggalPembalik); err != nil {
 		return nil, err
 	}
 
 	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, tanggalPembalik); err != nil {
+		return nil, err
+	}
+
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, penjualan.IDRuang); err != nil {
 		return nil, err
 	}
 
@@ -610,6 +635,13 @@ func (c *PenjualanUseCase) kunciJalurStok(ctx context.Context, tx repository.DBT
 		return err
 	}
 
+	// isu #15: taken before KunciSaldo, like mutasi, pemakaian, and stok_opname's own
+	// posting, so the frozen status periksaRuangBeku reads afterwards cannot move
+	// underneath the rest of the transaction.
+	if err := c.RuangRepository.LockShared(ctx, tx, idRuang); err != nil {
+		return err
+	}
+
 	keys := make([]repository.SaldoKey, 0, len(detail))
 	for i := range detail {
 		keys = append(keys, repository.SaldoKey{IDBarang: detail[i].IDProduct, IDRuang: idRuang})
@@ -620,8 +652,12 @@ func (c *PenjualanUseCase) kunciJalurStok(ctx context.Context, tx repository.DBT
 
 // kunciJalurPembalik is kunciJalurStok for a cancellation, where the pairs to lock
 // are read off the rows being reversed rather than off the document's lines.
-func (c *PenjualanUseCase) kunciJalurPembalik(ctx context.Context, tx repository.DBTX, asal []entity.KartuStok, tanggal time.Time) error {
+func (c *PenjualanUseCase) kunciJalurPembalik(ctx context.Context, tx repository.DBTX, idRuang int64, asal []entity.KartuStok, tanggal time.Time) error {
 	if err := c.PeriodeRepository.LockShared(ctx, tx, tanggal); err != nil {
+		return err
+	}
+
+	if err := c.RuangRepository.LockShared(ctx, tx, idRuang); err != nil {
 		return err
 	}
 
