@@ -162,7 +162,7 @@ func newApp(t *testing.T) *app {
 		),
 		product: usecase.NewProductUseCase(
 			testDB, log, validate, productRepository, pembelianRepository,
-			kartuStokRepository,
+			kartuStokRepository, ruangRepository,
 		),
 		user: usecase.NewUserUseCase(
 			testDB, log, validate, userRepository, roleRepository, unitKerjaRepository,

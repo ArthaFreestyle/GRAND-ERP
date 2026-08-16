@@ -308,6 +308,23 @@ func (c *ProductController) Stok(ctx fiber.Ctx) error {
 	return ctx.JSON(model.WebResponse[[]model.StokRuangResponse]{Data: responses})
 }
 
+// POS answers the POS catalog screen — isu #11. id_ruang is required and validated
+// against ruang before anything else runs; an unknown one answers 404 rather than a
+// page of silent zeros.
+func (c *ProductController) POS(ctx fiber.Ctx) error {
+	request := new(model.ListPosProductRequest)
+	if err := ctx.Bind().Query(request); err != nil {
+		return model.Invalid("malformed query parameters")
+	}
+
+	responses, paging, err := c.UseCase.POS(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[[]model.PosProductResponse]{Data: responses, Paging: paging})
+}
+
 func (c *ProductController) List(ctx fiber.Ctx) error {
 	request := new(model.ListProductRequest)
 	if err := ctx.Bind().Query(request); err != nil {

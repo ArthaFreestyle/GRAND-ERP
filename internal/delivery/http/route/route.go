@@ -233,6 +233,17 @@ func (c *RouteConfig) setupAuthRoute() {
 	// documents that do carry their own guards.
 	api.Get("/product/:id/stok", c.ProductController.Stok)
 
+	// pos/product is the POS catalog screen — isu #11 — and a read, so it follows the
+	// same open rule. It is its own path rather than a `view` parameter on
+	// GET /product: the response shape a single screen dictates should be free to
+	// change with that screen without shaking the plain product contract, and it
+	// also cannot collide with /product/:id — GET /product/pos would depend on
+	// registration order, and getting that order wrong would hand "pos" to the
+	// controller as if it were an id. HPP never appears in this response even though
+	// the read is open to any authenticated caller — that is enforced in the usecase
+	// and the model, not by a guard here.
+	api.Get("/pos/product", c.ProductController.POS)
+
 	// pembelian is the first module whose writes are split by workflow stage rather
 	// than by which data they touch, because posting one is not an edit — it appends
 	// to kartu_stok, which is append-only. A wrong posting cannot be corrected, only

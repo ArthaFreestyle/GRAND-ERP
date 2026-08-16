@@ -1138,6 +1138,105 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /api/v1/pos/product:
+    get:
+      tags: [product]
+      summary: Katalog produk siap pakai untuk layar POS
+      operationId: listPosProduct
+      description: >
+        Isu #11. Satu bacaan menggantikan apa yang hari ini butuh empat: `GET
+        /product` untuk daftarnya, lalu per baris `GET /product/{id}` untuk
+        satuannya, `GET /product/{id}/harga-jual` untuk harganya, dan
+        `GET /product/{id}/stok` untuk sisanya. Dua puluh baris jadi enam puluh
+        permintaan, di layar yang paling sering dibuka di seluruh aplikasi.
+
+
+        Path sendiri, bukan parameter `view` di `GET /product`: bentuk respons
+        yang ditentukan satu layar boleh berubah mengikuti layar itu tanpa
+        menggoyang kontrak `GET /product`, dan tidak menabrak `/product/:id` —
+        `GET /product/pos` akan bergantung urutan registrasi rute.
+
+
+        **Tiga query per halaman, apa pun jumlah barisnya**: produk + paginasi,
+        satuan dan harga berlaku untuk seluruh baris halaman itu dalam satu
+        batch, dan saldo seluruh pasangan (produk, ruang) halaman itu dalam
+        satu batch — mengikuti pola yang sama seperti `FindRolesByUserIDs`,
+        `FindFaktorBatch`, dan `SaldoBatch`. Mengambil satuan atau harga per
+        baris akan menggagalkan seluruh tujuan endpoint ini sambil terlihat
+        berfungsi.
+
+
+        **Bersarang, bukan datar**: satu baris per produk, dengan `satuan`
+        sebagai array. Produk dengan tiga satuan tidak memakan tiga slot dari
+        halaman berisi 20 — `total_item` menghitung produk, bukan kombinasi
+        (produk, satuan).
+
+
+        `stok_akhir` selalu dalam satuan dasar, karena `kartu_stok` tidak
+        mengenal satuan lain; konversi ke satuan tampilan urusan klien, dan
+        `faktor` sudah dikirim untuk itu. `id_harga_jual` ikut karena
+        `penjualan_detail.id_harga_jual` merujuknya — tanpa itu layar POS tahu
+        angkanya tapi tidak tahu versi mana yang jadi asalnya.
+
+
+        **Hanya barang aktif, tanpa parameter untuk menampilkan yang lain** —
+        barang yang sudah dipensiunkan tidak boleh bisa dijual. Barang yang
+        stoknya habis tetap muncul dengan `stok_akhir: 0`, dan barang yang
+        belum punya harga tetap muncul dengan `id_harga_jual`/`harga` bernilai
+        `null` pada baris satuan itu — keduanya fakta yang berguna, bukan
+        alasan untuk disembunyikan.
+
+
+        **HPP tidak pernah ikut terkirim.** Bacaan ini terbuka untuk siapa pun
+        yang terautentikasi dan sering terlihat pembeli di meja kasir; HPP
+        adalah margin toko. `GET /product/{id}/stok` yang memuatnya tetap ada
+        untuk yang memang berhak.
+
+
+        Kecocokan **persis** pada `kode_barang` diurutkan paling atas —
+        kasir yang memindai atau mengetik kode utuh mengharapkan baris itu di
+        puncak, bukan di tengah daftar terurut nama.
+
+
+        `tanggal` opsional, default hari ini di WIB — resolver dan keputusan
+        zona waktu yang sama dengan isu #8 (`AT TIME ZONE 'Asia/Jakarta'`,
+        offset tetap +7), tidak diputuskan ulang di sini.
+
+
+        `id_ruang` **wajib** dan divalidasi ada di `ruang` → **404** kalau
+        tidak dikenal. Ruang yang salah ketik yang diam-diam menjawab stok nol
+        di setiap baris adalah bug yang mahal untuk ditemukan.
+      parameters:
+        - name: id_ruang
+          in: query
+          required: true
+          description: Ruang tempat kasir berdiri. Tidak ada default — kasir selalu tahu ruangnya.
+          schema: { type: integer, format: int64, minimum: 1 }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Menyaring `nama` dan `kode_barang`, lewat EscapeLike.
+          schema: { type: string, maxLength: 255 }
+        - name: tanggal
+          in: query
+          description: Default hari ini di WIB. Menentukan versi harga_jual mana yang berlaku.
+          schema: { type: string, format: date, example: "2026-08-14" }
+      responses:
+        "200":
+          description: Halaman katalog POS
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/PosProduct" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
   /api/v1/pembelian:
     get:
       tags: [pembelian]
@@ -5514,6 +5613,54 @@ components:
           nullable: true
         berlaku_dari: { type: string, format: date, nullable: true }
         berlaku_sampai: { type: string, format: date, nullable: true }
+
+    PosProduct:
+      type: object
+      description: >
+        Isu #11. Satu baris per produk untuk layar POS — bersarang, bukan datar:
+        `satuan` sebagai array dalam satu baris produk, supaya `total_item` menghitung
+        produk dan bukan kombinasi (produk, satuan). Tidak pernah memuat HPP maupun
+        kolom audit — lihat deskripsi endpoint.
+      properties:
+        id: { type: integer, format: int64 }
+        kode_barang: { type: string, example: BRG-001 }
+        nama: { type: string, example: Aqua Botol 600ml }
+        satuan:
+          type: array
+          description: Tidak pernah kosong — setiap produk selalu punya satuan dasarnya sendiri.
+          items: { $ref: "#/components/schemas/PosProductSatuan" }
+        stok_akhir:
+          type: integer
+          format: int64
+          description: >
+            Selalu dalam satuan dasar, milik `id_ruang` yang diminta saja. Bacaan, bukan
+            jaminan — lihat `StokRuang`. Produk yang stoknya habis tetap muncul, dengan
+            nilai 0.
+          example: 137
+
+    PosProductSatuan:
+      type: object
+      properties:
+        id_satuan: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        faktor:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Berapa satuan dasar yang dimuat satu satuan ini.
+        is_default_input: { type: boolean }
+        id_harga_jual:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            Yang dikirim balik sebagai `penjualan_detail.id_harga_jual`. `null` bersama
+            `harga` kalau tidak ada versi harga yang berlaku untuk satuan ini pada
+            tanggal yang diminta — harga adalah usulan, bukan syarat, dan barang tetap
+            boleh dijual tanpanya.
+        harga:
+          allOf: [{ $ref: "#/components/schemas/Harga" }]
+          nullable: true
 
     Pembelian:
       type: object
