@@ -39,6 +39,7 @@ type RouteConfig struct {
 	ReturController      *deliveryhttp.ReturPembelianController
 	MutasiController     *deliveryhttp.MutasiController
 	PemakaianController  *deliveryhttp.PemakaianController
+	PenjualanController  *deliveryhttp.PenjualanController
 	PembayaranController *deliveryhttp.PembayaranUtangController
 	ProductController    *deliveryhttp.ProductController
 	UnitKerjaController  *deliveryhttp.UnitKerjaController
@@ -325,6 +326,24 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/pemakaian/:id/posting", superadmin, c.PemakaianController.Posting)
 	api.Post("/pemakaian/:id/batal", superadmin, c.PemakaianController.Batal)
 
+	// penjualan is the sixth module to write kartu_stok, and the first whose goods
+	// leave to an outside party with money moving on the other side — isu #10. It
+	// keeps no DIAJUKAN, the same shape mutasi uses, but for a different reason: a
+	// cashier cannot make a customer wait at the counter for a supervisor to
+	// approve a cash sale typed in seconds. So the two-person control moves
+	// entirely to the cancellation side instead of the posting side — CASHIER
+	// creates, types lines, and posts a nota in one motion; SUPERADMIN alone may
+	// void one. A mistyped line is corrected with a retur_penjualan (once that
+	// module exists) or a cancellation by a supervisor, never by the cashier who
+	// posted it.
+	api.Get("/penjualan", c.PenjualanController.List)
+	api.Get("/penjualan/:id", c.PenjualanController.Get)
+	api.Post("/penjualan", cashier, c.PenjualanController.Create)
+	api.Patch("/penjualan/:id", cashier, c.PenjualanController.Update)
+	api.Put("/penjualan/:id/detail", cashier, c.PenjualanController.ReplaceDetail)
+	api.Post("/penjualan/:id/posting", cashier, c.PenjualanController.Posting)
+	api.Post("/penjualan/:id/batal", superadmin, c.PenjualanController.Batal)
+
 	// pembayaran-utang is the first module that touches no stock at all, so the reason the
 	// three above split by workflow stage does not apply to it — nothing it writes is
 	// append-only, and voiding it recomputes every cache exactly. It still splits, for a
@@ -367,6 +386,13 @@ func (c *RouteConfig) setupAuthRoute() {
 
 	api.Get("/pelanggan", c.PelangganController.List)
 	api.Get("/pelanggan/:id", c.PelangganController.Get)
+
+	// piutang is a read, so it follows the read rule and is open to any
+	// authenticated caller — isu #10 fase 2, the receivable-side mirror of
+	// GET /supplier/:id/utang. Like riwayat-beli and utang it is the answer
+	// falling out of documents that were posted anyway: which of this customer's
+	// KREDIT notas are still open, and for how much.
+	api.Get("/pelanggan/:id/piutang", c.PelangganController.Piutang)
 	api.Post("/pelanggan", cashier, c.PelangganController.Create)
 	api.Patch("/pelanggan/:id", cashier, c.PelangganController.Update)
 

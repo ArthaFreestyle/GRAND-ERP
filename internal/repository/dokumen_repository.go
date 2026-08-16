@@ -42,6 +42,9 @@ var RefTableDokumen = map[string]string{
 	// moved the goods. One line, no migration, no DTO change — which is the whole cost
 	// of a module accepting attachments, and the point of the design in isu #5.
 	"mutasi": "status",
+	// penjualan: a signed nota or a customer's proof of payment belongs to the sale
+	// it settles. Isu #10 asked for exactly this one line — see CLAUDE.md.
+	"penjualan": "status",
 }
 
 // ErrRefTableTidakDikenal reports a ref_table outside RefTableDokumen.

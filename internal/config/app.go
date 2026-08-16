@@ -49,6 +49,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pembayaranRepository := repository.NewPembayaranUtangRepository()
 	mutasiRepository := repository.NewMutasiRepository()
 	pemakaianRepository := repository.NewPemakaianRepository()
+	penjualanRepository := repository.NewPenjualanRepository()
 	dokumenRepository := repository.NewDokumenRepository()
 	periodeRepository := repository.NewPeriodeRepository()
 
@@ -73,8 +74,11 @@ func Bootstrap(config *BootstrapConfig) {
 	supplierUseCase := usecase.NewSupplierUseCase(
 		config.DB, config.Log, config.Validate, supplierRepository, pembelianRepository,
 	)
+	// PelangganUseCase borrows PenjualanRepository for GET /pelanggan/{id}/piutang
+	// (isu #10 fase 2), the receivable-side mirror of SupplierUseCase borrowing
+	// PembelianRepository above.
 	pelangganUseCase := usecase.NewPelangganUseCase(
-		config.DB, config.Log, config.Validate, pelangganRepository,
+		config.DB, config.Log, config.Validate, pelangganRepository, penjualanRepository,
 	)
 	roleUseCase := usecase.NewRoleUseCase(
 		config.DB, config.Log, config.Validate, roleRepository,
@@ -155,6 +159,17 @@ func Bootstrap(config *BootstrapConfig) {
 		pemakaianRepository, productRepository, kartuStokRepository, counterRepository,
 		periodeRepository,
 	)
+	// PenjualanUseCase takes six repositories, one more than pemakaian: the extra
+	// one is PelangganRepository, borrowed for exactly one narrow read — a
+	// customer's plafon_kredit and running receivable, checked at Posting for a
+	// KREDIT nota (isu #10 fase 2). Like pemakaian it holds no RuangRepository:
+	// isu #10 does not ask for id_ruang to be validated against the caller's
+	// active unit_kerja.
+	penjualanUseCase := usecase.NewPenjualanUseCase(
+		config.DB, config.Log, config.Validate,
+		penjualanRepository, productRepository, pelangganRepository,
+		kartuStokRepository, counterRepository, periodeRepository,
+	)
 	// PembayaranUtangUseCase is the first transaction usecase that needs no
 	// KartuStokRepository at all: money moving to a supplier changes no stock. It reaches
 	// into pembelian to lock each invoice it allocates against, read what that invoice
@@ -210,6 +225,7 @@ func Bootstrap(config *BootstrapConfig) {
 	returController := deliveryhttp.NewReturPembelianController(config.Log, returUseCase)
 	mutasiController := deliveryhttp.NewMutasiController(config.Log, mutasiUseCase)
 	pemakaianController := deliveryhttp.NewPemakaianController(config.Log, pemakaianUseCase)
+	penjualanController := deliveryhttp.NewPenjualanController(config.Log, penjualanUseCase)
 	pembayaranController := deliveryhttp.NewPembayaranUtangController(config.Log, pembayaranUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
@@ -234,6 +250,7 @@ func Bootstrap(config *BootstrapConfig) {
 		ReturController:      returController,
 		MutasiController:     mutasiController,
 		PemakaianController:  pemakaianController,
+		PenjualanController:  penjualanController,
 		PembayaranController: pembayaranController,
 		ProductController:    productController,
 		UnitKerjaController:  unitKerjaController,

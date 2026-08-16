@@ -16,11 +16,17 @@ import (
 
 // PelangganUseCase holds the business rules for pelanggan. It owns the
 // transaction boundary and returns models, never entities or Fiber types.
+//
+// PenjualanRepository is borrowed for GET /pelanggan/{id}/piutang — isu #10 fase 2,
+// the same way SupplierUseCase borrows PembelianRepository for
+// GET /supplier/{id}/utang: the query is over penjualan's own tables, so it stays in
+// that module's repository, and only the resource it answers for is a customer's.
 type PelangganUseCase struct {
 	DB                  *sql.DB
 	Log                 *logrus.Logger
 	Validate            *validator.Validate
 	PelangganRepository *repository.PelangganRepository
+	PenjualanRepository *repository.PenjualanRepository
 }
 
 func NewPelangganUseCase(
@@ -28,12 +34,14 @@ func NewPelangganUseCase(
 	log *logrus.Logger,
 	validate *validator.Validate,
 	pelangganRepository *repository.PelangganRepository,
+	penjualanRepository *repository.PenjualanRepository,
 ) *PelangganUseCase {
 	return &PelangganUseCase{
 		DB:                  db,
 		Log:                 log,
 		Validate:            validate,
 		PelangganRepository: pelangganRepository,
+		PenjualanRepository: penjualanRepository,
 	}
 }
 
@@ -197,4 +205,32 @@ func (c *PelangganUseCase) Search(ctx context.Context, request *model.ListPelang
 	}
 
 	return converter.PelangganToResponses(list), pageMetadata(&request.PageRequest, total), nil
+}
+
+// Piutang answers which of a customer's KREDIT notas are still open, and for how
+// much — isu #10 fase 2, a read that is not a module, following
+// SupplierUseCase.Utang.
+//
+// The customer is looked up first so an unknown id answers 404 rather than an empty
+// page. Those are different facts — "this customer owes nothing" and "there is no
+// such customer" — and a client that cannot tell them apart shows the wrong one.
+func (c *PelangganUseCase) Piutang(ctx context.Context, request *model.ListPiutangPelangganRequest) ([]model.PiutangPelangganResponse, *model.PageMetadata, error) {
+	request.Normalize()
+
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, nil, err
+	}
+
+	if _, err := c.PelangganRepository.FindByID(ctx, c.DB, request.IDPelanggan); err != nil {
+		return nil, nil, notFoundOnNoRows(err, "pelanggan not found")
+	}
+
+	list, total, err := c.PenjualanRepository.FindPiutangPelanggan(
+		ctx, c.DB, request.IDPelanggan, request.Size, request.Offset(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return converter.PiutangPelangganToResponses(list), pageMetadata(&request.PageRequest, total), nil
 }
