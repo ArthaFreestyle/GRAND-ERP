@@ -76,6 +76,7 @@ type app struct {
 	retur      *usecase.ReturPembelianUseCase
 	mutasi     *usecase.MutasiUseCase
 	pemakaian  *usecase.PemakaianUseCase
+	penjualan  *usecase.PenjualanUseCase
 	pembayaran *usecase.PembayaranUtangUseCase
 	dokumen    *usecase.DokumenUseCase
 	periode    *usecase.PeriodeUseCase
@@ -118,6 +119,7 @@ func newApp(t *testing.T) *app {
 	ruangRepository := repository.NewRuangRepository()
 	productRepository := repository.NewProductRepository()
 	pembelianRepository := repository.NewPembelianRepository()
+	penjualanRepository := repository.NewPenjualanRepository()
 	kartuStokRepository := repository.NewKartuStokRepository()
 	counterRepository := repository.NewDocumentCounterRepository()
 	periodeRepository := repository.NewPeriodeRepository()
@@ -147,7 +149,7 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate, repository.NewSupplierRepository(), pembelianRepository,
 		),
 		pelanggan: usecase.NewPelangganUseCase(
-			testDB, log, validate, repository.NewPelangganRepository(),
+			testDB, log, validate, repository.NewPelangganRepository(), penjualanRepository,
 		),
 		ruang: usecase.NewRuangUseCase(
 			testDB, log, validate, ruangRepository, unitKerjaRepository,
@@ -194,6 +196,11 @@ func newApp(t *testing.T) *app {
 		pemakaian: usecase.NewPemakaianUseCase(
 			testDB, log, validate,
 			repository.NewPemakaianRepository(), productRepository,
+			kartuStokRepository, counterRepository, periodeRepository,
+		),
+		penjualan: usecase.NewPenjualanUseCase(
+			testDB, log, validate,
+			penjualanRepository, productRepository, repository.NewPelangganRepository(),
 			kartuStokRepository, counterRepository, periodeRepository,
 		),
 		pembayaran: usecase.NewPembayaranUtangUseCase(
@@ -266,11 +273,12 @@ func truncateMaster(t *testing.T) {
 		// insert, it silently refuses its posting.
 		"periode",
 		// penjualan_detail.id_harga_jual references product_harga_jual, and
-		// penjualan_detail.id_product/penjualan.id_ruang reference product/ruang, so
-		// both have to precede all three. There is no Go layer for either table yet
-		// (isu #8 fase 2's tests insert them with raw SQL to prove the
-		// already-used-by-a-document guard), but the schema has existed since
-		// migration 000006 and truncateMaster has to know about it regardless.
+		// penjualan_detail.id_product/penjualan.id_ruang/penjualan.id_pelanggan
+		// reference product/ruang/pelanggan, so penjualan has to precede all three
+		// (and users, through created_by/dibatalkan_oleh). isu #10 gave it a full Go
+		// layer; before that, isu #8 fase 2's tests inserted these two tables with
+		// raw SQL to prove the already-used-by-a-document guard, and the schema has
+		// existed since migration 000006 regardless.
 		"penjualan_detail", "penjualan",
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.

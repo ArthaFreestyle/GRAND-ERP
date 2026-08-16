@@ -85,3 +85,29 @@ func (c *PelangganController) List(ctx fiber.Ctx) error {
 
 	return ctx.JSON(model.WebResponse[[]model.PelangganResponse]{Data: responses, Paging: paging})
 }
+
+// Piutang lists this customer's KREDIT notas that are still owed money, oldest
+// first — isu #10 fase 2, the receivable-side mirror of SupplierController.Utang.
+//
+// The id is bound from the path after the query string, so an id smuggled into the
+// query cannot point the answer at a different customer than the URL names.
+func (c *PelangganController) Piutang(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	request := new(model.ListPiutangPelangganRequest)
+	if err := ctx.Bind().Query(request); err != nil {
+		return model.Invalid("malformed query parameters")
+	}
+
+	request.IDPelanggan = id
+
+	responses, paging, err := c.UseCase.Piutang(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[[]model.PiutangPelangganResponse]{Data: responses, Paging: paging})
+}

@@ -28,6 +28,14 @@ const (
 	// 'PEMBATALAN_PEMAKAIAN' has existed in jenis_transaksi since migration 000002 and
 	// stays there unused: PostgreSQL has no DROP VALUE for an enum.
 	JenisTransaksiPemakaian = "PEMAKAIAN"
+	// JenisTransaksiPenjualan is the sixth document to write kartu_stok, and the
+	// first to take goods out to an outside party with money moving on the other
+	// side — pembelian forms a payable, this forms a receivable when the nota is
+	// KREDIT. Its cancellation reuses JenisTransaksiPembatalanTransaksi below,
+	// following pemakaian's precedent rather than adding a use for the enum's own
+	// unused 'PEMBATALAN_PEMAKAIAN' — id_kartu_stok_asal already says what a
+	// reversal undoes.
+	JenisTransaksiPenjualan = "PENJUALAN"
 )
 
 // Ref tables recorded on kartu_stok. Paired with ref_id_transaksi they say which
@@ -45,6 +53,9 @@ const (
 	// RefTablePemakaian is the fifth document to write kartu_stok, and the first to
 	// leave with no other party recorded — see JenisTransaksiPemakaian.
 	RefTablePemakaian = "pemakaian"
+	// RefTablePenjualan is the sixth document to write kartu_stok, and the first
+	// whose goods leave to an outside party — see JenisTransaksiPenjualan.
+	RefTablePenjualan = "penjualan"
 )
 
 // KartuStok maps the kartu_stok table: the only source of truth for stock and

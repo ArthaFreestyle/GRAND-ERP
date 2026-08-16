@@ -199,6 +199,7 @@ tags:
   - name: pembayaran-utang
   - name: mutasi
   - name: pemakaian
+  - name: penjualan
   - name: product
   - name: periode
   - name: docs
@@ -3121,6 +3122,324 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
+  /api/v1/penjualan:
+    get:
+      tags: [penjualan]
+      summary: List nota penjualan
+      operationId: listPenjualan
+      description: >
+        Tidak menyertakan `detail`; kuncinya hilang sama sekali, bukan array kosong.
+        `search` mencocokkan nomor dokumen.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [DRAFT, POSTED, BATAL] }
+        - name: status_pembayaran
+          in: query
+          schema: { type: string, enum: [BELUM, SEBAGIAN, LUNAS] }
+        - name: jenis_pembayaran
+          in: query
+          schema: { type: string, enum: [TUNAI, KREDIT] }
+        - name: id_ruang
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: id_pelanggan
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Penjualan" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [penjualan]
+      summary: Buat draft nota penjualan
+      operationId: createPenjualan
+      description: >
+        Nomor diambil dari `document_counter` dengan prefix `PJ`, direset per bulan
+        dan dikunci pada tanggal dokumennya.
+
+
+        `detail` boleh kosong di sini — nota biasanya dibuka sambil barang masih
+        dipindai — tetapi posting menolak dokumen tanpa baris. Produk yang sama
+        boleh muncul lebih dari sekali, mengikuti `mutasi`/`pemakaian`: kuotanya
+        saldo ruang, dijumlahkan seluruh baris terhadapnya.
+
+
+        `jenis_pembayaran` default `TUNAI`. **`KREDIT` mewajibkan `id_pelanggan`**
+        (`penjualan_kredit_pelanggan_check`) — nota tunai di depan meja tidak perlu
+        pelanggan terdaftar.
+
+
+        `subtotal` adalah jumlah `subtotal` setiap baris (`qty_input x
+        harga_satuan_input - diskon_baris`); `total = subtotal - diskon_nota +
+        pembulatan`. `diskon_nota` tidak boleh melebihi `subtotal`, dan `total`
+        tidak boleh negatif. `pembulatan` boleh negatif — itu baris pembulatan
+        nota, bukan galat.
+
+
+        `harga_pokok_satuan_dasar`/`hpp_total`/`total_hpp` baru terisi saat
+        posting, dari apa yang benar-benar dicatat `kartu_stok` — bukan dihitung
+        di sini.
+
+
+        Role: `CASHIER`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tanggal, id_ruang]
+              properties:
+                tanggal: { type: string, format: date }
+                id_ruang: { type: integer, format: int64, minimum: 1 }
+                id_pelanggan:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  nullable: true
+                  description: Wajib diisi kalau `jenis_pembayaran` KREDIT.
+                jenis_pembayaran:
+                  type: string
+                  enum: [TUNAI, KREDIT]
+                  default: TUNAI
+                diskon_nota: { type: string, example: "0" }
+                pembulatan: { type: string, example: "0" }
+                detail:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/PenjualanDetailInput" }
+      responses:
+        "201":
+          description: Draft dibuat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Penjualan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penjualan/{id}:
+    get:
+      tags: [penjualan]
+      summary: Detail nota penjualan beserta barisnya
+      operationId: getPenjualan
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Penjualan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [penjualan]
+      summary: Ubah header nota penjualan
+      operationId: updatePenjualan
+      description: >
+        **Hanya saat `DRAFT`.** `id_ruang`, `id_pelanggan`, dan `jenis_pembayaran`
+        boleh semua diubah — tidak ada baris detail yang menunjuk salah satunya,
+        jadi tidak ada yang tertinggal salah. `nomor`, `total_hpp`, dan
+        `status_pembayaran` tidak pernah ada di sini: yang pertama identitas, dua
+        lainnya turunan.
+
+
+        Aturan KREDIT-wajib-pelanggan diperiksa ulang terhadap nilai efektif
+        setelah patch, bukan hanya field yang dikirim — mengirim
+        `jenis_pembayaran: KREDIT` saat `id_pelanggan` tersimpan masih kosong tetap
+        ditolak.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                tanggal: { type: string, format: date }
+                id_ruang: { type: integer, format: int64, minimum: 1 }
+                id_pelanggan: { type: integer, format: int64, minimum: 1, nullable: true }
+                jenis_pembayaran: { type: string, enum: [TUNAI, KREDIT] }
+                diskon_nota: { type: string }
+                pembulatan: { type: string }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Penjualan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penjualan/{id}/detail:
+    put:
+      tags: [penjualan]
+      summary: Ganti seluruh baris nota penjualan
+      operationId: replacePenjualanDetail
+      description: >
+        **Hanya saat `DRAFT`.** Barisnya diganti sekaligus, bukan satu per satu, dan
+        `subtotal`/`total` dihitung ulang dari baris yang baru.
+
+
+        Berbeda dengan `POST /api/v1/penjualan`, di sini `detail` wajib berisi
+        minimal satu baris.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [detail]
+              properties:
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/PenjualanDetailInput" }
+      responses:
+        "200":
+          description: Baris diganti
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Penjualan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penjualan/{id}/posting:
+    post:
+      tags: [penjualan]
+      summary: Posting nota ke kartu stok
+      operationId: postingPenjualan
+      description: >
+        `DRAFT` → `POSTED`, langsung tanpa `DIAJUKAN` — kasir tidak bisa membuat
+        pembeli menunggu persetujuan atasan untuk nota tunai. HPP setiap baris dan
+        `total_hpp` diisi di sini, dari `harga_pokok_satuan`/`nilai_keluar` yang
+        dilaporkan `kartu_stok`, bukan dihitung ulang.
+
+
+        Nota `TUNAI` yang POSTED langsung `LUNAS` — uangnya diterima di meja dan
+        tidak ada dokumen alokasi yang menunjuknya. Nota `KREDIT` tetap `BELUM`
+        sampai modul `penerimaan-pembayaran` ada.
+
+
+        **Untuk nota KREDIT, ini juga satu-satunya titik `plafon_kredit`
+        ditegakkan** (isu #10 fase 2): piutang berjalan pelanggan ditambah nota ini
+        tidak boleh melampaui `plafon_kredit`-nya. `plafon_kredit` `NULL` berarti
+        tanpa batas dan tidak pernah menolak. Tidak ada jalur tembus untuk
+        `SUPERADMIN` — posting sudah di tangan `CASHIER` saja.
+
+
+        Saldo ruang yang tidak mencukupi ditolak 400 dengan pesan yang menyebut
+        produk dan ruang; periode yang sudah `TUTUP` ditolak 400 dengan pesan yang
+        menyebut bulannya.
+
+
+        Role: `CASHIER`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diposting
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Penjualan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/penjualan/{id}/batal:
+    post:
+      tags: [penjualan]
+      summary: Batalkan nota POSTED dengan baris pembalik
+      operationId: batalPenjualan
+      description: >
+        `POSTED` → `BATAL`. Menambah baris pembalik `PEMBATALAN_TRANSAKSI` untuk
+        setiap baris `kartu_stok` yang ditulis dokumen ini — barangnya masuk lagi
+        ke ruang, dinilai dengan rata-rata bergerak ruang itu saat ini.
+        `hpp_satuan_dasar`/`hpp_total`/`total_hpp` **tidak dikosongkan**: itu
+        catatan apa yang benar-benar terjadi, dan `status = BATAL` sudah
+        menyatakan nota itu tidak berlaku.
+
+
+        Barisnya bertanggal hari ini, seperti setiap pembalikan di sistem ini. Nota
+        yang periodenya sudah ditutup tetap bisa dibatalkan — pembaliknya masuk
+        periode berjalan.
+
+
+        Ini satu-satunya rem begitu nota POSTED — kasir yang memposting tidak
+        boleh membatalkannya sendiri. Kesalahan ketik dikoreksi lewat
+        `retur-penjualan` (begitu modul itu ada) atau pembatalan oleh atasan.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_batal]
+              properties:
+                alasan_batal: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Penjualan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
   /api/v1/pembayaran-utang:
     get:
       tags: [pembayaran-utang]
@@ -4679,6 +4998,50 @@ paths:
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
 
+  /api/v1/pelanggan/{id}/piutang:
+    get:
+      tags: [pelanggan]
+      summary: Nota KREDIT pelanggan yang masih terbuka
+      operationId: listPiutangPelanggan
+      description: >
+        Isu #10 fase 2 — cerminan `GET /supplier/{id}/utang` di sisi piutang.
+        Query, bukan modul: tidak ada tabel dan tidak ada migrasi di belakangnya.
+
+
+        Hanya nota `KREDIT` yang `POSTED`. Nota tunai tidak pernah jadi piutang —
+        ia `LUNAS` sesaat setelah diposting.
+
+
+        **Diurutkan dari yang paling lama**, sama seperti `utang` di sisi
+        supplier: ini antrean tagihan, bukan riwayat.
+
+
+        `sisa_piutang` sama dengan `total` untuk saat ini — belum ada
+        `retur-penjualan` maupun `penerimaan-pembayaran` yang bisa
+        menguranginya. Begitu salah satunya ada, angka ini akan mulai
+        memperhitungkannya tanpa bentuk responsnya berubah.
+
+
+        Pelanggan yang tidak dikenal menjawab 404; pelanggan tanpa piutang
+        menjawab halaman kosong. Dua fakta yang berbeda.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/PiutangPelanggan" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "404": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -5922,6 +6285,161 @@ components:
           format: int64
           minimum: 0
           description: Diperiksa terhadap `qty_dasar` baris itu sendiri di usecase.
+
+    Penjualan:
+      type: object
+      description: >
+        Satu nota keluar — dokumen keenam yang menulis `kartu_stok`, dan yang
+        pertama mengeluarkan barang ke pihak luar dengan uang di sisi lain.
+        `pembelian` membentuk utang, `mutasi` tidak membentuk apa-apa, ini yang
+        pertama membentuk **piutang**, dan hanya pada nota `KREDIT`.
+
+
+        Alurnya `DRAFT → POSTED → BATAL`, tanpa `DIAJUKAN` — sama seperti
+        `mutasi`, tapi alasannya berbeda: kasir tidak bisa membuat pembeli
+        menunggu persetujuan atasan untuk nota tunai yang diketik dalam hitungan
+        detik. Kendali dua orangnya pindah seluruhnya ke sisi pembatalan:
+        `CASHIER` membuat, mengetik baris, dan memposting; `SUPERADMIN` satu-
+        satunya yang boleh membatalkan.
+      properties:
+        id: { type: integer, format: int64 }
+        nomor:
+          type: string
+          description: Seri sendiri, prefix `PJ`.
+          example: PJ/2026/08/0001
+        tanggal: { type: string, format: date-time }
+        id_ruang: { type: integer, format: int64 }
+        nama_ruang: { type: string }
+        id_pelanggan:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            Null untuk nota tunai di depan meja. `penjualan_kredit_pelanggan_check`
+            mewajibkannya begitu `jenis_pembayaran` KREDIT.
+        nama_pelanggan: { type: string }
+        subtotal:
+          type: string
+          description: Jumlah `subtotal` seluruh baris.
+          example: "150000.00"
+        diskon_nota: { type: string, example: "0.00" }
+        pembulatan: { type: string, example: "0.00" }
+        total:
+          type: string
+          description: "`subtotal - diskon_nota + pembulatan`."
+          example: "150000.00"
+        total_hpp:
+          type: string
+          nullable: true
+          description: >
+            Null sampai `POSTED`. Jumlah `hpp_total` seluruh baris — begitu terisi,
+            margin nota tinggal `total - total_hpp`, tanpa tabel baru.
+          example: "100000.00"
+        jenis_pembayaran: { type: string, enum: [TUNAI, KREDIT] }
+        status_pembayaran:
+          type: string
+          enum: [BELUM, SEBAGIAN, LUNAS]
+          description: >
+            Cache, selalu dihitung ulang. Nota `TUNAI` yang `POSTED` langsung
+            `LUNAS` — uangnya diterima di meja dan tidak ada dokumen alokasi yang
+            menunjuknya. Nota `KREDIT` tetap `BELUM` sampai modul
+            `penerimaan-pembayaran` ada.
+        status: { type: string, enum: [DRAFT, POSTED, BATAL] }
+        detail:
+          type: array
+          description: Hanya pada endpoint detail. Kuncinya hilang pada list.
+          items: { $ref: "#/components/schemas/PenjualanDetail" }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        posted_at: { type: string, format: date-time, nullable: true }
+        dibatalkan_oleh: { type: integer, format: int64, nullable: true }
+        alasan_batal: { type: string, nullable: true }
+
+    PenjualanDetail:
+      type: object
+      description: >
+        Satu baris: satu produk, apa yang ditagihkan, dan — setelah diposting —
+        berapa harga pokoknya.
+      properties:
+        id: { type: integer, format: int64 }
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        qty_input: { type: string, example: "10.0000" }
+        id_satuan_input: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        faktor_konversi: { type: integer, format: int64 }
+        qty_dasar: { type: integer, format: int64, example: 10 }
+        nama_satuan_dasar: { type: string }
+        id_harga_jual:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            Usulan, bukan keharusan. Hanya mencatat versi daftar harga mana yang
+            jadi asal `harga_satuan_input` — produk yang belum punya harga tetap
+            boleh dijual dengan harga ketik manual.
+        harga_satuan_input:
+          type: string
+          description: >
+            Yang benar-benar ditagihkan, snapshot seperti `faktor_konversi`. Tidak
+            pernah dipaksa sama dengan `product_harga_jual` — tawar-menawar
+            terjadi, dan yang tertulis di nota yang benar.
+          example: "15000.00"
+        diskon_baris: { type: string, example: "0.00" }
+        subtotal:
+          type: string
+          description: "`qty_input x harga_satuan_input - diskon_baris`."
+          example: "150000.00"
+        hpp_satuan_dasar:
+          type: string
+          nullable: true
+          description: Null sampai diposting, disalin dari baris keluar `kartu_stok`.
+          example: "10000.0000"
+        hpp_total: { type: string, nullable: true, example: "100000.00" }
+
+    PenjualanDetailInput:
+      type: object
+      required: [id_product, id_satuan_input, qty_input, harga_satuan_input]
+      properties:
+        id_product:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Boleh muncul lebih dari sekali dalam satu dokumen, mengikuti
+            `mutasi`/`pemakaian`: kuotanya saldo ruang, dijumlahkan seluruh baris
+            terhadapnya.
+        id_satuan_input:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Harus terdaftar di `product_satuan` produk itu.
+        qty_input: { type: string, example: "10" }
+        id_harga_jual:
+          type: integer
+          format: int64
+          minimum: 1
+          nullable: true
+          description: >
+            Kalau diisi, divalidasi: harus milik `id_product`/`id_satuan_input`
+            baris ini dan berlaku pada `tanggal` dokumen.
+        harga_satuan_input: { type: string, example: "15000" }
+        diskon_baris: { type: string, example: "0" }
+
+    PiutangPelanggan:
+      type: object
+      description: >
+        Satu nota `KREDIT` yang `POSTED` dan masih punya sisa — cerminan
+        `UtangSupplier` di sisi piutang (isu #10 fase 2). `sisa_piutang` sama
+        dengan `total` untuk saat ini, karena belum ada `retur-penjualan` maupun
+        `penerimaan-pembayaran` yang bisa menguranginya.
+      properties:
+        id_penjualan: { type: integer, format: int64 }
+        nomor: { type: string, example: PJ/2026/08/0001 }
+        tanggal: { type: string, format: date-time }
+        total: { type: string, example: "150000.00" }
+        sisa_piutang: { type: string, example: "150000.00" }
 
     StokRuang:
       type: object
