@@ -83,13 +83,16 @@ func Bootstrap(config *BootstrapConfig) {
 	roleUseCase := usecase.NewRoleUseCase(
 		config.DB, config.Log, config.Validate, roleRepository,
 	)
-	// ProductUseCase borrows two repositories for two reads: PembelianRepository for
-	// GET /product/{id}/riwayat-beli and KartuStokRepository for GET /product/{id}/stok.
-	// Both queries are over another module's tables, so they stay in that module's
-	// repository; only the resource they answer for belongs to product.
+	// ProductUseCase borrows three repositories for three reads: PembelianRepository
+	// for GET /product/{id}/riwayat-beli, KartuStokRepository for
+	// GET /product/{id}/stok (and, since isu #11, the balance batch behind
+	// GET /pos/product), and RuangRepository to validate GET /pos/product's required
+	// id_ruang names a real room before trusting it for anything. All three queries
+	// are over other modules' tables, so they stay in those modules' repositories;
+	// only the resource they answer for belongs to product.
 	productUseCase := usecase.NewProductUseCase(
 		config.DB, config.Log, config.Validate, productRepository, pembelianRepository,
-		kartuStokRepository,
+		kartuStokRepository, ruangRepository,
 	)
 	// PeriodeUseCase is book closing. It is the module closest to master data — no
 	// number, no lines, no posting — and it holds one repository, because closing a

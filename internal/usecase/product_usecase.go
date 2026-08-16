@@ -63,6 +63,11 @@ func tanggalHargaJual(t time.Time) time.Time {
 // RoleRepository — the SQL is over another module's tables, so it stays in that
 // module's repository, and the usecase that owns the resource borrows it. The
 // alternative, a usecase apiece, would be a module for what is one query.
+//
+// RuangRepository is borrowed once more for the same reason — isu #11's
+// GET /pos/product requires id_ruang and validates it names a real room before
+// answering, the same existence check pembelian and mutasi already run before
+// trusting the field for anything.
 type ProductUseCase struct {
 	DB                  *sql.DB
 	Log                 *logrus.Logger
@@ -70,6 +75,7 @@ type ProductUseCase struct {
 	ProductRepository   *repository.ProductRepository
 	PembelianRepository *repository.PembelianRepository
 	KartuStokRepository *repository.KartuStokRepository
+	RuangRepository     *repository.RuangRepository
 }
 
 func NewProductUseCase(
@@ -79,6 +85,7 @@ func NewProductUseCase(
 	productRepository *repository.ProductRepository,
 	pembelianRepository *repository.PembelianRepository,
 	kartuStokRepository *repository.KartuStokRepository,
+	ruangRepository *repository.RuangRepository,
 ) *ProductUseCase {
 	return &ProductUseCase{
 		DB:                  db,
@@ -87,6 +94,7 @@ func NewProductUseCase(
 		ProductRepository:   productRepository,
 		PembelianRepository: pembelianRepository,
 		KartuStokRepository: kartuStokRepository,
+		RuangRepository:     ruangRepository,
 	}
 }
 
@@ -651,4 +659,82 @@ func (c *ProductUseCase) Search(ctx context.Context, request *model.ListProductR
 	}
 
 	return converter.ProductToResponses(list), pageMetadata(&request.PageRequest, total), nil
+}
+
+// POS answers the POS catalog screen — isu #11: one nested read replacing what today
+// costs one GET /product per row plus a GET .../harga-jual and a GET .../stok on top
+// of that, on the single most frequently opened screen in the whole application.
+//
+// Exactly three queries once id_ruang is proven real, independent of how many rows
+// the page holds: SearchPOS for the page of products, FindSatuanHargaBatch for every
+// unit and its price on this page in one shot, and KartuStokRepository.SaldoBatch for
+// every (product, room) balance on this page in one shot. Fetching any of those per
+// row would defeat the entire reason this endpoint exists while still appearing to
+// work.
+func (c *ProductUseCase) POS(ctx context.Context, request *model.ListPosProductRequest) ([]model.PosProductResponse, *model.PageMetadata, error) {
+	request.Normalize()
+
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, nil, err
+	}
+
+	// A mistyped id_ruang that silently answered zero stock on every row would be an
+	// expensive bug to notice, so it is checked before anything else runs.
+	if _, err := c.RuangRepository.IDUnitKerjaByID(ctx, c.DB, request.IDRuang); err != nil {
+		return nil, nil, notFoundOnNoRows(err, "ruang not found")
+	}
+
+	tanggal := tanggalHargaJual(time.Now())
+
+	if request.Tanggal != "" {
+		parsed, err := time.Parse(dateOnly, request.Tanggal)
+		if err != nil {
+			return nil, nil, model.Invalid("tanggal harus tanggal YYYY-MM-DD")
+		}
+
+		tanggal = parsed
+	}
+
+	list, total, err := c.ProductRepository.SearchPOS(ctx, c.DB, request.Search, request.Size, request.Offset())
+	if err != nil {
+		return nil, nil, err
+	}
+
+	paging := pageMetadata(&request.PageRequest, total)
+
+	if len(list) == 0 {
+		return converter.PosProductToResponses(list), paging, nil
+	}
+
+	productIDs := make([]int64, len(list))
+	ruangIDs := make([]int64, len(list))
+
+	for i := range list {
+		productIDs[i] = list[i].ID
+		ruangIDs[i] = request.IDRuang
+	}
+
+	satuan, err := c.ProductRepository.FindSatuanHargaBatch(ctx, c.DB, productIDs, tanggal)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	saldo, err := c.KartuStokRepository.SaldoBatch(ctx, c.DB, productIDs, ruangIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for i := range list {
+		// Never nil: every product carries at least its base unit, guaranteed at
+		// Create.
+		list[i].Satuan = satuan[list[i].ID]
+
+		// A pair absent from the batch has never moved through this room — a zero
+		// balance, not a missing one, the same reading SaldoBatch documents.
+		if baris, ada := saldo[repository.SaldoKey{IDBarang: list[i].ID, IDRuang: request.IDRuang}]; ada {
+			list[i].StokAkhir = baris.StokAkhir
+		}
+	}
+
+	return converter.PosProductToResponses(list), paging, nil
 }

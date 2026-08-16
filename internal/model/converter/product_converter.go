@@ -157,3 +157,47 @@ func DaftarHargaJualToResponses(list []entity.DaftarHargaJual) []model.DaftarHar
 
 	return responses
 }
+
+// PosProductToResponse converts one POS catalog row — isu #11. Satuan is built with
+// make, not left nil, so a product row never serialises satuan as null: every
+// product carries at least its base unit, but the empty case is guarded here anyway
+// rather than trusted, the same discipline ProductToResponses uses for the plain
+// product list.
+func PosProductToResponse(product *entity.ProductPOS) *model.PosProductResponse {
+	return &model.PosProductResponse{
+		ID:         product.ID,
+		KodeBarang: product.KodeBarang,
+		Nama:       product.Nama,
+		Satuan:     PosProductSatuanToResponses(product.Satuan),
+		StokAkhir:  product.StokAkhir,
+	}
+}
+
+func PosProductToResponses(list []entity.ProductPOS) []model.PosProductResponse {
+	responses := make([]model.PosProductResponse, len(list))
+	for i := range list {
+		responses[i] = *PosProductToResponse(&list[i])
+	}
+
+	return responses
+}
+
+func PosProductSatuanToResponse(satuan *entity.ProductPOSSatuan) *model.PosProductSatuanResponse {
+	return &model.PosProductSatuanResponse{
+		IDSatuan:       satuan.IDSatuan,
+		NamaSatuan:     satuan.NamaSatuan,
+		Faktor:         satuan.Faktor,
+		IsDefaultInput: satuan.IsDefaultInput,
+		IDHargaJual:    satuan.IDHargaJual,
+		Harga:          satuan.Harga,
+	}
+}
+
+func PosProductSatuanToResponses(list []entity.ProductPOSSatuan) []model.PosProductSatuanResponse {
+	responses := make([]model.PosProductSatuanResponse, len(list))
+	for i := range list {
+		responses[i] = *PosProductSatuanToResponse(&list[i])
+	}
+
+	return responses
+}

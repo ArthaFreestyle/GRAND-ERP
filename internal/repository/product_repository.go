@@ -704,6 +704,130 @@ func (r *ProductRepository) SearchDaftarHargaJual(ctx context.Context, db DBTX, 
 	return list, total, nil
 }
 
+// posProductFrom and posProductFilter back SearchPOS — isu #11, GET /api/v1/pos/product.
+// Only active products, always: no is_aktif parameter exists on this endpoint at all,
+// because a retired product must never become sellable again just because a switch
+// was left open on this one screen.
+const posProductFrom = `FROM product p`
+
+const posProductFilter = `
+	WHERE p.is_aktif
+	  AND ($1 = '' OR p.nama ILIKE '%' || $1 || '%' OR p.kode_barang ILIKE '%' || $1 || '%')`
+
+const posProductColumns = `p.id, p.kode_barang, p.nama`
+
+// SearchPOS is the first of the POS catalog's three fixed queries per page: products
+// plus paging. COUNT and the row query share posProductFilter, the same discipline
+// every other list in this codebase follows.
+//
+// The exact-kode_barang match that sorts first compares against the raw search text,
+// not the ILIKE-escaped one: EscapeLike turns a literal "100%" into "100\%", and
+// comparing that against a stored kode_barang would never equal it. A scanned or
+// typed code has to win the sort on its own literal value.
+func (r *ProductRepository) SearchPOS(ctx context.Context, db DBTX, search string, limit, offset int) ([]entity.ProductPOS, int64, error) {
+	escaped := EscapeLike(search)
+
+	var total int64
+	if err := db.QueryRowContext(
+		ctx, `SELECT COUNT(*) `+posProductFrom+posProductFilter, escaped,
+	).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count pos product: %w", err)
+	}
+
+	if total == 0 {
+		return []entity.ProductPOS{}, 0, nil
+	}
+
+	// ORDER BY ends in p.id, a unique column, same discipline as every other paged
+	// list — without it one row can appear on two pages while another never comes
+	// back. The exact-match clause only ever reorders ties at the very top; it
+	// changes nothing about that guarantee.
+	query := `SELECT ` + posProductColumns + ` ` + posProductFrom + posProductFilter + `
+		ORDER BY (lower(p.kode_barang) = lower($2)) DESC, p.nama, p.id
+		LIMIT $3 OFFSET $4`
+
+	rows, err := db.QueryContext(ctx, query, escaped, search, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("select pos product: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.ProductPOS, 0, limit)
+
+	for rows.Next() {
+		var product entity.ProductPOS
+
+		if err := rows.Scan(&product.ID, &product.KodeBarang, &product.Nama); err != nil {
+			return nil, 0, fmt.Errorf("scan pos product: %w", err)
+		}
+
+		list = append(list, product)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate pos product: %w", err)
+	}
+
+	return list, total, nil
+}
+
+// FindSatuanHargaBatch is the second of the POS catalog's three fixed queries per
+// page: every conversion unit for every product on the page, with whatever price
+// version is in force for it on tanggal attached in the same query — one unnest-free
+// batch keyed by = ANY($1), following the shape FindRolesByUserIDs, FindFaktorBatch,
+// and SaldoBatch already set for "one query for a whole page, not one per row".
+//
+// LEFT JOIN product_harga_jual, not JOIN: a satuan with no price in force on tanggal
+// — including one that has never had a price at all — is exactly the row this
+// endpoint still has to surface, with id_harga_jual and harga both nil. Putting the
+// date range in the JOIN's ON clause rather than a WHERE is what keeps that row
+// rather than silently dropping it back to an inner join.
+//
+// A product with no rows in the result at all cannot happen: every product carries
+// its base unit, guaranteed at Create.
+func (r *ProductRepository) FindSatuanHargaBatch(ctx context.Context, db DBTX, productIDs []int64, tanggal time.Time) (map[int64][]entity.ProductPOSSatuan, error) {
+	const query = `
+		SELECT ps.id_product, ps.id_satuan, s.nama, ps.faktor, ps.is_default_input,
+		       h.id, h.harga::TEXT
+		FROM product_satuan ps
+		JOIN satuan s ON s.id = ps.id_satuan
+		LEFT JOIN product_harga_jual h
+			ON h.id_product = ps.id_product
+			AND h.id_satuan = ps.id_satuan
+			AND h.berlaku_dari <= $2
+			AND (h.berlaku_sampai IS NULL OR h.berlaku_sampai > $2)
+		WHERE ps.id_product = ANY($1)
+		ORDER BY ps.id_product, ps.faktor, ps.id`
+
+	rows, err := db.QueryContext(ctx, query, productIDs, tanggal)
+	if err != nil {
+		return nil, fmt.Errorf("select pos satuan harga batch: %w", err)
+	}
+	defer rows.Close()
+
+	hasil := make(map[int64][]entity.ProductPOSSatuan, len(productIDs))
+
+	for rows.Next() {
+		var idProduct int64
+		var satuan entity.ProductPOSSatuan
+
+		if err := rows.Scan(
+			&idProduct, &satuan.IDSatuan, &satuan.NamaSatuan, &satuan.Faktor, &satuan.IsDefaultInput,
+			&satuan.IDHargaJual, &satuan.Harga,
+		); err != nil {
+			return nil, fmt.Errorf("scan pos satuan harga batch: %w", err)
+		}
+
+		hasil[idProduct] = append(hasil[idProduct], satuan)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pos satuan harga batch: %w", err)
+	}
+
+	return hasil, nil
+}
+
 func (r *ProductRepository) FindHargaJual(ctx context.Context, db DBTX, productID int64) ([]entity.ProductHargaJual, error) {
 	const query = `
 		SELECT h.id, h.id_product, h.id_satuan, h.harga::TEXT, h.berlaku_dari,
