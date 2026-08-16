@@ -38,6 +38,8 @@ type PenerimaanSusulanUseCase struct {
 	// Read for the error message only; the kartu_stok trigger is the guard. See
 	// PembelianUseCase.
 	PeriodeRepository *repository.PeriodeRepository
+	// StokOpnameRepository is the same narrow borrow, for periksaRuangBeku (isu #15).
+	StokOpnameRepository *repository.StokOpnameRepository
 }
 
 func NewPenerimaanSusulanUseCase(
@@ -50,17 +52,19 @@ func NewPenerimaanSusulanUseCase(
 	kartuStokRepository *repository.KartuStokRepository,
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
+	stokOpnameRepository *repository.StokOpnameRepository,
 ) *PenerimaanSusulanUseCase {
 	return &PenerimaanSusulanUseCase{
-		DB:                  db,
-		Log:                 log,
-		Validate:            validate,
-		SusulanRepository:   susulanRepository,
-		PembelianRepository: pembelianRepository,
-		ProductRepository:   productRepository,
-		KartuStokRepository: kartuStokRepository,
-		CounterRepository:   counterRepository,
-		PeriodeRepository:   periodeRepository,
+		DB:                   db,
+		Log:                  log,
+		Validate:             validate,
+		SusulanRepository:    susulanRepository,
+		PembelianRepository:  pembelianRepository,
+		ProductRepository:    productRepository,
+		KartuStokRepository:  kartuStokRepository,
+		CounterRepository:    counterRepository,
+		PeriodeRepository:    periodeRepository,
+		StokOpnameRepository: stokOpnameRepository,
 	}
 }
 
@@ -366,6 +370,12 @@ func (c *PenerimaanSusulanUseCase) Posting(ctx context.Context, request *model.P
 		return nil, err
 	}
 
+	// Same relationship to the freeze that periksaPeriode has to a closed period —
+	// isu #15.
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, susulan.IDRuang); err != nil {
+		return nil, err
+	}
+
 	detail, err := c.SusulanRepository.FindDetail(ctx, tx, request.ID)
 	if err != nil {
 		return nil, err
@@ -453,6 +463,10 @@ func (c *PenerimaanSusulanUseCase) Batal(ctx context.Context, request *model.Bat
 	// not the document's.
 	tanggalPembalik := time.Now()
 	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, tanggalPembalik); err != nil {
+		return nil, err
+	}
+
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, susulan.IDRuang); err != nil {
 		return nil, err
 	}
 

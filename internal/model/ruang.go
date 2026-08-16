@@ -9,6 +9,11 @@ type RuangResponse struct {
 	IDUnitKerja int64 `json:"id_unit_kerja"`
 	// NamaUnitKerja is resolved by a join, not a second query.
 	NamaUnitKerja string `json:"nama_unit_kerja"`
+
+	// NomorOpnameBeku is the nomor of the stok_opname currently freezing this
+	// room, null when it is free — isu #15. A caller whose posting was refused
+	// can see the cause and who to chase right here, without a second call.
+	NomorOpnameBeku *string `json:"nomor_opname_beku"`
 }
 
 // Kode is optional in the schema but unique when present. IDUnitKerja is

@@ -33,15 +33,20 @@ import (
 // the caller's active unit_kerja (isu #12 fase 5) — the same reasoning UserUseCase
 // borrows UnitKerjaRepository to validate a grant's unit.
 type PembelianUseCase struct {
-	DB                  *sql.DB
-	Log                 *logrus.Logger
-	Validate            *validator.Validate
-	PembelianRepository *repository.PembelianRepository
-	ProductRepository   *repository.ProductRepository
-	KartuStokRepository *repository.KartuStokRepository
-	CounterRepository   *repository.DocumentCounterRepository
-	PeriodeRepository   *repository.PeriodeRepository
-	RuangRepository     *repository.RuangRepository
+	DB                    *sql.DB
+	Log                   *logrus.Logger
+	Validate              *validator.Validate
+	PembelianRepository   *repository.PembelianRepository
+	ProductRepository     *repository.ProductRepository
+	KartuStokRepository   *repository.KartuStokRepository
+	CounterRepository     *repository.DocumentCounterRepository
+	PeriodeRepository     *repository.PeriodeRepository
+	RuangRepository       *repository.RuangRepository
+	// StokOpnameRepository is borrowed for one narrow read, periksaRuangBeku's
+	// FindOpenByRuang — isu #15. The freeze itself is enforced by the kartu_stok
+	// trigger; this is only for a message naming the opname that is holding the
+	// room, the same relationship PeriodeRepository already has to periksaPeriode.
+	StokOpnameRepository *repository.StokOpnameRepository
 }
 
 func NewPembelianUseCase(
@@ -54,17 +59,19 @@ func NewPembelianUseCase(
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
 	ruangRepository *repository.RuangRepository,
+	stokOpnameRepository *repository.StokOpnameRepository,
 ) *PembelianUseCase {
 	return &PembelianUseCase{
-		DB:                  db,
-		Log:                 log,
-		Validate:            validate,
-		PembelianRepository: pembelianRepository,
-		ProductRepository:   productRepository,
-		KartuStokRepository: kartuStokRepository,
-		CounterRepository:   counterRepository,
-		PeriodeRepository:   periodeRepository,
-		RuangRepository:     ruangRepository,
+		DB:                   db,
+		Log:                  log,
+		Validate:             validate,
+		PembelianRepository:  pembelianRepository,
+		ProductRepository:    productRepository,
+		KartuStokRepository:  kartuStokRepository,
+		CounterRepository:    counterRepository,
+		PeriodeRepository:    periodeRepository,
+		RuangRepository:      ruangRepository,
+		StokOpnameRepository: stokOpnameRepository,
 	}
 }
 
@@ -436,6 +443,12 @@ func (c *PembelianUseCase) Posting(ctx context.Context, request *model.PostingPe
 		return nil, err
 	}
 
+	// Same relationship to the freeze that periksaPeriode has to a closed period —
+	// isu #15. The trigger is the guard; this only names the opname holding the room.
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, pembelian.IDRuang); err != nil {
+		return nil, err
+	}
+
 	detail, err := c.PembelianRepository.FindDetail(ctx, tx, request.ID)
 	if err != nil {
 		return nil, err
@@ -541,7 +554,8 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 		_ = tx.Rollback()
 	}()
 
-	if _, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusPembelianPosted); err != nil {
+	pembelian, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusPembelianPosted)
+	if err != nil {
 		return nil, err
 	}
 
@@ -591,6 +605,10 @@ func (c *PembelianUseCase) Batal(ctx context.Context, request *model.BatalPembel
 	// somebody reopens it.
 	tanggalPembalik := time.Now()
 	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, tanggalPembalik); err != nil {
+		return nil, err
+	}
+
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, pembelian.IDRuang); err != nil {
 		return nil, err
 	}
 

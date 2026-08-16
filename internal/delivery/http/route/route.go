@@ -41,6 +41,7 @@ type RouteConfig struct {
 	PemakaianController  *deliveryhttp.PemakaianController
 	PenjualanController  *deliveryhttp.PenjualanController
 	PembayaranController *deliveryhttp.PembayaranUtangController
+	StokOpnameController *deliveryhttp.StokOpnameController
 	ProductController    *deliveryhttp.ProductController
 	UnitKerjaController  *deliveryhttp.UnitKerjaController
 	RuangController      *deliveryhttp.RuangController
@@ -111,6 +112,11 @@ func (c *RouteConfig) setupGuestRoute() {
 //     and nowhere else: INVENTARIS reaches DRAFT, SUPERADMIN posts and voids.
 //   - periode writes are SUPERADMIN-only. Closing a month is not this module's own
 //     data changing — it is every other module losing the ability to post into it.
+//   - stok-opname carries the identical shape for the identical reason, at the
+//     level of one ruang rather than the whole company: while a count is DRAFT or
+//     DIAJUKAN, every other kartu_stok writer loses the ability to post into that
+//     room, enforced by the trigger rather than by anything in this table. See
+//     "Pembekuan ruang selama opname berjalan" in CLAUDE.md.
 //
 // This split is a starting assumption drawn from the three role names, not something
 // derived from a spec. Adjust the guards as the real division of work becomes clear.
@@ -374,6 +380,30 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/pembayaran-utang/:id/batal", superadmin, c.PembayaranController.Batal)
 	api.Post("/pembayaran-utang/:id/cair", superadmin, c.PembayaranController.Cairkan)
 	api.Post("/pembayaran-utang/:id/tolak-giro", superadmin, c.PembayaranController.TolakGiro)
+
+	// stok-opname is the seventh module to write kartu_stok, and the only one that
+	// changes what every OTHER module may do while it is open: a ruang named by a
+	// DRAFT or DIAJUKAN opname refuses every posting from any module, enforced by the
+	// kartu_stok trigger itself (isu #15) rather than a check any of those routes make.
+	// That is why this table alone is not the whole authorization story here — see
+	// "Pembekuan ruang selama opname berjalan" in CLAUDE.md.
+	//
+	// The split follows every other kartu_stok writer: INVENTARIS types and submits,
+	// SUPERADMIN verifies. PATCH .../detail/{id_detail} is the one deliberate
+	// exception in this whole API to "lines are replaced wholesale" — a count sheet is
+	// filled in by someone walking the room product by product, and INVENTARIS reaches
+	// it the same as every other DRAFT-only write here.
+	api.Get("/stok-opname", c.StokOpnameController.List)
+	api.Get("/stok-opname/:id", c.StokOpnameController.Get)
+	api.Post("/stok-opname", inventaris, c.StokOpnameController.Create)
+	api.Patch("/stok-opname/:id", inventaris, c.StokOpnameController.Update)
+	api.Post("/stok-opname/:id/tarik-saldo", inventaris, c.StokOpnameController.TarikSaldo)
+	api.Put("/stok-opname/:id/detail", inventaris, c.StokOpnameController.ReplaceDetail)
+	api.Patch("/stok-opname/:id/detail/:id_detail", inventaris, c.StokOpnameController.UpdateDetail)
+	api.Post("/stok-opname/:id/ajukan", inventaris, c.StokOpnameController.Ajukan)
+	api.Post("/stok-opname/:id/posting", superadmin, c.StokOpnameController.Posting)
+	api.Post("/stok-opname/:id/tolak", superadmin, c.StokOpnameController.Tolak)
+	api.Post("/stok-opname/:id/batal", superadmin, c.StokOpnameController.Batal)
 
 	api.Get("/satuan", c.SatuanController.List)
 	api.Get("/satuan/:id", c.SatuanController.Get)

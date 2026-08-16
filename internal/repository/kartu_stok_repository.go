@@ -298,6 +298,49 @@ func (r *KartuStokRepository) SaldoPerRuang(ctx context.Context, db DBTX, idBara
 	return list, nil
 }
 
+// SaldoRuang breaks one room's stock down by product — the mirror of
+// SaldoPerRuang, which breaks one product down by room. stok_opname's TarikSaldo
+// (isu #15) is the only caller: it needs every (product, this room) balance in one
+// shot to seed the count sheet, and each row's own kartu_stok id becomes that
+// line's id_kartu_stok_cutoff.
+//
+// Only products that have actually moved through the room appear — the same
+// reading SaldoPerRuang takes, and the one the schema forces anyway:
+// stok_opname_detail.id_kartu_stok_cutoff is NOT NULL, so a product with no
+// kartu_stok row here has no reference to give it and cannot be pulled in at all.
+// See "Barang yang sistem belum pernah lihat" in the usecase.
+func (r *KartuStokRepository) SaldoRuang(ctx context.Context, db DBTX, idRuang int64) ([]entity.SaldoRuangBaris, error) {
+	const query = `
+		SELECT DISTINCT ON (ks.id_barang) ks.id_barang, ks.id, ks.stok_akhir
+		FROM kartu_stok ks
+		WHERE ks.id_ruang = $1
+		ORDER BY ks.id_barang, ks.id DESC`
+
+	rows, err := db.QueryContext(ctx, query, idRuang)
+	if err != nil {
+		return nil, fmt.Errorf("select saldo ruang: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.SaldoRuangBaris, 0, 32)
+
+	for rows.Next() {
+		var baris entity.SaldoRuangBaris
+
+		if err := rows.Scan(&baris.IDBarang, &baris.IDKartuStok, &baris.StokAkhir); err != nil {
+			return nil, fmt.Errorf("scan saldo ruang: %w", err)
+		}
+
+		list = append(list, baris)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate saldo ruang: %w", err)
+	}
+
+	return list, nil
+}
+
 // KunciSaldo takes the balance locks for a whole document up front, in one canonical
 // order, and must be called inside a transaction.
 //

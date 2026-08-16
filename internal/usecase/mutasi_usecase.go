@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/big"
+	"sort"
 	"time"
 
 	"Arthafreestyle/ERP/internal/entity"
@@ -56,6 +57,8 @@ type MutasiUseCase struct {
 	// PembelianUseCase.
 	PeriodeRepository *repository.PeriodeRepository
 	RuangRepository   *repository.RuangRepository
+	// StokOpnameRepository is the same narrow borrow, for periksaRuangBeku (isu #15).
+	StokOpnameRepository *repository.StokOpnameRepository
 }
 
 func NewMutasiUseCase(
@@ -68,17 +71,19 @@ func NewMutasiUseCase(
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
 	ruangRepository *repository.RuangRepository,
+	stokOpnameRepository *repository.StokOpnameRepository,
 ) *MutasiUseCase {
 	return &MutasiUseCase{
-		DB:                  db,
-		Log:                 log,
-		Validate:            validate,
-		MutasiRepository:    mutasiRepository,
-		ProductRepository:   productRepository,
-		KartuStokRepository: kartuStokRepository,
-		CounterRepository:   counterRepository,
-		PeriodeRepository:   periodeRepository,
-		RuangRepository:     ruangRepository,
+		DB:                   db,
+		Log:                  log,
+		Validate:             validate,
+		MutasiRepository:     mutasiRepository,
+		ProductRepository:    productRepository,
+		KartuStokRepository:  kartuStokRepository,
+		CounterRepository:    counterRepository,
+		PeriodeRepository:    periodeRepository,
+		RuangRepository:      ruangRepository,
+		StokOpnameRepository: stokOpnameRepository,
 	}
 }
 
@@ -398,6 +403,16 @@ func (c *MutasiUseCase) Posting(ctx context.Context, request *model.PostingMutas
 		return nil, err
 	}
 
+	// Both rooms, unlike periksaRuangUnitAktif on Create/Update — a transfer really
+	// does write into both, so both have to be checked for the freeze even though only
+	// the source room is checked against the caller's active unit_kerja. isu #15.
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, mutasi.IDRuangAsal); err != nil {
+		return nil, err
+	}
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, mutasi.IDRuangTujuan); err != nil {
+		return nil, err
+	}
+
 	if err := c.periksaSaldo(ctx, tx, mutasi.IDRuangAsal, detail); err != nil {
 		return nil, err
 	}
@@ -513,7 +528,8 @@ func (c *MutasiUseCase) Batal(ctx context.Context, request *model.BatalMutasiReq
 		_ = tx.Rollback()
 	}()
 
-	if _, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusMutasiPosted); err != nil {
+	mutasi, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusMutasiPosted)
+	if err != nil {
 		return nil, err
 	}
 
@@ -527,11 +543,19 @@ func (c *MutasiUseCase) Batal(ctx context.Context, request *model.BatalMutasiReq
 	// rows will touch, which is the same set the posting touched.
 	tanggalPembalik := time.Now()
 
-	if err := c.kunciJalurPembalik(ctx, tx, asal, tanggalPembalik); err != nil {
+	if err := c.kunciJalurPembalik(ctx, tx, mutasi, asal, tanggalPembalik); err != nil {
 		return nil, err
 	}
 
 	if err := periksaPeriode(ctx, tx, c.PeriodeRepository, tanggalPembalik); err != nil {
+		return nil, err
+	}
+
+	// Both rooms — see the identical check in Posting.
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, mutasi.IDRuangAsal); err != nil {
+		return nil, err
+	}
+	if err := periksaRuangBeku(ctx, tx, c.StokOpnameRepository, mutasi.IDRuangTujuan); err != nil {
 		return nil, err
 	}
 
@@ -605,8 +629,35 @@ func (c *MutasiUseCase) Batal(ctx context.Context, request *model.BatalMutasiReq
 // closing queued for the exclusive periode lock, a posting holding it shared and waiting
 // on our balance lock, and us holding that balance lock and waiting behind the closing.
 // Uniform order, no cycle.
+// kunciRuangPasangan takes the shared ruang: advisory lock (isu #15) for both
+// rooms a transfer touches, in ascending id order regardless of which way the
+// goods move — the identical ABBA risk kunciJalurStok's comment describes for
+// the (id_barang, id_ruang) locks, one level up: dokumen A (gudang -> toko) and
+// dokumen B (toko -> gudang) posted at the same moment must take the two ruang:
+// locks in the same order or they can deadlock each other.
+//
+// Taking it before KunciSaldo is what keeps the frozen status periksaRuangBeku
+// reads afterwards from moving underneath the rest of the transaction — the same
+// reasoning PeriodeRepository.LockShared already gets for periode.
+func (c *MutasiUseCase) kunciRuangPasangan(ctx context.Context, tx repository.DBTX, idRuangAsal, idRuangTujuan int64) error {
+	ids := []int64{idRuangAsal, idRuangTujuan}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	for _, id := range ids {
+		if err := c.RuangRepository.LockShared(ctx, tx, id); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (c *MutasiUseCase) kunciJalurStok(ctx context.Context, tx repository.DBTX, mutasi *entity.Mutasi, detail []entity.MutasiDetail, tanggal time.Time) error {
 	if err := c.PeriodeRepository.LockShared(ctx, tx, tanggal); err != nil {
+		return err
+	}
+
+	if err := c.kunciRuangPasangan(ctx, tx, mutasi.IDRuangAsal, mutasi.IDRuangTujuan); err != nil {
 		return err
 	}
 
@@ -624,8 +675,12 @@ func (c *MutasiUseCase) kunciJalurStok(ctx context.Context, tx repository.DBTX, 
 // kunciJalurPembalik is kunciJalurStok for a cancellation, where the pairs to lock are
 // read off the rows being reversed rather than off the document's lines. Same ordering
 // argument, and the same ABBA risk between two cancellations going opposite ways.
-func (c *MutasiUseCase) kunciJalurPembalik(ctx context.Context, tx repository.DBTX, asal []entity.KartuStok, tanggal time.Time) error {
+func (c *MutasiUseCase) kunciJalurPembalik(ctx context.Context, tx repository.DBTX, mutasi *entity.Mutasi, asal []entity.KartuStok, tanggal time.Time) error {
 	if err := c.PeriodeRepository.LockShared(ctx, tx, tanggal); err != nil {
+		return err
+	}
+
+	if err := c.kunciRuangPasangan(ctx, tx, mutasi.IDRuangAsal, mutasi.IDRuangTujuan); err != nil {
 		return err
 	}
 

@@ -36,6 +36,18 @@ const (
 	// unused 'PEMBATALAN_PEMAKAIAN' — id_kartu_stok_asal already says what a
 	// reversal undoes.
 	JenisTransaksiPenjualan = "PENJUALAN"
+	// JenisTransaksiSOSurplus and JenisTransaksiSODefisit are the two directions
+	// stok_opname (isu #15) can write in one document — some lines surplus, some
+	// deficit, each standing on its own. It is the seventh document to write
+	// kartu_stok and the first that moves no goods to or from anywhere: nothing
+	// arrives from a supplier and nothing leaves to a counterparty, only the
+	// system's own record of what is on the shelf changes.
+	//
+	// Its cancellation reuses JenisTransaksiPembatalanTransaksi below, following
+	// every other writer's precedent, rather than the enum's own
+	// 'PEMBATALAN_PEMAKAIAN' value.
+	JenisTransaksiSOSurplus = "SO_SURPLUS"
+	JenisTransaksiSODefisit = "SO_DEFISIT"
 )
 
 // Ref tables recorded on kartu_stok. Paired with ref_id_transaksi they say which
@@ -56,6 +68,12 @@ const (
 	// RefTablePenjualan is the sixth document to write kartu_stok, and the first
 	// whose goods leave to an outside party — see JenisTransaksiPenjualan.
 	RefTablePenjualan = "penjualan"
+	// RefTableStokOpname is the seventh document to write kartu_stok, and the
+	// first that moves nothing to or from anywhere — see JenisTransaksiSOSurplus.
+	// It is also the value the kartu_stok trigger's own room-freeze check
+	// (migration 000023) compares ref_table against to let an opname post its
+	// own adjustment into the very room it is freezing.
+	RefTableStokOpname = "stok_opname"
 )
 
 // KartuStok maps the kartu_stok table: the only source of truth for stock and
@@ -107,4 +125,15 @@ type KartuStok struct {
 
 	CreatedBy int64
 	CreatedAt time.Time
+}
+
+// SaldoRuangBaris is one product's tail of the balance chain in one room —
+// KartuStokRepository.SaldoRuang's row shape, and stok_opname's TarikSaldo (isu
+// #15) is its only caller. IDKartuStok is what fills stok_opname_detail's
+// id_kartu_stok_cutoff: the row an opname line points at as its system-balance
+// reference.
+type SaldoRuangBaris struct {
+	IDBarang    int64
+	IDKartuStok int64
+	StokAkhir   int64
 }

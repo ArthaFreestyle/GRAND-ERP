@@ -25,6 +25,16 @@ const exclusionViolation = "23P01"
 // posting into a periode that is already TUTUP.
 const checkViolation = "23514"
 
+// objectNotInPrerequisiteState is PostgreSQL's SQLSTATE 55000. The kartu_stok
+// trigger raises with this code — deliberately, via `USING ERRCODE = '55000'` —
+// for a posting into a ruang that is currently frozen by an open stok_opname
+// (isu #15). It is deliberately not checkViolation: that code already carries two
+// meanings (insufficient stock and a closed periode) and every call site already
+// has to say "one of these two"; a third meaning would make it three. A distinct
+// SQLSTATE means a distinct funnel — conflictOnRuangBeku — answering 409 rather
+// than 400: the request itself is not wrong, the state it names is not ready yet.
+const objectNotInPrerequisiteState = "55000"
+
 // ErrTransisiStatus reports that a guarded status change matched no row: the
 // document either vanished or moved to another state between the read and the
 // write. Kept as a sentinel rather than a driver error because nothing failed at
@@ -98,4 +108,13 @@ func IsForeignKeyViolation(err error) bool {
 	var pgErr *pgconn.PgError
 
 	return errors.As(err, &pgErr) && pgErr.Code == foreignKeyViolation
+}
+
+// IsObjectNotInPrerequisiteState reports whether err is the kartu_stok trigger's
+// room-freeze rejection (isu #15) — a posting refused because the ruang it names
+// is currently locked by an open stok_opname.
+func IsObjectNotInPrerequisiteState(err error) bool {
+	var pgErr *pgconn.PgError
+
+	return errors.As(err, &pgErr) && pgErr.Code == objectNotInPrerequisiteState
 }

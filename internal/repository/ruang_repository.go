@@ -15,16 +15,23 @@ func NewRuangRepository() *RuangRepository {
 	return &RuangRepository{}
 }
 
-// ruangReadColumns adds the unit's name, resolved by the join in ruangFrom.
-// Fetching it per row instead would be an N+1.
-const ruangReadColumns = `r.id, r.kode, r.nama_ruang, r.is_aktif, r.id_unit_kerja, uk.nama`
+// ruangReadColumns adds the unit's name, resolved by the join in ruangFrom, and
+// the nomor of whichever stok_opname is currently freezing the room (isu #15;
+// nil when free). Fetching either per row instead would be an N+1.
+const ruangReadColumns = `r.id, r.kode, r.nama_ruang, r.is_aktif, r.id_unit_kerja, uk.nama, so.nomor`
 
 // ruangFrom joins unit_kerja INNER, not LEFT: id_unit_kerja is NOT NULL since
 // migration 000019, so every ruang row has one, and an INNER join costs
 // nothing here that a LEFT join would avoid.
+//
+// stok_opname is LEFT, and deliberately not a plain equality on id_ruang: only an
+// open opname (DRAFT/DIAJUKAN) freezes the room, and stok_opname_ruang_terbuka_uidx
+// already guarantees at most one such row, so the join can never multiply a ruang
+// row.
 const ruangFrom = `
 	FROM ruang r
-	JOIN unit_kerja uk ON uk.id = r.id_unit_kerja`
+	JOIN unit_kerja uk ON uk.id = r.id_unit_kerja
+	LEFT JOIN stok_opname so ON so.id_ruang = r.id AND so.status IN ('DRAFT', 'DIAJUKAN')`
 
 func (r *RuangRepository) Create(ctx context.Context, db DBTX, ruang *entity.Ruang) error {
 	const query = `
@@ -51,13 +58,68 @@ func (r *RuangRepository) FindByID(ctx context.Context, db DBTX, id int64) (*ent
 
 	err := db.QueryRowContext(ctx, query, id).Scan(
 		&ruang.ID, &ruang.Kode, &ruang.NamaRuang, &ruang.IsAktif,
-		&ruang.IDUnitKerja, &ruang.NamaUnitKerja,
+		&ruang.IDUnitKerja, &ruang.NamaUnitKerja, &ruang.NomorOpnameBeku,
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	return ruang, nil
+}
+
+// ruangLockKey is the advisory-lock key expression for one ruang, and the string
+// it hashes has to come out identical to the one kartu_stok_hitung_saldo uses
+// (migration 000023) — isu #15. Two different keys would lock two different
+// things and neither side would ever wait for the other.
+const ruangLockKey = `hashtextextended('ruang:' || $1::BIGINT::TEXT, 0)`
+
+// Lock takes the exclusive advisory lock for one ruang, and it must be called
+// inside a transaction: the lock is held until that transaction commits or rolls
+// back.
+//
+// The kartu_stok trigger takes the shared side of this same lock before it reads
+// stok_opname for that room. So opening or closing an opname (which is what
+// changes whether the room is frozen) waits for every posting already in flight
+// for that room, and every posting that starts afterwards waits for it — closing
+// the READ COMMITTED window where a posting reads "not frozen", an opname opens,
+// and the posting then lands after the cutoff with nothing noticing.
+//
+// Called by StokOpnameUseCase.Buka and by every transition that changes whether a
+// room is frozen (Posting, Batal) — not Ajukan or Tolak, since a room stays frozen
+// across both of those.
+func (r *RuangRepository) Lock(ctx context.Context, db DBTX, idRuang int64) error {
+	const query = `SELECT pg_advisory_xact_lock(` + ruangLockKey + `)`
+
+	if _, err := db.ExecContext(ctx, query, idRuang); err != nil {
+		return fmt.Errorf("lock ruang: %w", err)
+	}
+
+	return nil
+}
+
+// LockShared takes the shared side of the same advisory lock, which is what the
+// kartu_stok trigger takes before it reads stok_opname for that room. It must be
+// called inside a transaction.
+//
+// Nothing needs this to refuse a frozen room — the trigger still does that. What
+// it is for is lock ordering, the same reasoning as PeriodeRepository.LockShared:
+// every writer follows periode -> ruang -> (id_barang, id_ruang), because the
+// trigger takes them in that order on every insert. A document that pre-locks its
+// balances (KartuStokRepository.KunciSaldo) has to take this before that, or a
+// closing/opening opname queued for the exclusive ruang lock is enough to close a
+// deadlock cycle the same way an unordered periode lock would.
+//
+// Called by mutasi, pemakaian, and stok_opname's own posting — every module that
+// pre-locks balances before writing kartu_stok — right before KunciSaldo, so the
+// frozen status periksaRuangBeku reads afterwards cannot move underneath it.
+func (r *RuangRepository) LockShared(ctx context.Context, db DBTX, idRuang int64) error {
+	const query = `SELECT pg_advisory_xact_lock_shared(` + ruangLockKey + `)`
+
+	if _, err := db.ExecContext(ctx, query, idRuang); err != nil {
+		return fmt.Errorf("lock shared ruang: %w", err)
+	}
+
+	return nil
 }
 
 // IDUnitKerjaByID returns the unit_kerja a ruang belongs to, without the rest
@@ -140,7 +202,7 @@ func (r *RuangRepository) Search(ctx context.Context, db DBTX, search string, is
 
 		if err := rows.Scan(
 			&ruang.ID, &ruang.Kode, &ruang.NamaRuang, &ruang.IsAktif,
-			&ruang.IDUnitKerja, &ruang.NamaUnitKerja,
+			&ruang.IDUnitKerja, &ruang.NamaUnitKerja, &ruang.NomorOpnameBeku,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan ruang: %w", err)
 		}

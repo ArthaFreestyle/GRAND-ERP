@@ -17,4 +17,11 @@ type Ruang struct {
 	// unit_kerja and is only filled by the read queries — resolving it per row
 	// would be an N+1.
 	NamaUnitKerja string
+	// NomorOpnameBeku is not a column of ruang either. It is the nomor of the
+	// open (DRAFT/DIAJUKAN) stok_opname currently freezing this room, nil when
+	// the room is free — isu #15. A LEFT JOIN against stok_opname's own
+	// one-open-per-room index, not a second endpoint: a cashier whose posting
+	// was refused has to be able to see the cause and who to chase without
+	// searching for it.
+	NomorOpnameBeku *string
 }
