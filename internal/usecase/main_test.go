@@ -80,6 +80,7 @@ type app struct {
 	pembayaran *usecase.PembayaranUtangUseCase
 	penerimaan *usecase.PenerimaanPembayaranUseCase
 	stokOpname *usecase.StokOpnameUseCase
+	laporan    *usecase.LaporanUseCase
 	dokumen    *usecase.DokumenUseCase
 	periode    *usecase.PeriodeUseCase
 	auth       *usecase.AuthUseCase
@@ -226,6 +227,9 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate,
 			repository.NewPenerimaanPembayaranRepository(), penjualanRepository, counterRepository,
 			unitKerjaRepository,
+		),
+		laporan: usecase.NewLaporanUseCase(
+			testDB, log, validate, kartuStokRepository, penjualanRepository,
 		),
 	}
 }

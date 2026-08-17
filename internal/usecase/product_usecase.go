@@ -644,6 +644,89 @@ func (c *ProductUseCase) Stok(ctx context.Context, request *model.ListStokProduc
 	return converter.StokRuangToResponses(list), nil
 }
 
+// KartuStok answers one product's movement history in one room, oldest first — isu
+// #22 fase 1, the first read of kartu_stok as a ledger rather than only a running
+// balance. This is what answers "why is the balance what it is", which Stok above
+// cannot: it shows the tail of the chain, not how it got there.
+//
+// The product is looked up first so an unknown id answers 404 rather than an empty
+// page — the same argument RiwayatBeli and Stok both already make. The room is
+// checked next, the same way: an id_ruang that names no room at all is a genuine
+// 404, distinct from one that names a real room outside the caller's active
+// unit_kerja, which the repository read itself answers with a silently empty page
+// (isu #12 fase 6) rather than an error.
+func (c *ProductUseCase) KartuStok(ctx context.Context, request *model.ListKartuStokRequest) ([]model.KartuStokResponse, *model.PageMetadata, error) {
+	request.Normalize()
+
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, nil, err
+	}
+
+	if _, err := c.ProductRepository.FindByID(ctx, c.DB, request.IDProduct); err != nil {
+		return nil, nil, notFoundOnNoRows(err, "product not found")
+	}
+
+	if _, err := c.RuangRepository.FindByID(ctx, c.DB, request.IDRuang); err != nil {
+		return nil, nil, notFoundOnNoRows(err, "ruang not found")
+	}
+
+	list, total, err := c.KartuStokRepository.Riwayat(
+		ctx, c.DB, request.IDProduct, request.IDRuang, request.Dari, request.Sampai,
+		request.AktifIDUnitKerja, request.Size, request.Offset(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return converter.RiwayatKartuStokToResponses(list), pageMetadata(&request.PageRequest, total), nil
+}
+
+// StokMinimum lists active products whose current stock has reached or fallen below
+// their own stok_minimum — isu #22 fase 2, the natural pair to RiwayatBeli: that
+// answers who to buy from and at what price, this answers what needs buying at all.
+//
+// Two queries regardless of how many products land on the page: StokMinimum for the
+// page itself, and SaldoPerRuangBatch for every flagged product's per-room breakdown
+// in one shot — the same anti-N+1 shape POS already established for a page of
+// products wanting a per-row balance.
+func (c *ProductUseCase) StokMinimum(ctx context.Context, request *model.ListStokMinimumRequest) ([]model.StokMinimumResponse, *model.PageMetadata, error) {
+	request.Normalize()
+
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, nil, err
+	}
+
+	var idRuang *int64
+	if request.IDRuang > 0 {
+		idRuang = &request.IDRuang
+	}
+
+	list, total, err := c.KartuStokRepository.StokMinimum(
+		ctx, c.DB, idRuang, request.AktifIDUnitKerja, request.Size, request.Offset(),
+	)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	paging := pageMetadata(&request.PageRequest, total)
+
+	if len(list) == 0 {
+		return converter.StokMinimumToResponses(list, nil), paging, nil
+	}
+
+	productIDs := make([]int64, len(list))
+	for i := range list {
+		productIDs[i] = list[i].IDProduct
+	}
+
+	perRuang, err := c.KartuStokRepository.SaldoPerRuangBatch(ctx, c.DB, productIDs, idRuang, request.AktifIDUnitKerja)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return converter.StokMinimumToResponses(list, perRuang), paging, nil
+}
+
 func (c *ProductUseCase) Search(ctx context.Context, request *model.ListProductRequest) ([]model.ProductResponse, *model.PageMetadata, error) {
 	request.Normalize()
 

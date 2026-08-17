@@ -612,6 +612,66 @@ func (r *PenjualanRepository) FindPiutangPelanggan(ctx context.Context, db DBTX,
 	return list, total, nil
 }
 
+// LabaKotor sums gross margin — total minus total_hpp — over POSTED notas, grouped
+// by the calendar month of p.tanggal — isu #22 fase 3.
+//
+// This is the one report in that issue reading a document table rather than
+// kartu_stok, and that is deliberate rather than an inconsistency: total_hpp is
+// already a snapshot copied from kartu_stok's own RETURNING at Posting and frozen
+// there (PenjualanUseCase.Posting), so re-deriving it from kartu_stok here would pay
+// for a second, more expensive query to land on the same number this one already has
+// cheaply.
+//
+// BATAL notas are excluded by the same status filter every other read in this module
+// uses; retur_penjualan does not exist yet, so nothing here reduces a month's margin
+// for a sale that later came back — the day that module ships, its credit belongs in
+// this SUM alongside total_hpp.
+//
+// aktifIDUnitKerja scopes by the room a nota was posted from — isu #12 fase 6 applied
+// to this new read, following every other list in this issue: nil is unrestricted,
+// otherwise a EXISTS against ruang keeps a nota outside the caller's active unit from
+// ever reaching the SUM.
+func (r *PenjualanRepository) LabaKotor(
+	ctx context.Context, db DBTX, dari, sampai *string, aktifIDUnitKerja *int64,
+) ([]entity.LabaKotorBaris, error) {
+	const query = `
+		SELECT to_char(date_trunc('month', p.tanggal), 'YYYY-MM'),
+			SUM(p.total)::TEXT, SUM(p.total_hpp)::TEXT, SUM(p.total - p.total_hpp)::TEXT
+		FROM penjualan p
+		WHERE p.status = 'POSTED'
+		  AND ($1::DATE IS NULL OR p.tanggal >= $1::DATE)
+		  AND ($2::DATE IS NULL OR p.tanggal < ($2::DATE + INTERVAL '1 day'))
+		  AND ($3::BIGINT IS NULL OR EXISTS (
+			SELECT 1 FROM ruang r WHERE r.id = p.id_ruang AND r.id_unit_kerja = $3
+		  ))
+		GROUP BY date_trunc('month', p.tanggal)
+		ORDER BY date_trunc('month', p.tanggal)`
+
+	rows, err := db.QueryContext(ctx, query, dari, sampai, aktifIDUnitKerja)
+	if err != nil {
+		return nil, fmt.Errorf("select laba kotor: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.LabaKotorBaris, 0, 12)
+
+	for rows.Next() {
+		var baris entity.LabaKotorBaris
+
+		if err := rows.Scan(&baris.Bulan, &baris.TotalPenjualan, &baris.TotalHPP, &baris.LabaKotor); err != nil {
+			return nil, fmt.Errorf("scan laba kotor: %w", err)
+		}
+
+		list = append(list, baris)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate laba kotor: %w", err)
+	}
+
+	return list, nil
+}
+
 // penjualanFields lists the scan targets in the order of penjualanColumns, once, so
 // the two read paths cannot drift apart from each other or from the constant.
 func penjualanFields(penjualan *entity.Penjualan) []any {

@@ -213,6 +213,7 @@ tags:
   - name: penerimaan-pembayaran
   - name: stok-opname
   - name: product
+  - name: laporan
   - name: periode
   - name: docs
   - name: unit-kerja
@@ -1150,6 +1151,129 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /api/v1/product/{id}/kartu-stok:
+    get:
+      tags: [product]
+      summary: Riwayat pergerakan produk ini di satu ruang
+      operationId: listKartuStokProduct
+      description: >
+        Isu #22 fase 1 — bacaan yang bukan modul: tidak ada tabel baru, tidak ada
+        migrasi, satu query di `KartuStokRepository` yang sudah memiliki
+        `kartu_stok`. Ini yang menjawab "kenapa saldonya jadi segini", yang
+        `GET /product/{id}/stok` tidak bisa: yang itu hanya menunjukkan ekor rantai,
+        ini menunjukkan seluruh rantainya.
+
+
+        `id_ruang` **wajib**, berbeda dari `GET /product/{id}/stok` — rantai saldo
+        dipartisi per `(id_barang, id_ruang)`, dan "riwayat" yang mencampur beberapa
+        ruang akan menampilkan saldo berjalan yang tidak pernah benar-benar ada di
+        satu rak mana pun. Ruang yang tidak dikenal menjawab **404**.
+
+
+        Diurutkan **naik** menurut `id`, bukan tanggal dan bukan turun seperti
+        daftar lain di API ini — rantai saldo dibangun berurutan menurut `id` oleh
+        trigger, dan pembalikan tanggalnya `time.Now()` sehingga urutan tanggal bisa
+        berbeda dari urutan sungguhan rantainya. Sebuah buku besar dibaca dari atas
+        ke bawah.
+
+
+        `ref_table` + `ref_id_transaksi` diterjemahkan jadi `nomor_dokumen` lewat
+        `CASE` di query yang sama — tidak ada N+1 per baris untuk mencari tahu
+        dokumen mana yang menghasilkannya.
+
+
+        `id_kartu_stok_asal` terisi menandai baris pembalik (hasil pembatalan
+        dokumen sumbernya) — klien membedakannya dari pergerakan biasa lewat kolom
+        ini, tanpa menebak dari `jenis_transaksi` yang dipakai bersama antara
+        posting dan pembaliknya.
+
+
+        Isu #12 fase 6: ruang di luar unit_kerja aktif sesi pemanggil menjawab
+        **halaman kosong**, bukan 404 — ini daftar, dan ruangnya sendiri sudah
+        dijawab 404 lewat pemeriksaan "apakah ruang ini ada sama sekali" yang
+        terpisah.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: id_ruang
+          in: query
+          required: true
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: dari
+          in: query
+          description: Tanggal awal (inklusif), `tanggal_transaksi`.
+          schema: { type: string, format: date, example: "2026-08-01" }
+        - name: sampai
+          in: query
+          description: Tanggal akhir (inklusif), `tanggal_transaksi`.
+          schema: { type: string, format: date, example: "2026-08-31" }
+      responses:
+        "200":
+          description: Riwayat pergerakan, urut id naik
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/KartuStok" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/stok-minimum:
+    get:
+      tags: [product]
+      summary: Produk yang stoknya di titik atau di bawah stok_minimum
+      operationId: listStokMinimumProduct
+      description: >
+        Isu #22 fase 2 — pasangan alami `GET /product/{id}/riwayat-beli`: yang itu
+        menjawab beli ke siapa dan berapa harganya, ini menjawab apa yang harus
+        dibeli sama sekali. Berdua menggantikan purchase order yang sengaja tidak
+        ada di sistem ini.
+
+
+        `stok_minimum = 0` **tidak pernah muncul** — nol adalah nilai default
+        kolom itu, artinya "belum diatur", bukan "boleh habis".
+
+
+        Ambangnya `total_stok <= stok_minimum`, bukan `<`: menyentuh titik pesan
+        ulang **adalah** saatnya memesan.
+
+
+        `total_stok` adalah jumlah seluruh ruang dalam `unit_kerja` aktif sesi
+        pemanggil (isu #12 fase 6), dengan rincian per ruang di `per_ruang`.
+        `id_ruang` mempersempit perbandingan ke satu ruang saja — berguna untuk
+        gudang yang sengaja dikosongkan karena stoknya sudah dipindah ke toko, yang
+        kalau dibandingkan terhadap total perusahaan akan menyembunyikan toko yang
+        benar-benar habis.
+
+
+        Hanya produk `is_aktif`. Diurutkan dari yang paling parah — selisih
+        terhadap `stok_minimum`, bukan abjad — karena ini daftar kerja, pola yang
+        sama dengan `GET /supplier/{id}/utang`.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: id_ruang
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Halaman hasil, terparah dulu
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/StokMinimum" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
   /api/v1/pos/product:
     get:
       tags: [product]
@@ -1248,6 +1372,128 @@ paths:
                   paging: { $ref: "#/components/schemas/PageMetadata" }
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/laporan/nilai-persediaan:
+    get:
+      tags: [laporan]
+      summary: Nilai persediaan saat ini, per ruang
+      operationId: listLaporanNilaiPersediaan
+      description: >
+        Isu #22 fase 3 — bacaan yang bukan modul, tanpa tabel dan tanpa angka
+        tersimpan sendiri. Jumlah `nilai_akhir` dari baris terakhir setiap pasangan
+        `(barang, ruang)`, direkap per ruang. `GET /product/{id}/stok` sudah
+        membaca bentuk yang sama untuk satu produk; ini rekap lintas ruang dan
+        lintas produk di atasnya.
+
+
+        `ruang.is_aktif` **tidak pernah** jadi saringan di sini — ruang yang sudah
+        dipensiunkan sambil masih memegang barang tetap memegang nilainya, dan
+        laporan yang menyembunyikannya akan berbohong tentang neraca.
+      parameters:
+        - name: id_ruang
+          in: query
+          description: Persempit ke satu ruang.
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Nilai persediaan per ruang
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/NilaiPersediaan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /api/v1/laporan/laba-kotor:
+    get:
+      tags: [laporan]
+      summary: Laba kotor per bulan
+      operationId: listLaporanLabaKotor
+      description: >
+        Isu #22 fase 3. `SUM(total) - SUM(total_hpp)` atas nota `penjualan`
+        **POSTED**, dikelompokkan per bulan `tanggal`.
+
+
+        Satu-satunya laporan di isu ini yang membaca dokumen, bukan `kartu_stok`
+        — dan itu benar, bukan pengecualian: `total_hpp` sudah disalin dari
+        `RETURNING kartu_stok` saat posting dan dibekukan di sana, jadi membacanya
+        ulang dari `kartu_stok` hanya akan membayar query yang lebih mahal untuk
+        angka yang sama.
+
+
+        Nota `BATAL` dikeluarkan. `retur_penjualan` belum ada, jadi belum ada yang
+        mengurangi laba kotor untuk penjualan yang akhirnya dikembalikan — begitu
+        modul itu ada, kreditnya masuk ke `SUM` ini di samping `total_hpp`.
+      parameters:
+        - name: dari
+          in: query
+          description: Tanggal awal (inklusif), `tanggal` nota. Kosong berarti sejak awal.
+          schema: { type: string, format: date, example: "2026-08-01" }
+        - name: sampai
+          in: query
+          description: Tanggal akhir (inklusif), `tanggal` nota. Kosong berarti sampai sekarang.
+          schema: { type: string, format: date, example: "2026-08-31" }
+      responses:
+        "200":
+          description: Laba kotor per bulan, urut kronologis
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/LabaKotor" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /api/v1/laporan/pergerakan:
+    get:
+      tags: [laporan]
+      summary: Rekap pergerakan stok per periode
+      operationId: listLaporanPergerakan
+      description: >
+        Isu #22 fase 3. Jumlah `stok_masuk` dan `stok_keluar` per
+        `(barang, ruang, jenis_transaksi)` dalam rentang tanggal — yang menjawab
+        "barang ini keluar ke mana saja bulan lalu", dan yang membuat penyusutan
+        hasil `stok_opname` terlihat sebagai angka bulanan, bukan per dokumen.
+
+
+        Rentangnya menyaring `kartu_stok.tanggal_transaksi`, **bukan** status atau
+        tanggal dokumen — inilah yang membuat jebakan yang disebut namanya di
+        CLAUDE.md terlihat, bukan tersembunyi: dokumen yang diposting di satu
+        periode lalu dibatalkan di periode berikutnya menghasilkan baris pembalik
+        bertanggal `time.Now()` (isu #6), sehingga baris itu muncul di rentang yang
+        meliputi hari pembatalan, bukan hari dokumennya diposting.
+      parameters:
+        - name: dari
+          in: query
+          description: Tanggal awal (inklusif), `tanggal_transaksi`. Kosong berarti sejak awal.
+          schema: { type: string, format: date, example: "2026-08-01" }
+        - name: sampai
+          in: query
+          description: Tanggal akhir (inklusif), `tanggal_transaksi`. Kosong berarti sampai sekarang.
+          schema: { type: string, format: date, example: "2026-08-31" }
+        - name: id_ruang
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: id_product
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Rekap pergerakan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Pergerakan" }
+        "400": { $ref: "#/components/responses/ValidationError" }
 
   /api/v1/pembelian:
     get:
@@ -7612,6 +7858,103 @@ components:
           description: >
             Kapan pergerakan itu dicatat. Berbeda dari `tanggal_transaksi` setiap kali
             dokumennya diketik terlambat, yang merupakan kasus biasa.
+
+    KartuStok:
+      type: object
+      description: >
+        Satu baris riwayat pergerakan satu produk di satu ruang — isu #22 fase 1.
+        Setiap kuantitas sudah dalam satuan dasar; `qty_input`/`nama_satuan_input`
+        hanya jejak apa yang diketik operator.
+      properties:
+        id: { type: integer, format: int64 }
+        tanggal_transaksi: { type: string, format: date-time }
+        jenis_transaksi: { type: string, example: PEMBELIAN }
+        stok_awal: { type: integer, format: int64 }
+        stok_masuk: { type: integer, format: int64 }
+        stok_keluar: { type: integer, format: int64 }
+        stok_akhir: { type: integer, format: int64 }
+        qty_input: { type: string, nullable: true, description: "Nol untuk baris pembalik." }
+        nama_satuan_input: { type: string, nullable: true }
+        harga_pokok_satuan: { type: string }
+        nilai_masuk: { type: string }
+        nilai_keluar: { type: string }
+        nilai_akhir: { type: string }
+        ref_table: { type: string, example: pembelian }
+        ref_id_transaksi: { type: integer, format: int64 }
+        nomor_dokumen:
+          type: string
+          nullable: true
+          description: >
+            `ref_table` + `ref_id_transaksi` diterjemahkan jadi nomor dokumen yang
+            dibaca manusia.
+        id_kartu_stok_asal:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            Terisi hanya pada baris pembalik — menunjuk baris asal yang dibalikkannya.
+            Ini cara membedakan pembalik dari pergerakan biasa, tanpa menebak dari
+            `jenis_transaksi`.
+        keterangan: { type: string, nullable: true }
+
+    StokMinimum:
+      type: object
+      description: >
+        Satu produk aktif yang stoknya sudah di titik atau di bawah
+        `stok_minimum`-nya sendiri — isu #22 fase 2.
+      properties:
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        stok_minimum: { type: integer, format: int64 }
+        total_stok:
+          type: integer
+          format: int64
+          description: Jumlah seluruh ruang dalam cakupan (unit aktif, atau satu ruang bila dipersempit).
+        selisih:
+          type: integer
+          format: int64
+          description: "`stok_minimum - total_stok`, selalu >= 0 di sini — dasar urutan daftar."
+        per_ruang:
+          type: array
+          description: Rincian per ruang di balik `total_stok`.
+          items: { $ref: "#/components/schemas/StokRuang" }
+
+    NilaiPersediaan:
+      type: object
+      description: Nilai persediaan satu ruang saat ini — isu #22 fase 3.
+      properties:
+        id_ruang: { type: integer, format: int64 }
+        nama_ruang: { type: string }
+        total_nilai:
+          type: string
+          description: >
+            Jumlah `nilai_akhir` baris terakhir setiap `(barang, ruang)` di ruang
+            ini. Ruang yang dipensiunkan tetap muncul bila masih memegang nilai.
+
+    LabaKotor:
+      type: object
+      description: Laba kotor satu bulan kalender — isu #22 fase 3.
+      properties:
+        bulan: { type: string, example: "2026-08" }
+        total_penjualan: { type: string, description: "SUM(total) nota POSTED." }
+        total_hpp: { type: string, description: "SUM(total_hpp) nota POSTED." }
+        laba_kotor: { type: string, description: "total_penjualan - total_hpp." }
+
+    Pergerakan:
+      type: object
+      description: >
+        Rekap satu kelompok `(barang, ruang, jenis_transaksi)` dalam rentang tanggal
+        — isu #22 fase 3.
+      properties:
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        id_ruang: { type: integer, format: int64 }
+        nama_ruang: { type: string }
+        jenis_transaksi: { type: string, example: PEMBELIAN }
+        total_masuk: { type: integer, format: int64 }
+        total_keluar: { type: integer, format: int64 }
 
     PembayaranUtang:
       type: object
