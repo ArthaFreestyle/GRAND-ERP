@@ -4,70 +4,74 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Master data is implemented, and **`pembelian` is the first transaction document** — the first thing that writes `kartu_stok`. Copy an existing slice when adding a module — don't invent a new shape.
+Master data is done; **`pembelian` was the first transaction document** and the first writer of `kartu_stok`. **Copy an existing slice when adding a module — don't invent a new shape.**
 
-- Implemented: **`satuan`**, **`ekspedisi`**, **`supplier`**, **`pelanggan`**, **`role`**, **`user`** (create / get / list / patch), **`unit_kerja`** (create / get / list / patch), **`ruang`** (create / get / list, no patch — now requires an active `id_unit_kerja`), **`periode`** (list / get / tutup / buka), **`product`** with `product_satuan` + `product_harga_jual`, **`pembelian`** with `pembelian_detail`, `kartu_stok` posting, and `document_counter`, **`penerimaan_susulan`** with `penerimaan_susulan_detail`, **`retur_pembelian`** with `retur_pembelian_detail`, **`pembayaran_utang`** with `pembayaran_utang_alokasi`, **`mutasi`** with `mutasi_detail`, **`pemakaian`** with `pemakaian_detail`, **`penjualan`** with `penjualan_detail`, **`stok_opname`** with `stok_opname_detail` and the cross-module room freeze, **`dokumen`** (file attachments, and the only module holding a store that is not the database), and four queries that are not modules — **`riwayat_beli`**, **`utang_supplier`**, **`stok_per_ruang`**, and **`piutang_pelanggan`**
-- **`unit_kerja` (isu #12) has all five load-bearing phases plus the optional read-scoping piece of phase 6** — the master table, `ruang.id_unit_kerja`, `user_role.id_unit_kerja` (grants scoped to a unit), active session context (`POST /api/v1/auth/switch-context`), `id_ruang` validated against the active unit on `pembelian`/`mutasi` writes, and reads on `ruang`, `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `mutasi`, and `product/{id}/stok` scoped to the same active unit. See "Unit kerja and location-bound authority", "Wewenang bertempat", "Konteks aktif per sesi", "`id_ruang` validated against the active unit", and "Read-path scoping" below before touching any of it. `users.id_ruang_default` and a role-as-snapshot column remain deferred
-- Use **`supplier`** as the template for a plain master slice: it is the one with every ordinary concern at once — nullable unique `kode`, PATCH presence semantics, and a `LEFT JOIN` in the list query
-- Use **`user`** as the template when a slice writes two tables: a user and its `user_role` grants in one transaction, and it is where `Optional[[]model.GrantRequest]`, bcrypt hashing, and the `Touch` pattern live. See "Users and roles" below
-- Use **`pembelian`** as the template for a **transaction document** — a state machine, a generated number, exact decimal arithmetic, and stock movements, all in one transaction. See "Pembelian and the posting engine" below. Do not model a transaction document on a master slice; the concerns barely overlap
-- Use **`riwayat_beli`** as the template for a **read that is not a module** — no table, no migration, one query in another module's repository, borrowed by the usecase that owns the resource. See "Riwayat harga beli" below
-- Use **`penerimaan_susulan`** as the template for a **document that derives from another** — one that points at a parent's detail rows, draws down a quota held there, copies a cost snapshot from it, and rewrites a cache on it. See "Penerimaan susulan" below
-- **`retur_pembelian` is that same template with the goods moving the other way**, and the two are worth reading side by side: what differs between them is only the direction, and every consequence of that difference is called out in "Retur pembelian" below. It is also the only module so far whose posting takes stock *out*
-- Use **`mutasi`** as the template for a document that moves stock **in two directions at once**, and as the only stock-writing module with **no approval stage**. It is also where balance reads and canonical lock ordering live. See "Mutasi antar ruang" below
-- Use **`pemakaian`** as the template for a document that takes stock out with **no counterparty at all** — no supplier, no customer, no destination room — and for one with **two approval-adjacent stages** (`DIAJUKAN` then `DISETUJUI`) before posting, where the second stage decides a *quantity*, not just a yes/no. It borrows `mutasi`'s balance-locking discipline even though every line shares one room. See "Pemakaian internal" below
-- Use **`penjualan`** as the template for a document that takes stock out **to an outside party with money on the other side of it**, and for one that drops the approval stage for a practical reason rather than a small stake — a cashier cannot make a customer wait at the counter. It is the first module to form a receivable (`KREDIT` only), the first to enforce a credit limit at posting, and the first whose `status_pembayaran` cache has to answer for a document type (`TUNAI`) that structurally has no allocation to sum. See "Penjualan and the receivable side" below
-- Use **`stok_opname`** as the template for a document that moves goods to or from **nowhere at all** — a physical count reconciling the ledger against the shelf — and for the only module that, while open, changes what every OTHER module writing `kartu_stok` may do: a `ruang` it is counting refuses every posting from any module, enforced by the trigger itself rather than a call any of those five other modules make. See "Stok opname dan pembekuan ruang" below
-- Use **`dokumen`** as the template for a slice holding a **store that is not PostgreSQL** — the storage interface, the ordering between a file and its row, and the worker job that reconciles them. It is also the only module with a polymorphic reference, and one of only two `DELETE` endpoints in the whole API — see "Dokumen and file attachments" below, and "Harga jual siap pakai" for the other, `product_harga_jual`'s hard delete. (`user_role` is a third table that gets deleted from, but through `ReplaceRoles` rather than a route of its own)
-- Use **`pembayaran_utang`** as the template for a **transaction document that touches no stock**. It is the only one, and the absence is what shapes it: no approval state, no `kartu_stok`, and caches that can be recomputed exactly rather than reversed. See "Pembayaran utang and the payable side" below
-- Use **`periode`** as the template for a slice keyed on something other than an `id`, and as the one place a **cross-cutting refusal** lives. It is master-data shaped — no number, no lines, no posting — but what it writes changes what every other module may do, and the enforcement is a trigger rather than a call. See "Periode and book closing" below
-- Module path: `Arthafreestyle/ERP` (no domain prefix); internal imports are `Arthafreestyle/ERP/internal/...`
+Implemented: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `role`, `user`, `unit_kerja`, `ruang` (create/get/list, no patch), `periode` (list/get/tutup/buka), `product` (+ `product_satuan`, `product_harga_jual`), `dokumen`, and the transaction documents `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `pembayaran_utang`, `mutasi`, `pemakaian`, `penjualan`, `penerimaan_pembayaran`, `stok_opname`. Four reads that are **not** modules: `riwayat_beli`, `utang_supplier`, `stok_per_ruang`, `piutang_pelanggan`.
+
+**Only `retur_penjualan` still has no Go layer** (its tables exist in migrations `000002`–`000008`). The posting engine itself is finished — every remaining shape has a template.
+
+### Pick a template by shape, not by domain
+
+| Shape | Template | What it adds |
+| --- | --- | --- |
+| plain master slice | `supplier` | nullable unique `kode`, PATCH presence, `LEFT JOIN` in list |
+| slice writing two tables | `user` | two repos, one tx; `Optional[[]GrantRequest]`, bcrypt, `Touch` |
+| transaction document | `pembelian` | state machine, generated number, `big.Rat`, `kartu_stok` |
+| derives from a POSTED document | `penerimaan_susulan` / `retur_pembelian` | parent row lock, copied cost snapshot, quota re-checked at posting, per-document unique index on the source line. Mirror pair — read side by side; only direction differs |
+| money, no stock | `pembayaran_utang` / `penerimaan_pembayaran` | no approval state, caches recomputed not reversed. Mirror pair |
+| stock in two directions | `mutasi` | incoming valued from outgoing `RETURNING`; canonical lock ordering; no approval stage |
+| stock out, no counterparty | `pemakaian` | extra `DISETUJUI` stage deciding a *quantity*; terminal rejection |
+| stock out to an outsider, money owed | `penjualan` | first receivable, credit limit at posting, `status_pembayaran` for a type with no allocation |
+| stock to/from nowhere | `stok_opname` | selisih vs a frozen snapshot; freezes its `ruang` against every other module |
+| read that is not a module | `riwayat_beli` | no table, no migration, query in the owning repository |
+| keyed on a natural key | `periode` | routes on the key, synthetic answer for a keyless row, cross-cutting refusal via trigger |
+| store outside PostgreSQL | `dokumen` | storage interface, file/row ordering, worker reconciliation |
+
+Do **not** model a transaction document on a master slice; the concerns barely overlap.
+
+### Facts
+
+- Module path `Arthafreestyle/ERP` (no domain prefix); internal imports `Arthafreestyle/ERP/internal/...`
 - Go 1.25.0 — required by Fiber v3.4.0, which refuses to build on 1.24
-- The rest of the inventory/sales schema exists as migrations `000002`–`000008` and still has **no Go layers** — sales returns and receiving payments against a receivable (`penerimaan_pembayaran`). See "Inventory data model" below. The posting engine itself is finished: `mutasi` and `pemakaian` were the last shapes it was missing; `penjualan` was the last document type; `stok_opname` was the last cross-module refusal, not a new shape
-- Auth is implemented: bearer JWT login, role guards per route, active session context (isu #12 fase 4) — see "Authentication and authorization" below. `pembelian` and `mutasi` also validate a write's `id_ruang` against that active context (fase 5), and `ruang`/`pembelian`/`penerimaan_susulan`/`retur_pembelian`/`mutasi`/`product` scope their reads by it too (fase 6). `pemakaian` and `penjualan` deliberately opt out of both — neither issue asked for the scope
-- **`cmd/worker` now has one job**, the orphan-attachment sweep. The scheduler is a `time.Ticker` per job in `internal/config/worker.go`, wired by `BootstrapWorker` — the counterpart of `Bootstrap`, so the "wiring happens only in `internal/config`" rule still holds
-- Not built yet: captcha (Redis is wired but unused), logout/refresh, session revocation (stateless tokens cannot be revoked)
-- `product` and `pembelian` are the only modules that fill `created_by`/`updated_by`, taken from the token via `middleware.SessionFrom`. Every other slice still writes `NULL` — the plumbing exists, they just don't use it yet
+- Auth: bearer JWT, role guards per route, active session context. See "Authentication and authorization" and "Unit kerja (isu #12)"
+- `cmd/worker` has one job, the orphan-attachment sweep. Scheduler is a `time.Ticker` per job in `internal/config/worker.go`, wired by `BootstrapWorker` — the counterpart of `Bootstrap`, so "wiring happens only in `internal/config`" still holds
+- Not built: captcha (Redis wired but unused), logout/refresh, session revocation (stateless tokens cannot be revoked), the daily reconciliation job over the balance chain
+- `product` and `pembelian` are the only modules that fill `created_by`/`updated_by` from `middleware.SessionFrom`. Every other slice writes `NULL` — the plumbing exists, they just don't use it
 
 ## Stack
 
 - Go + [Fiber v3](https://github.com/gofiber/fiber)
-- PostgreSQL via `database/sql` + `jackc/pgx/v5` (registered through `pgx/v5/stdlib`) — **no ORM**; write SQL by hand
+- PostgreSQL via `database/sql` + `jackc/pgx/v5` (through `pgx/v5/stdlib`) — **no ORM**; write SQL by hand
 - Redis — captcha sessions with TTL
-- Config/logging: viper + logrus
-- Migrations: [golang-migrate](https://github.com/golang-migrate/migrate)
+- viper + logrus; migrations by [golang-migrate](https://github.com/golang-migrate/migrate)
 
 ## Commands
 
 ```bash
-go run ./cmd/web                 # run the HTTP server
-go run ./cmd/worker              # run the background worker
-go build ./...                   # build everything
-go vet ./...                     # vet
-gofmt -l .                       # list unformatted files — see the CRLF caveat below
-
-go test ./...                                        # all tests
-go test ./internal/usecase/...                       # one package
-go test ./internal/usecase -run TestSatuanCreate     # one test (regex match)
-go test -v -race ./...                               # verbose + race detector
+go run ./cmd/web                 # HTTP server
+go run ./cmd/worker              # background worker
+go build ./... && go vet ./...
+go test ./...                                        # all
+go test ./internal/usecase -run TestSatuanCreate     # one test (regex)
+go test -v -race ./...
 ```
 
-**`gofmt -l .` is not a usable signal on a Windows checkout.** Git's `core.autocrlf=true` writes CRLF into the working tree while the index holds LF, and gofmt wants LF — so it currently lists ~74 of ~90 files. Nothing is actually misformatted; `git ls-files --eol` shows `i/lf` for all of them, and `gofmt -d` on one shows every line replaced by itself. Do not "fix" this with `gofmt -w .`. To get a real answer, check the files you touched individually, or add a `.gitattributes` with `*.go text eol=lf` and re-checkout.
+**`gofmt -l .` is not a usable signal on a Windows checkout.** `core.autocrlf=true` writes CRLF into the working tree while the index holds LF; gofmt wants LF, so it lists ~74 of ~90 files. Nothing is misformatted (`git ls-files --eol` shows `i/lf`). **Do not `gofmt -w .`** — check individual files you touched, or add `.gitattributes` with `*.go text eol=lf` and re-checkout.
 
-Docker is the shortest path to a working stack — it brings up PostgreSQL, Redis, migrations, seeders, the server, and the worker, in that enforced order:
+### Docker
 
 ```bash
-docker compose up -d --build     # whole stack
+docker compose up -d --build     # postgres, redis, migrations, seeders, web, worker — in that enforced order
 docker compose up -d --build web # rebuild after a Go change
-docker compose down -v           # stop and discard data (also re-triggers docker/initdb/)
+docker compose down -v           # stop and discard data (re-triggers docker/initdb/)
 ```
 
-Two things about the Docker setup that will bite otherwise:
+- **PostgreSQL is published on host port `5433`**, not 5432 (a local install usually owns 5432). Inside the compose network it is still `postgres:5432`.
+- **The `seed` service lists each seeder file by name** rather than globbing. A new seeder not added to that list never runs under Docker.
 
-- **PostgreSQL is published on host port `5433`**, not 5432, because a locally installed PostgreSQL usually already owns 5432. Inside the compose network it is still `postgres:5432`. So `TEST_DATABASE_URL` against the container uses `127.0.0.1:5433`.
-- **The `seed` service lists each seeder file by name** rather than globbing the directory. A new seeder that is not added to that list never runs under Docker.
+### Tests
 
-Compose also creates and migrates `grand_erp_test`, so the database-backed tests need no manual setup:
+Compose also creates and migrates `grand_erp_test`:
 
 ```bash
 docker compose up -d
@@ -75,57 +79,43 @@ export TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5433/grand_erp_
 go test ./...
 ```
 
-Tests in `internal/usecase` run against a **real PostgreSQL** and skip themselves unless `TEST_DATABASE_URL` points at a scratch database — most of what they assert (pagination stability under duplicate names, `ILIKE` wildcard escaping, many rows sharing `kode = NULL`, `NUMERIC` round-tripping, several users holding the same role) lives in the database, where a mock would just agree with a wrong query. Migrate the scratch database first; the tests clear the master tables themselves but do not create the schema.
+- Tests in `internal/usecase` run against a **real PostgreSQL** and skip themselves without `TEST_DATABASE_URL`. **A green `go test ./...` without it means skipped, not passed** — run `-v` when you need to know. Migrate the scratch DB first; the tests clear tables but do not create the schema. Everything outside `internal/usecase` is a pure unit test.
+- What they assert lives in the database (pagination stability under duplicate names, `ILIKE` escaping, many rows sharing `kode = NULL`, `NUMERIC` round-tripping), where a mock would just agree with a wrong query.
+- Every test starts with `newApp(t)` (= `requireDB` + `truncateMaster` + the same graph `config.Bootstrap` wires, minus Fiber). **A new usecase needs a field on that `app` struct** or its tests have nothing to call.
+- `truncateMaster` (`internal/usecase/main_test.go`) deletes in dependency order: `stok_opname*` **first of all** — they point AT `kartu_stok`, the reverse of every other table — then `kartu_stok`, then documents pointing at `pembelian_detail` (`penerimaan_susulan*`, `retur_pembelian*`) and at `pembelian` (`pembayaran_utang*`), then `mutasi*`, the purchase tables, `dokumen`, master tables, `user_role`, `users`, `role`. Add new tables on the correct side — `users` comes after anything whose `created_by` references it, and `periode` before `users`.
+- It uses `DELETE`, not `TRUNCATE` (which would cascade into `kartu_stok`, whose guard trigger raises). `kartu_stok` refuses `DELETE` too, so `truncateMaster` disables `kartu_stok_append_only` for the wipe and re-enables it in a `defer`. **That licence is the scratch database's alone** — reaching for it elsewhere defeats the guarantee the whole valuation rests on.
 
-`truncateMaster` in `internal/usecase/main_test.go` deletes in dependency order: `stok_opname_detail`/`stok_opname` first of all — they point AT `kartu_stok` (`id_kartu_stok_cutoff`/`id_kartu_stok_penyesuaian`), the reverse of every other table in the list, so they have to clear before `kartu_stok` does or its `DELETE` fails on the foreign key — then `kartu_stok` itself, then the documents that point at `pembelian_detail` (`penerimaan_susulan*`, `retur_pembelian*`) and the ones that point at `pembelian` (`pembayaran_utang*`), then `mutasi*` (which points at no document, only at `product`, `ruang`, `satuan`, and `users`), then the purchase tables, then `dokumen`, then master tables, then `user_role`, then `users`, then `role`. It uses `DELETE`, not `TRUNCATE` — `TRUNCATE` would cascade into `kartu_stok`, whose guard trigger raises on it. Add new tables to that list, on the correct side — `users` has to come after anything whose `created_by` references it.
+**Which file a test goes in follows the shape of what it pins, not the module it calls.** A module's own behaviour → `<module>_usecase_test.go`. A read that is not a module → a file named after the read (`riwayat_beli_test.go`). **One behaviour repeated across several modules → a single file spanning them** (`fase6_read_scope_test.go`, `ruang_unit_scope_test.go`, `master_data_test.go`) — reading the repetitions together is what makes a deliberate exception legible as a decision rather than an omission. Anything needing an **unexported** symbol → `package usecase` (`pembelian_alokasi_test.go`, `harga_jual_test.go`, `auth_token_test.go`); everything else is `package usecase_test`.
 
-`kartu_stok` refuses `DELETE` too, by the same append-only trigger, so `truncateMaster` disables `kartu_stok_append_only` for the length of the wipe and re-enables it in a `defer`. That is a licence the scratch database gets and nothing else does — if you find yourself reaching for it outside `truncateMaster`, you are about to defeat the guarantee the whole valuation rests on.
+### Config
 
-The tests live in package `usecase_test` (external), and every one of them starts with `newApp(t)`, which calls `requireDB` + `truncateMaster` and then wires the same graph `config.Bootstrap` does, minus Fiber. A new usecase needs a field on that `app` struct, or its tests have nothing to call.
+Comes from `config.json` in the working directory; **any key is overridable by an env var** with `.` → `_` (`DATABASE_HOST`, `WEB_PORT`). `config.json` is gitignored; the tracked file is `config.example.json`.
 
-**Which file a test goes in follows the shape of what it pins, not the module it happens to call.** Four cases, all already present: a module's own behaviour goes in `<module>_usecase_test.go`; a **read that is not a module** gets a file named after the read (`riwayat_beli_test.go`, `daftar_harga_jual_test.go`), matching the rule that it gets no slice either; **one behaviour repeated identically across several modules** gets a single file spanning them (`fase6_read_scope_test.go`, `ruang_unit_scope_test.go`, `master_data_test.go`) — reading the repetitions together is what makes a deliberate exception, like `mutasi`'s source-only scoping, legible as a decision rather than an omission; and anything needing an **unexported** symbol goes in `package usecase` (the three internal files above). Splitting a cross-cutting behaviour per module, or bolting a projection's tests onto whichever usecase borrows it, both lose exactly the comparison that makes the file worth reading.
+`NewViper` **panics** when `config.json` is missing — env vars alone cannot boot. The Dockerfile copies `config.example.json` to `config.json` in the image; compose overrides the environment-dependent keys. `.dockerignore` excludes the real `config.json`.
 
-**A green `go test ./...` without `TEST_DATABASE_URL` means skipped, not passed.** The whole package skips itself. Run with `-v` when you need to know which.
+**A new config key has up to four homes:** `config.example.json` (always), the `web`/`worker` `environment:` blocks in `docker-compose.yml` (if a container needs a non-default), and `.env.example` — the only list of what a deployer may set, since every compose entry is `${VAR:-default}`. Keep `.env.example`'s two groups apart: `POSTGRES_*` configures the PostgreSQL image, `DATABASE_*`/`REDIS_*` are read by the app containers (viper maps `database.host` → `DATABASE_HOST`); compose derives the second from the first.
 
-```bash
-export TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/grand_erp_test?sslmode=disable'
-migrate -path db/migrations_postgres -database "$TEST_DATABASE_URL" up
-go test ./...
-```
+`jwt.secret` is the exception: present in the example but **empty**, because a shipped signing key is worse than a missing one. Compose supplies a labelled dev value.
 
-Everything outside `internal/usecase` is a pure unit test and needs no database.
+### Migrations
 
-Config comes from `config.json` in the working directory, and **any key can be overridden by an env var** with `.` replaced by `_` — `DATABASE_HOST`, `WEB_PORT`, `REDIS_PASSWORD`. `config.json` is gitignored; the tracked file is `config.example.json`, so **any new config key must be added to the example too** or a fresh clone silently loses it.
-
-`NewViper` **panics** when `config.json` is missing — env vars alone are not enough to boot. That is why the Dockerfile copies `config.example.json` to `config.json` inside the image, and compose then overrides the environment-dependent keys. The ones compose does not set (`app.name`, `captcha.ttl_seconds`, `database.pool.*`) fall back to the baked example's values. `.dockerignore` excludes the real `config.json` so local credentials are never baked into a layer.
-
-A new config key therefore has three homes, not one: `config.example.json`, and — if a container needs a non-default value — the `web` and `worker` `environment:` blocks in `docker-compose.yml`.
-
-There is a **fourth** home for any key a deployer should be able to tune without editing compose: `.env.example`. Compose reads `.env` and every environment entry is written `${VAR:-default}`, so a key left out of `.env.example` is still overridable and simply undiscoverable — the file is the only list of what may be set. Note the two groups it distinguishes and keep them apart: `POSTGRES_*` configures the PostgreSQL image itself, while the application containers read `DATABASE_*`/`REDIS_*` because viper maps `database.host` to `DATABASE_HOST`; compose derives the second from the first so one password is not written twice.
-
-`jwt.secret` is the exception to "add it to the example": it is present there but **empty**, because a shipped signing key is worse than a missing one. `docker-compose.yml` supplies a clearly-labelled dev value so `up` works out of the box.
-
-Migrations (golang-migrate CLI; `$DSN` like `postgres://user:pass@host:5432/dbname?sslmode=disable`). The CLI **must be built with the postgres driver tag**, otherwise it fails with `unknown driver postgres`:
+CLI **must be built with the postgres driver tag** or it fails with `unknown driver postgres`:
 
 ```bash
 go install -tags 'postgres' github.com/golang-migrate/migrate/v4/cmd/migrate@latest
-```
-
-
-```bash
 migrate -path db/migrations_postgres -database "$DSN" up
 migrate -path db/migrations_postgres -database "$DSN" down 1
 migrate -path db/migrations_postgres -database "$DSN" force <version>   # clear dirty state
-migrate create -ext sql -dir db/migrations_postgres -seq <name>         # new up/down pair
+migrate create -ext sql -dir db/migrations_postgres -seq <name>
 ```
 
-Seed data lives in `db/seeder_postgres/` (`001_ruang.sql`, `002_satuan.sql`, `003_role.sql`, `004_superadmin.sql`) and is applied separately from migrations. Seeders are written to be idempotent (`ON CONFLICT DO NOTHING`), and their conflict target must name the index expression — `ON CONFLICT (lower(kode))`, not `(kode)` — since migration `000009` moved master uniqueness onto `lower(...)`.
+Migration `000001` creates only the shared `set_updated_at()` trigger function — every table with `updated_at` reuses it.
 
-Migration `000001` creates only the shared `set_updated_at()` trigger function — every table with an `updated_at` column reuses it.
+Seeders live in `db/seeder_postgres/` (`001_ruang`, `002_satuan`, `003_role`, `004_superadmin`), applied separately, idempotent (`ON CONFLICT DO NOTHING`). **Their conflict target must name the index expression** — `ON CONFLICT (lower(kode))`, not `(kode)` — since migration `000009` moved master uniqueness onto `lower(...)`.
 
 ## Architecture
 
-Layered, one-directional dependency flow. A layer may only import the layers below it:
+Layered, one-directional. A layer may only import the layers below it:
 
 ```
 delivery  →  usecase  →  repository  →  PostgreSQL / Redis / upstream HTTP
@@ -135,952 +125,506 @@ delivery  →  usecase  →  repository  →  PostgreSQL / Redis / upstream HTTP
 
 | Package | Role | Rules |
 | --- | --- | --- |
-| `cmd/web` | HTTP entrypoint | wires config → db/redis → repository → usecase → delivery, then starts Fiber |
-| `cmd/worker` | background worker entrypoint | reserved; same wiring, no HTTP |
-| `internal/config` | viper, logrus, postgres, redis, fiber constructors | every dependency is built here and injected downward; nothing else reads env directly |
-| `internal/entity` | domain structs mapped to DB tables | no JSON tags, no framework imports |
-| `internal/model` | request/response DTOs + converters | entity ⇄ model conversion happens here, never in handlers |
-| `internal/repository` | data access (PostgreSQL, Redis, upstream HTTP) | all SQL lives here; accepts `context.Context` and a `*sql.DB`/`*sql.Tx` so usecases can compose transactions |
+| `cmd/web`, `cmd/worker` | entrypoints | wire config → db/redis → repository → usecase → delivery |
+| `internal/config` | viper, logrus, postgres, redis, fiber | every dependency built here and injected downward; nothing else reads env |
+| `internal/entity` | domain structs mapped to tables | no JSON tags, no framework imports |
+| `internal/model` | request/response DTOs + converters | entity ⇄ model conversion lives here, never in handlers |
+| `internal/repository` | data access | all SQL; takes `context.Context` and a `DBTX` so usecases compose transactions |
 | `internal/usecase` | business logic, validation, transaction boundaries | depends on repository interfaces, returns models — never Fiber types |
-| `internal/delivery` | Fiber v3 handlers + routing | parse/bind → call usecase → write response; no business logic, no SQL |
-
-Key consequences:
+| `internal/delivery` | Fiber v3 handlers + routing | bind → call usecase → respond; no business logic, no SQL |
 
 - **Handlers must not touch `database/sql`.** A query belongs in a repository even if used once.
-- **Transactions are owned by the usecase layer.** Repositories take an executor argument rather than opening their own transactions.
-- **`internal/entity` never leaks past `internal/usecase`** — the delivery layer only sees `internal/model` types.
-- **Captcha sessions** are Redis-only, keyed with a TTL; they are not persisted to PostgreSQL.
-- **Wiring happens only in `config.Bootstrap`** (`internal/config/app.go`). No package constructs its own dependencies.
+- **Transactions are owned by the usecase layer.** Repositories take an executor argument.
+- **`internal/entity` never leaks past `internal/usecase`.**
+- **Wiring happens only in `config.Bootstrap`/`BootstrapWorker`.**
 
 ### Errors and responses
 
-There is one response envelope, `model.WebResponse[T]`, and one error path:
+One envelope, `model.WebResponse[T]`, one error path:
 
 - Usecases return `model.Invalid/NotFound/Conflict/Unauthorized/Forbidden(...)` — semantic kinds from `internal/model/errors.go`, **not** HTTP codes and **not** `fiber.NewError`. That is what keeps Fiber out of the usecase layer.
-- `statusForKind` in `internal/config/fiber.go` is the single place a kind becomes a status code.
-- Handlers just `return err`. The Fiber `ErrorHandler` formats it, unwraps `validator.ValidationErrors` into `validation_errors`, and logs only 5xx.
-- A bare `error` (a wrapped SQL failure, say) becomes a 500 with a generic message — internal details never reach the client.
-- **Don't hand-roll the driver-error-to-kind mapping.** `internal/usecase/shared.go` holds the six funnels every slice wraps its repository calls in: `notFoundOnNoRows` (`sql.ErrNoRows` → 404), `conflictOnUnique` (`23505` → 409), `invalidOnForeignKey` (`23503` → 400), `conflictOnExclusion` (`23P01` → 409), `invalidOnCheck` (`23514` → 400), and `conflictOnTransisi` (`repository.ErrTransisiStatus` → 409). The SQLSTATE predicates behind them live in `internal/repository/pgerror.go`. `pageMetadata` is there too, and must be called *after* `PageRequest.Normalize` or `total_page` divides by zero.
-- `invalidOnCheck` exists mainly for the `kartu_stok` trigger, which raises with `USING ERRCODE = 'check_violation'` for negative stock and for a closed `periode`. A trigger's `RAISE` carries no constraint name, so there is nothing to switch on — each call site supplies its own message, and the database's own text never reaches the client. `periksaPeriode` narrows one of those two causes to a message naming the month, before the trigger has to; it is not a guard, and the combined message stays as the fallback.
+- `statusForKind` (`internal/config/fiber.go`) is the single place a kind becomes a status code. Handlers just `return err`; the Fiber `ErrorHandler` formats it, unwraps `validator.ValidationErrors` into `validation_errors`, and logs only 5xx. A bare `error` becomes a 500 with a generic message.
+- **Don't hand-roll driver-error mapping.** `internal/usecase/shared.go` holds the funnels every slice wraps repository calls in: `notFoundOnNoRows` (404), `conflictOnUnique` (`23505` → 409), `invalidOnForeignKey` (`23503` → 400), `conflictOnExclusion` (`23P01` → 409), `invalidOnCheck` (`23514` → 400), `conflictOnTransisi` (`repository.ErrTransisiStatus` → 409), `conflictOnRuangBeku` (`55000` → 409). SQLSTATE predicates live in `internal/repository/pgerror.go`. `pageMetadata` is there too and must run *after* `PageRequest.Normalize` or `total_page` divides by zero.
+- `invalidOnCheck` exists mainly for the `kartu_stok` trigger, which raises `check_violation` for negative stock and for a closed `periode`. A trigger's `RAISE` carries no constraint name, so each call site supplies its own message and the database's text never reaches the client.
 
-Controller boilerplate is fixed — copy it verbatim rather than improvising, because these strings are part of the contract:
+Controller boilerplate is fixed — copy it verbatim; these strings are part of the contract:
 
-- `ctx.Bind().Body(request)` failure → `model.Invalid("malformed request body")`; `ctx.Bind().Query(request)` failure → `model.Invalid("malformed query parameters")`.
-- `strconv.ParseInt(ctx.Params("id"), ...)` failure → `model.Invalid("id must be an integer")`.
-- Create answers `fiber.StatusCreated`; everything else answers 200 via a bare `ctx.JSON`.
-- `WebResponse.Data` deliberately has **no `omitempty`**. An empty slice is "empty" to `encoding/json`, so omitempty would drop the key on exactly the page with no rows and break a client reading `data.length`. The cost is `"data": null` on error responses; keep it.
-- Pagination defaults are `PageRequest.Normalize` in `internal/model/model.go`: page 1, size 20, size capped at 100. The usecase calls it; the controller does not.
+- `ctx.Bind().Body(...)` failure → `model.Invalid("malformed request body")`; `.Query(...)` → `"malformed query parameters"`; `strconv.ParseInt(ctx.Params("id"), ...)` → `"id must be an integer"`.
+- Create answers `fiber.StatusCreated`; everything else 200 via a bare `ctx.JSON`.
+- **`WebResponse.Data` deliberately has no `omitempty`.** An empty slice is "empty" to `encoding/json`, so omitempty would drop the key on exactly the page with no rows and break a client reading `data.length`. The cost is `"data": null` on errors; keep it.
+- Pagination defaults are `PageRequest.Normalize` (page 1, size 20, capped at 100). The usecase calls it; the controller does not.
 
 ### Authentication and authorization
 
 Bearer JWT, stateless by decision. Every `/api/v1` route needs a token except `POST /api/v1/auth/login`.
 
-- **Route guards must be the FIRST handler argument.** Fiber v3 registers as `Get(path, handler, handlers...)` and runs the chain in the order given, so `Get(path, controller, guard)` puts the guard *after* the controller — which means never, because a controller does not call `Next()`. The route table looks protected and protects nothing. Write `Get(path, guard, controller)`. `TestRouteGuardsRunBeforeHandler` pins both halves of this, including a subtest that fails if Fiber's ordering ever changes.
-- **Tokens cannot be revoked.** Nothing is stored server-side and no lookup happens per request, so there is nothing to invalidate. `is_aktif = false` on a user, or a revoked role, does not reach a token already issued — access ends only at expiry. `jwt.ttl_minutes` (default 60) is the entire bound on that window. Do not "fix" this with a Redis blacklist without revisiting the decision: the blacklist reinstates the per-request lookup that JWT was chosen to avoid. `POST /api/v1/auth/switch-context` (isu #12 fase 4) does not change this: it mints a new token and cannot touch the old one, which stays valid until it expires regardless of what context was switched to. See "Konteks aktif per sesi" below.
-- **Grants live in the token claims**, so authorization touches no database. The cost is that a grant made, revoked, or retired takes effect at next login or at the next `switch-context`. Only usable grants are embedded — role `is_aktif`, and if the grant is scoped to a unit, that unit `is_aktif` too — which is where retired-does-not-authorize is enforced; `FindRolesByUserIDs` itself returns retired grants on purpose, for the user-management view. Since isu #12 fase 4, a token also carries **which one grant is currently active**, and authorization checks that alone, not the full list — see "Konteks aktif per sesi" below for what changed and, more to the point, what deliberately did not.
-- **`jwt.secret` has no default and the process refuses to start without one** (`config.NewAuthConfig`, minimum 32 characters). A baked-in default is a key every deployment shares, and holding it means minting a `SUPERADMIN` token for any user id. A random per-process key was also rejected: it invalidates every token on restart and breaks outright across more than one instance, both silently.
-- **Login answers one message for every failure** — unknown username, wrong password, disabled account. Distinguishing them enumerates valid usernames. The unknown-username path runs a dummy bcrypt compare so it does not return measurably faster than a wrong password, which would leak what the identical message hides.
-- `Authenticate` pins the accepted signing method. Without `jwt.WithValidMethods`, the parser trusts the token's own `alg` header and accepts `alg=none`. `TestAlgNoneTokenIsRejected` covers it.
-- **The whole authorization policy is one function**, `setupAuthRoute` in `internal/delivery/http/route/route.go`, so it can be read as a whole. Reads are open to any authenticated user; writes split by data owner (`INVENTARIS` for goods/units/rooms/carriers/suppliers, `CASHIER` for customers); `role` and `user` are `SUPERADMIN`-only including reads; every document that writes `kartu_stok` splits by workflow stage instead (`INVENTARIS` types and submits, `SUPERADMIN` posts / rejects / voids) — except `mutasi`, which has no approval stage at all, so the same split lives in the route table alone (`INVENTARIS` reaches `DRAFT`, `SUPERADMIN` posts and voids); `dokumen` has no split at all, because attachments belong to no module and are protected by their state rather than by the caller's role — see "Dokumen and file attachments". **That split is a starting assumption from the three role names, not a spec** — adjust it as the real division of work emerges.
-- **`db/seeder_postgres/004_superadmin.sql` is load-bearing.** `POST /api/v1/user` is `SUPERADMIN`-only, so without a seeded first user the API is locked out of itself. It ships `admin` / `admin12345`, a password committed to this repository — treat it as single-use.
-- `middleware.SessionFrom(ctx)` is how a handler gets the caller, and it is the only acceptable source for `created_by`/`updated_by` — the id comes from the verified token, never from the request body. `product_controller.go` is the worked example: the controller reads the session and copies `session.UserID` onto the request DTO's `ActorID` field. Every other slice still writes `NULL`.
-- Role names are constants in the `route` package (`RoleSuperadmin`, `RoleCashier`, `RoleInventaris`), matching `db/seeder_postgres/003_role.sql`. They are constants precisely because `role.nama` is renameable through the API and the compiler cannot catch a rename — at least the strings to change are in one place.
-- Layering holds: the middleware calls `AuthUseCase.Authenticate` and receives a `*model.Session`. The usecase imports `jwt` but never Fiber.
+- **Route guards must be the FIRST handler argument.** Fiber v3 runs `Get(path, handler, handlers...)` in the order given, so `Get(path, controller, guard)` puts the guard after a controller that never calls `Next()` — the table looks protected and protects nothing. Write `Get(path, guard, controller)`. `TestRouteGuardsRunBeforeHandler` pins both halves, including Fiber's ordering.
+- **Tokens cannot be revoked.** Nothing is stored server-side; `is_aktif = false` or a revoked role does not reach an issued token. `jwt.ttl_minutes` (default 60) is the entire bound. **Do not "fix" this with a Redis blacklist** — it reinstates the per-request lookup JWT was chosen to avoid. `switch-context` mints a new token and cannot touch the old one.
+- **Grants live in the token claims**, so authorization touches no database. A grant made or revoked takes effect at next login or `switch-context`. Only *usable* grants are embedded (role `is_aktif`, and the unit `is_aktif` when scoped) — that is where retired-does-not-authorize is enforced; `FindRolesByUserIDs` returns retired grants on purpose, for the management view.
+- **`jwt.secret` has no default and the process refuses to start without one** (`config.NewAuthConfig`, min 32 chars). A baked-in default is a key every deployment shares; a random per-process key breaks every restart and every multi-instance deploy, both silently.
+- **Login answers one message for every failure** (unknown username, wrong password, disabled account) — distinguishing them enumerates usernames. The unknown-username path runs a dummy bcrypt compare so it does not return measurably faster.
+- `Authenticate` pins the signing method via `jwt.WithValidMethods`; without it the parser trusts the token's own `alg` and accepts `alg=none` (`TestAlgNoneTokenIsRejected`).
+- **The whole authorization policy is one function**, `setupAuthRoute` in `route.go`, so it reads as a whole. Reads open to any authenticated user; writes split by data owner (`INVENTARIS` for goods/units/rooms/carriers/suppliers, `CASHIER` for customers); `role` and `user` are `SUPERADMIN`-only including reads; **every document writing `kartu_stok` splits by workflow stage instead** (`INVENTARIS` types and submits, `SUPERADMIN` posts/rejects/voids) — except `mutasi` and `penjualan`, which have no approval stage, so the split lives in the route table alone. `dokumen` has no split at all — attachments belong to no module, and state protects them. **That split is a starting assumption from three role names, not a spec** — adjust as the real division of work emerges.
+- **`db/seeder_postgres/004_superadmin.sql` is load-bearing.** `POST /api/v1/user` is `SUPERADMIN`-only, so without a seeded first user the API is locked out of itself. It ships `admin` / `admin12345` — a password committed to this repository; treat it as single-use.
+- `middleware.SessionFrom(ctx)` is the only acceptable source for `created_by`/`updated_by` — the id comes from the verified token, never the body. `product_controller.go` is the worked example.
+- Role names are constants in the `route` package (`RoleSuperadmin`, `RoleCashier`, `RoleInventaris`) matching `003_role.sql` — constants precisely because `role.nama` is renameable through the API and the compiler cannot catch a rename.
+
+## Modules
 
 ### Pembelian and the posting engine (migration 000012)
 
-The first transaction document, and the first thing that writes `kartu_stok`. Its number generator and its posting path are built to be reused by sales, transfers, usage, and stock counts — build those on this, not on a master slice.
+The first transaction document and the first writer of `kartu_stok`. Its number generator and posting path are built for reuse — build new documents on this, not on a master slice.
 
-`Create`'s `id_ruang` is validated against the caller's active `unit_kerja` (isu #12 fase 5) — see "`id_ruang` validated against the active unit" below for the shared mechanism. `Get`, `List`, and `Sisa` are scoped by the same active unit on the read side too (fase 6) — see "Read-path scoping" below.
-
-- **The costing arithmetic is pure and lives apart from the I/O.** `internal/usecase/pembelian_alokasi.go` holds `hitungPosting` and `bagiProporsional`, both operating on `*big.Rat` with no database in sight, and `pembelian_alokasi_test.go` is an **internal** test (`package usecase`) — one of only three, alongside `harga_jual_test.go` (a pure function) and `auth_token_test.go` (which needs the unexported token issuer). Everything else in `internal/usecase` is external (`package usecase_test`). That split is deliberate: this is where a mistake is permanent, so it has to be testable without a fixture.
-- **Money and quantities are `math/big.Rat`, never `float64`.** 0.1 has no exact binary representation and these figures become a payable and an inventory valuation. `internal/usecase/numeric.go` parses `NUMERIC` text into exact rationals and rounds once, deliberately, at the end. `formatNumeric` uses `big.Rat.FloatString`, which rounds halves away from zero — the same rule PostgreSQL's `ROUND` applies to `NUMERIC`, and they have to agree or a value computed in Go and one the database recomputes differ by a cent nobody can see.
-- **`nilai_masuk` is proportional to `qty_diterima_dasar / qty_dasar`, never the full invoice value.** This is the single most expensive thing in the module to get wrong. `kartu_stok` uses a moving average and outgoing rows lock in the cost in force at the time, so 95 of 100 received at full invoice value prices them at 11.052 instead of 10.500 — and any sale before the rest arrives books that permanently into cost of goods sold. Append-only means it can only be reversed, never repaired.
-- Cost per base unit is computed against `qty_dasar`, not `qty_diterima_dasar`. Both numerator and denominator scale by the same ratio so the figure is identical, but expressing it against the invoice quantity is what leaves the remaining value available to a follow-up receipt without recomputing anything.
-- **Allocation sums exactly.** `bagiProporsional` rounds each share and then pushes the remainder onto the largest basis, earliest one on a tie. Three lines splitting 100 give 33.33 three times, which is 99.99; the missing cent would silently become inventory value nobody was billed for. The same function does freight, the nota discount, the PPN share, and `bagi-rata-koli`.
-- Freight basis is `jumlah_koli`, falling back to `qty_diterima_dasar` when every line is still zero — that fallback is the divide-by-zero guard, not a preference. `ditanggung_supplier` zeroes `biaya_angkut` outright.
-- **`biaya_angkut` is not part of `total`.** Total is what the supplier is owed; freight is the carrier's bill and reaches the books through `alokasi_biaya` on the lines. Folding it into total would inflate the payable by money owed elsewhere.
-- **Two quantity pairs, and they mean different things.** `qty_faktur`/`qty_dasar` is the paper and drives the payable; `qty_diterima`/`qty_diterima_dasar` is the physical count and drives stock. Omitting `qty_diterima` means it equals `qty_faktur`. Over-delivery is rejected in Go *and* by a CHECK. A difference makes `keterangan_selisih` mandatory — a policy, not a constraint.
-- **Every state transition takes a row lock first** (`LockByID`, `SELECT ... FOR UPDATE`), then checks the status, then writes with the status repeated in the `WHERE`. Without the lock two concurrent posting requests both read `DIAJUKAN` and both write `kartu_stok`. `KartuStokRepository.HasRef` is the backstop that does not depend on the status column being right.
-- `DRAFT → DIAJUKAN → POSTED → BATAL`, with `DIAJUKAN → DRAFT` on rejection. `INVENTARIS` writes and submits; `SUPERADMIN` posts, rejects, and voids. **Every module that writes `kartu_stok` splits its guards by workflow stage rather than by data owner** — `pembelian`, `penerimaan_susulan`, and `retur_pembelian` all carry this shape. See the comment above those routes in `route.go` for why.
-- **A cancellation cannot copy the original cost, and that is the schema's decision, not a shortcut.** `kartu_stok_hitung_saldo` overwrites `nilai_keluar` and `harga_pokok_satuan` on every outgoing row with the balance in force at the time, so an application-supplied cost is discarded. Reversals are therefore valued at the current moving average. Undoing the mixing would need a different valuation method; don't try to work around it by writing to those columns.
-- **Document numbers come from `document_counter`**, keyed `(prefix, tahun, bulan)`, taken with one `INSERT ... ON CONFLICT DO UPDATE RETURNING` inside the document's transaction. That statement is atomic and holds the row lock until commit, so concurrent requests queue instead of colliding. A rollback leaves a gap — deliberately: gaps are an annoyance, duplicate numbers are a corruption. Reset is monthly and keyed off the **document's** date, so a July invoice typed in August still gets a July number. Add a prefix constant to `repository` rather than typing a literal.
+- **The costing arithmetic is pure and lives apart from the I/O.** `internal/usecase/pembelian_alokasi.go` holds `hitungPosting` and `bagiProporsional` on `*big.Rat` with no database in sight; its test is **internal** (`package usecase`). This is where a mistake is permanent, so it has to be testable without a fixture.
+- **Money and quantities are `math/big.Rat`, never `float64`.** `internal/usecase/numeric.go` parses `NUMERIC` text into exact rationals and rounds once, at the end. `formatNumeric` uses `big.Rat.FloatString`, which rounds halves away from zero — the same rule PostgreSQL's `NUMERIC` `ROUND` applies, and they must agree or a value computed in Go and one recomputed in SQL differ by a cent nobody can see.
+- **`nilai_masuk` is proportional to `qty_diterima_dasar / qty_dasar`, never the full invoice value.** The single most expensive thing here to get wrong: `kartu_stok` uses a moving average and outgoing rows lock in the cost in force at the time, so 95 of 100 received at full invoice value prices them at 11.052 instead of 10.500 — and any sale before the rest arrives books that permanently into COGS. Append-only means it can only be reversed, never repaired.
+- Cost per base unit is computed against `qty_dasar`, not `qty_diterima_dasar` — identical figure (both scale by the same ratio), but expressing it against the invoice quantity leaves the remaining value available to a follow-up receipt without recomputation.
+- **Allocation sums exactly.** `bagiProporsional` rounds each share, then pushes the remainder onto the largest basis, earliest on a tie. Three lines splitting 100 give 33.33 × 3 = 99.99; the missing cent would silently become inventory value nobody was billed for. Same function does freight, nota discount, PPN share, and `bagi-rata-koli`.
+- Freight basis is `jumlah_koli`, falling back to `qty_diterima_dasar` when every line is zero — that fallback is the divide-by-zero guard, not a preference. `ditanggung_supplier` zeroes `biaya_angkut`.
+- **`biaya_angkut` is not part of `total`.** Total is what the supplier is owed; freight is the carrier's bill and reaches the books through `alokasi_biaya` on the lines.
+- **Two quantity pairs, meaning different things.** `qty_faktur`/`qty_dasar` is the paper and drives the payable; `qty_diterima`/`qty_diterima_dasar` is the physical count and drives stock. Omitting `qty_diterima` means it equals `qty_faktur`. Over-delivery is rejected in Go *and* by a CHECK. A difference makes `keterangan_selisih` mandatory — a policy, not a constraint.
+- **Every state transition takes a row lock first** (`LockByID`, `SELECT ... FOR UPDATE`), then checks the status, then writes with the status repeated in the `WHERE`. Without the lock two concurrent posts both read `DIAJUKAN` and both write `kartu_stok`. `KartuStokRepository.HasRef` is the backstop that does not depend on the status column being right.
+- `DRAFT → DIAJUKAN → POSTED → BATAL`, with `DIAJUKAN → DRAFT` on rejection.
+- **A cancellation cannot copy the original cost** — `kartu_stok_hitung_saldo` overwrites `nilai_keluar` and `harga_pokok_satuan` on every outgoing row, so an application-supplied cost is discarded and reversals are valued at the current moving average. Undoing the mixing would need a different valuation method; don't work around it by writing to those columns.
+- **Document numbers come from `document_counter`**, keyed `(prefix, tahun, bulan)`, one `INSERT ... ON CONFLICT DO UPDATE RETURNING` inside the document's transaction — atomic, holding the row lock until commit, so concurrent requests queue. A rollback leaves a gap, deliberately: gaps annoy, duplicate numbers corrupt. Reset is monthly off the **document's** date, so a July invoice typed in August gets a July number. Add a prefix constant to `repository` rather than a literal.
 - `no_faktur_supplier` is unique per supplier via a partial `lower(...)` index excluding `BATAL`, so a mistyped nota can be voided and re-entered. Without a purchase order this document is the only trace of the supplier's invoice, and entering it twice raises stock twice.
-- `faktor_konversi` is a snapshot from `product_satuan`, resolved for every line in **one** query (`FindFaktorBatch`, `unnest` of two arrays), not one per line. `qty × faktor` must be a whole number because `qty_dasar` is `BIGINT`.
-- Lines are replaced wholesale (`PUT .../detail`), never edited one at a time: they are one thing retyped off one piece of paper, and a partial edit leaves the header's totals disagreeing with its own lines between requests. `DeleteDetail` is safe only on a `DRAFT` — a posted line is what `retur_pembelian_detail` points at.
-- `status_penerimaan` follows the `status_pembayaran` rule: **always recomputed, never set from a form.** A cache a form can write is a second source of truth.
+- `faktor_konversi` is a snapshot from `product_satuan`, resolved for every line in **one** query (`FindFaktorBatch`, `unnest` of two arrays). `qty × faktor` must be a whole number because `qty_dasar` is `BIGINT`.
+- Lines are replaced wholesale (`PUT .../detail`), never edited one at a time: they are one piece of paper retyped, and a partial edit leaves the header's totals disagreeing with its own lines. `DeleteDetail` is safe only on a `DRAFT` — a posted line is what `retur_pembelian_detail` points at.
+- `status_penerimaan` follows the `status_pembayaran` rule: **always recomputed, never set from a form.**
 
 ### Penerimaan susulan (migration 000013)
 
-The second shipment for goods that did not arrive with the first. It adds stock and never a payable — the supplier's invoice was issued in full with the first delivery and booked in full then, so what is still outstanding after that is goods.
+The second shipment for goods that did not arrive with the first. Adds stock, never a payable — the supplier's invoice was issued and booked in full with the first delivery.
 
-`Get` and `List` are scoped by the caller's active `unit_kerja` (isu #12 fase 6), against the parent purchase's room — this module has no `id_ruang` of its own to check on write, since it is copied from the parent, but the read-side scope still needs the room's unit, so `susulanReadColumns` joins it in. See "Read-path scoping" below.
-
-- **Why a separate document rather than raising `qty_diterima`.** A POSTED `pembelian` must not change and `kartu_stok` is append-only, so editing the posted line is not available: it would break document immutability, make cancellation impossible to audit (which `kartu_stok` rows would be reversed?), and erase when the goods actually turned up. The shape that fits is the mirror of `retur_pembelian` — both point at `pembelian_detail`, the goods just move the other way.
-- **`harga_pokok_satuan_dasar` is copied from the source line, never recomputed and never read off the current moving average.** That is what makes a purchase and all its follow-ups contribute exactly the invoice value to inventory, and it is why the average does not shift when the remainder turns up. Copying a cost rather than deriving one is the pattern every document deriving from another should follow.
-- **Two snapshots from different places, deliberately.** `faktor_konversi` is resolved from `product_satuan` *now*, because the quantity is a fresh count and may arrive in a different unit than the invoice used (five loose pieces short of a line typed in boxes). The cost is copied from the source. Quantity conversion follows current master; cost follows the invoice.
-- **The quota check that counts runs at posting, under `PembelianRepository.LockByID`.** The one in `siapkanDetail` only produces a friendlier error sooner. Two drafts may both claim the same remainder — a draft is not a delivery — and the second must fail when it tries to consume what the first already took. `TestSisaDiperiksaUlangSaatPosting` pins exactly that.
-- Only **POSTED** follow-ups count towards the outstanding figure. `pembelianDetailSusulan` in `pembelian_repository.go` is that predicate, declared once and reused by `FindDetail`, `FindDetailByID`, and `RecalculateStatusPenerimaan` — three copies of it would drift.
-- **`pembelian.status_penerimaan` is rewritten from here**, by `RecalculateStatusPenerimaan`, after posting and after voiding. The purchase is POSTED by then and can no longer recompute its own cache, so this is the only thing keeping it honest.
-- **Three derived quantities on a purchase line, and they answer different questions.** `selisih_dasar` is what the first delivery was short and is frozen once posted; `qty_susulan_dasar` is what turned up later; `sisa_dasar` is what is still owed. Don't collapse them.
-- `penerimaan_susulan_detail_baris_uidx` stops one source line appearing twice in one document. Without it two lines for the same source each pass the quota check on their own and together exceed it. The usecase catches it first so the message names the field.
-- **Cancelling a purchase is refused while a POSTED follow-up exists** (`HasPostedSusulan` → 409). The purchase's cancellation only reverses rows it wrote itself, so the follow-up's stock would survive with nothing explaining it — and it could not be reversed afterwards either, since its own cancellation path needs a purchase that is still POSTED. Void the follow-up first.
-- `jenis_transaksi` gained `'PENERIMAAN_SUSULAN'`. **`ALTER TYPE ... ADD VALUE` cannot be undone** — PostgreSQL has no `DROP VALUE`, and removing one means rebuilding the type and every column using it, including append-only `kartu_stok`. The down migration says so plainly and leaves the value behind rather than pretending. `ADD VALUE IF NOT EXISTS` keeps the up idempotent after a down. It is safe inside golang-migrate's transaction on PG 12+ as long as the value is not *used* in the same transaction, which this migration does not do.
-- No freight columns. Value entering stock is the remaining share of the original invoice value, so one invoice contributes exactly its own value however many times the goods turn up. If a follow-up shipment ever needs its own carrier bill, that is a schema change and a deliberate one — it makes the second batch cost more per unit than the first.
-- `id_supplier` and `id_ruang` are copied from the purchase, not chosen. Goods that need to move rooms after arrival are a `mutasi`.
+- **Why a separate document rather than raising `qty_diterima`.** A POSTED `pembelian` must not change and `kartu_stok` is append-only: editing the posted line would break document immutability, make cancellation unauditable (which rows get reversed?), and erase when the goods actually turned up.
+- **`harga_pokok_satuan_dasar` is copied from the source line**, never recomputed and never read off the current moving average. That is what makes a purchase and all its follow-ups contribute exactly the invoice value to inventory, and why the average does not shift when the remainder arrives. **Copying a cost rather than deriving one is the pattern every derived document follows.**
+- **Two snapshots from different places, deliberately.** `faktor_konversi` is resolved from `product_satuan` *now* (a fresh count may arrive in a different unit than the invoice used); the cost is copied from the source. Quantity conversion follows current master; cost follows the invoice.
+- **The quota check that counts runs at posting, under `PembelianRepository.LockByID`.** The one in `siapkanDetail` only produces a friendlier error sooner. Two drafts may both claim the same remainder — a draft is not a delivery.
+- Only **POSTED** follow-ups count toward the outstanding figure. `pembelianDetailSusulan` (`pembelian_repository.go`) is that predicate, declared once and reused by `FindDetail`, `FindDetailByID`, and `RecalculateStatusPenerimaan`.
+- **`pembelian.status_penerimaan` is rewritten from here** by `RecalculateStatusPenerimaan` after posting and voiding. The purchase is POSTED by then and can no longer recompute its own cache.
+- **Three derived quantities on a purchase line answering different questions:** `selisih_dasar` (what the first delivery was short, frozen once posted), `qty_susulan_dasar` (what turned up later), `sisa_dasar` (what is still owed). Don't collapse them.
+- `penerimaan_susulan_detail_baris_uidx` stops one source line appearing twice in one document — without it two lines each pass the quota check alone and together exceed it. The usecase catches it first so the message names the field.
+- **Cancelling a purchase is refused while a POSTED follow-up exists** (`HasPostedSusulan` → 409): the purchase reverses only rows it wrote itself, so the follow-up's stock would survive unexplained and could not be reversed afterwards either.
+- `jenis_transaksi` gained `'PENERIMAAN_SUSULAN'`. **`ALTER TYPE ... ADD VALUE` cannot be undone** — no `DROP VALUE` exists, and removing one means rebuilding the type and every column using it, including append-only `kartu_stok`. The down migration says so and leaves the value behind. `ADD VALUE IF NOT EXISTS` keeps the up idempotent. Safe inside golang-migrate's transaction on PG 12+ as long as the value is not *used* in the same transaction.
+- No freight columns. Value entering stock is the remaining share of the original invoice value, so one invoice contributes exactly its own value however many times goods turn up.
+- `id_supplier` and `id_ruang` are copied from the purchase, not chosen. Goods needing to move rooms after arrival are a `mutasi`.
 
 ### Retur pembelian (migration 000014)
 
-Goods sent back to the supplier — isu #4 fase 5. Deliberately the mirror of `penerimaan_susulan`: same parent, same copied cost, same quota-on-a-line shape, goods moving the other way. Read the two side by side; what follows is only what the direction changes.
+Goods sent back to the supplier. The mirror of `penerimaan_susulan`: same parent, same copied cost, same quota-on-a-line shape, goods the other way. What follows is only what the direction changes.
 
-`Get` and `List` are scoped the same way `penerimaan_susulan`'s are (isu #12 fase 6), against the parent purchase's room. See "Read-path scoping" below.
-
-- **The tables already existed** (migration `000005`); `000014` adds the approval flow, the cancellation columns, the status CHECK, a `(tanggal DESC, id DESC)` index, and the per-document unique index on the source line. **No `ALTER TYPE`** — `'RETUR_PEMBELIAN'` has been in `jenis_transaksi` since `000002`, which is lucky, because `ADD VALUE` cannot be undone.
-- **What may be returned is what actually arrived**, `qty_diterima_dasar + Σ POSTED susulan − Σ POSTED retur`. Note which quantity is absent: `qty_dasar`. The invoice quantity is what the supplier billed, and goods that never turned up cannot be sent back — a shortfall is chased with a `penerimaan_susulan`, not returned. `pembelianDetailRetur` in `pembelian_repository.go` is that sum, declared once next to `pembelianDetailSusulan`.
-- **This is a different axis from the outstanding quantity, and mixing them is the mistake to avoid.** Goods returned were still received, so `status_penerimaan` is **never** recomputed from here — a return does not make a delivery incomplete and does not entitle anyone to a follow-up shipment. `sisa_dasar` and `qty_dapat_diretur` can both be nonzero on the same line. That absence is the one asymmetry with `penerimaan_susulan` worth checking for on sight, since copying that module wholesale would wrongly add the call.
-- **`total` and what `kartu_stok` records leaving are different numbers, on purpose.** `total` is the invoice cost, summed from `harga_pokok_satuan_dasar` copied off the source lines — that copy is what makes a purchase and its return cancel out, and migration `000005` says so. `kartu_stok` values every outgoing row at the moving average in force at the time, because those goods were blended into older stock the moment they arrived. Neither figure can be made to be the other.
-- **A return reduces the payable, but never by its own `total`.** `total` is derived from cost, which includes the freight share and whatever PPN treatment applied, while `pembelian.total` excludes freight entirely — subtracting one from the other over-credits the supplier by money that went to the carrier. The payable uses `nilai_kredit_utang` instead, a separate column frozen at posting; see "Pembayaran utang and the payable side". Posting and voiding a return both call `PembelianRepository.RecalculateStatusPembayaran`.
-- **Cancelling a purchase is refused while a POSTED return exists** (`HasPostedRetur` → 409), and the reason compounds. The purchase's cancellation reverses the full received quantity while the return has already taken part of it out, so the reversal drives the balance negative and is refused by the trigger with a message about stock rather than about the return. Even where the balance allows it, the return would be left pointing at a `BATAL` purchase whose reversal already accounted for those goods — the same shortfall twice.
-- **Voiding a `penerimaan_susulan` whose goods have been returned is refused by the trigger**, not by a check in Go, and the trigger is the right arbiter: the balance is computed inside it under an advisory lock precisely so no reader can decide it first. It surfaces as `invalidOnCheck` → 400. `TestBatalSusulanDitolakSaatBarangnyaSudahDiretur` pins it.
-- **The negative-stock guard on this module's own posting is defensive, not currently reachable.** What a line may send back is exactly what it brought in, so the quota can never exceed the room's stock while purchase, follow-up receipt, and return are the only documents moving it. `mutasi` and `pemakaian` now exist and can draw a room down independently of a return, so this stops being purely defensive the moment either of them touches the same room — which is why `invalidOnCheck` was wired in from the start rather than discovered later.
-- `alasan` is nullable in the schema but **required by the usecase**, and a patch may not clear it. It is the only record of why goods already paid for went back. Following the `keterangan_selisih` precedent: a policy, not a constraint.
-- Cancellation appends reversing rows with `NilaiMasuk = asal.NilaiKeluar` — what the ledger recorded leaving is the one figure that makes the pair sum to zero. An outgoing row's own `NilaiMasuk` is sent as an explicit `"0"`, since the column is NOT NULL and an empty string is not a NUMERIC.
-- `qty_retur_dasar` and `qty_dapat_diretur` ride on `PembelianDetailResponse`, so the return-entry screen needs no endpoint of its own. Adding them changed `pembelianDetailReadColumns` and therefore the scan order in both `FindDetail` and `FindDetailByID`.
-- Prefix is `RB`; the series is its own, independent of `BL` and `PS`.
+- The tables predate this (migration `000005`); `000014` adds the approval flow, cancellation columns, status CHECK, a `(tanggal DESC, id DESC)` index, and the per-document unique index. **No `ALTER TYPE`** — `'RETUR_PEMBELIAN'` has been in `jenis_transaksi` since `000002`.
+- **What may be returned is what actually arrived**: `qty_diterima_dasar + Σ POSTED susulan − Σ POSTED retur`. Note what is absent: `qty_dasar`. The invoice quantity is what the supplier billed, and goods that never turned up cannot be sent back — a shortfall is chased with a `penerimaan_susulan`. `pembelianDetailRetur` is that sum.
+- **This is a different axis from the outstanding quantity, and mixing them is the mistake to avoid.** Goods returned were still received, so `status_penerimaan` is **never** recomputed from here. `sisa_dasar` and `qty_dapat_diretur` can both be nonzero on the same line. Copying `penerimaan_susulan` wholesale would wrongly add the call.
+- **`total` and what `kartu_stok` records leaving are different numbers, on purpose.** `total` is the invoice cost summed from `harga_pokok_satuan_dasar` copied off the source lines — that copy is what makes a purchase and its return cancel out. `kartu_stok` values every outgoing row at the moving average in force, because those goods were blended into older stock on arrival. Neither figure can be made to be the other.
+- **A return reduces the payable, but never by its own `total`** — `total` carries the freight share and PPN treatment, while `pembelian.total` excludes freight entirely, so subtracting one from the other over-credits the supplier. Uses `nilai_kredit_utang` instead (see "Pembayaran utang"). Posting and voiding both call `RecalculateStatusPembayaran`.
+- **Cancelling a purchase is refused while a POSTED return exists** (`HasPostedRetur` → 409): the purchase's reversal covers the full received quantity while the return already took part of it out, driving the balance negative — and the return would be left pointing at a `BATAL` purchase that already accounted for those goods.
+- **Voiding a `penerimaan_susulan` whose goods have been returned is refused by the trigger**, not by Go — the balance is computed inside it under an advisory lock precisely so no reader decides it first. Surfaces as `invalidOnCheck` → 400.
+- **The negative-stock guard on this module's own posting is defensive**, but stopped being purely theoretical once `mutasi`/`pemakaian` could draw a room down independently — which is why `invalidOnCheck` was wired in from the start.
+- `alasan` is nullable in the schema but **required by the usecase**, and a patch may not clear it — the only record of why goods already paid for went back. A policy, not a constraint (the `keterangan_selisih` precedent).
+- Cancellation appends reversing rows with `NilaiMasuk = asal.NilaiKeluar` — what the ledger recorded leaving is the one figure that makes the pair sum to zero. An outgoing row's own `NilaiMasuk` is sent as an explicit `"0"` (the column is NOT NULL and `""` is not a NUMERIC).
+- `qty_retur_dasar`/`qty_dapat_diretur` ride on `PembelianDetailResponse`, so the return-entry screen needs no endpoint of its own — which changed `pembelianDetailReadColumns` and the scan order in `FindDetail` and `FindDetailByID`.
+- Prefix `RB`.
 
 ### Pembayaran utang and the payable side (migration 000015)
 
-Money paid to suppliers — isu #4 fase 6, the last phase. The tables came from migration `000008`; `000015` adds the value guards, the giro CHECKs, the per-document unique index on the invoice, and `retur_pembelian.nilai_kredit_utang`.
+Money paid to suppliers. Tables from `000008`; `000015` adds value guards, giro CHECKs, the per-document unique index, and `retur_pembelian.nilai_kredit_utang`.
 
-- **It is the only transaction module that touches no stock, and that absence shapes everything.** `DRAFT → POSTED → BATAL`, with **no `DIAJUKAN`** — do not add one to match `pembelian`. The approval stage exists there because `kartu_stok` is append-only: a wrong posting can only be reversed, and the reversal is valued at a moving average that has since shifted. An allocation has no such residue; it can be voided and every cache recomputed exactly. The two-person control survives as the route split (`CASHIER` prepares, `SUPERADMIN` releases the money), one state fewer.
-- **Three rules, and they are deliberately not symmetric.** A payment may be allocated at most up to its own amount, and **less is normal** — the remainder is a credit sitting with the supplier, which is why `alokasi` may be empty on create. An invoice may receive at most what it still owes. Never force allocation to balance.
-- **An uncashed giro is not a payment**, and this is the trap in the module. Posting a `BELUM_CAIR` giro freezes its allocations and closes the document while leaving every payable exactly where it was; `Cairkan` is what moves `status_pembayaran`. The consequence is that the remaining-balance check **runs again at clearing**, not just at posting — a cash payment can settle the same invoice in between. `TolakGiro` needs to give nothing back, because nothing was ever taken.
-- **`nilai_kredit_utang` is not `retur_pembelian.total`.** Cost carries the freight share paid to the carrier, which the supplier never received. The credit is `pembelian.total × nilai_faktur_retur / pembelian.subtotal`, where `nilai_faktur_retur` sums `subtotal / qty_dasar × qty_retur_dasar` over the source lines. **Scaled against `total` rather than taken raw from the line values**, because `total` already carries the nota discount, the PPN, and the rounding line — crediting raw line values for a full return over-credits by exactly the nota discount, money that reduced the bill in the first place. The scaling is what makes the invariant checkable: a purchase's returns never credit more than its `total`, and credit exactly `total` when everything goes back.
-- **The credit is frozen at posting, not computed on read.** It derives from lines of two documents that are both POSTED and can no longer change, so recomputing would always give the same answer — until one day it does not, and an old payable silently changes value. Every money figure in this project is a snapshot.
-- **`status_pembayaran` is a cache, same rule as `status_penerimaan`:** always recomputed, never set from a form. `RecalculateStatusPembayaran` is one statement so there is no window where the cache disagrees with the rows it summarises, and **everything that can change the answer calls it** — posting and voiding a payment, clearing and rejecting a giro, and posting and voiding a return. Two SQL fragments back it, declared once in `pembelian_repository.go`: `pembelianAlokasiEfektif` (POSTED payments, and for giro only `CAIR` ones) and `pembelianKreditRetur`.
-- `SEBAGIAN` covers a return-only credit with no money paid at all. That is correct — the invoice genuinely is partly settled — and both figures ride on the response so a screen can say which one did it.
-- **Cancelling a purchase is refused once it has been paid**, including while an uncashed giro points at it. An uncashed giro has not reduced the payable, but it is a document circulating against that invoice.
-- `pembayaran_utang_alokasi_baris_uidx` stops one invoice appearing twice in one payment — the same trap as `penerimaan_susulan_detail_baris_uidx` and `retur_pembelian_detail_baris_uidx`, and the usecase catches it first so the message names the field.
-- `id_supplier` and `metode` are **absent from the update DTO**. The first is who the money goes to, and changing it would leave every allocation pointing at another supplier's invoices; the second decides whether the giro columns may be filled at all. Change either by cancelling and re-entering — which is also what the bank statement will show.
-- `GET /supplier/{id}/utang` is a **read that is not a module**, following `riwayat_beli`: the query lives in `pembelian_repository.go`, `SupplierUseCase` borrows `PembelianRepository`, no migration. It is ordered **oldest first**, unlike every other list in this API, because it is a queue to work through.
-- Prefix is `PU`; the series is its own.
+- **It touches no stock, and that absence shapes everything.** `DRAFT → POSTED → BATAL`, with **no `DIAJUKAN`** — do not add one to match `pembelian`. The approval stage exists there because `kartu_stok` is append-only: a wrong posting can only be reversed, at a moving average that has since shifted. An allocation has no such residue; it can be voided and every cache recomputed exactly. The two-person control survives as the route split (`CASHIER` prepares, `SUPERADMIN` releases), one state fewer.
+- **Three rules, deliberately not symmetric.** A payment may be allocated at most up to its own amount, and **less is normal** — the remainder is a credit sitting with the supplier, which is why `alokasi` may be empty on create. An invoice may receive at most what it still owes. **Never force allocation to balance.**
+- **An uncashed giro is not a payment** — the trap in this module. Posting a `BELUM_CAIR` giro freezes its allocations and closes the document while leaving every payable where it was; `Cairkan` moves `status_pembayaran`. So **the remaining-balance check runs again at clearing**, not just at posting — a cash payment can settle the same invoice in between. `TolakGiro` gives nothing back, because nothing was taken.
+- **`nilai_kredit_utang` is not `retur_pembelian.total`.** Cost carries freight the supplier never received. The credit is `pembelian.total × nilai_faktur_retur / pembelian.subtotal`, where `nilai_faktur_retur` sums `subtotal / qty_dasar × qty_retur_dasar` over the source lines. **Scaled against `total` rather than taken raw**, because `total` already carries the nota discount, PPN, and rounding line — crediting raw line values for a full return over-credits by exactly the nota discount. The scaling makes the invariant checkable: returns never credit more than `total`, and credit exactly `total` when everything goes back.
+- **The credit is frozen at posting, not computed on read.** It derives from two POSTED documents that can no longer change, so recomputing always gives the same answer — until one day it doesn't, and an old payable silently changes value. **Every money figure in this project is a snapshot.**
+- **`status_pembayaran` is a cache: always recomputed, never set from a form.** `RecalculateStatusPembayaran` is one statement, so there is no window where the cache disagrees with the rows it summarises, and **everything that can change the answer calls it** — posting/voiding a payment, clearing/rejecting a giro, posting/voiding a return. Two fragments back it, declared once in `pembelian_repository.go`: `pembelianAlokasiEfektif` (POSTED payments; for giro only `CAIR`) and `pembelianKreditRetur`.
+- `SEBAGIAN` covers a return-only credit with no money paid — correct, and both figures ride on the response so a screen can say which one did it.
+- **Cancelling a purchase is refused once it has been paid**, including while an uncashed giro points at it — that giro has not reduced the payable, but it is a document circulating against the invoice.
+- `id_supplier` and `metode` are **absent from the update DTO**: changing the first leaves every allocation pointing at another supplier's invoices; the second decides whether the giro columns may be filled at all. Change either by cancelling and re-entering — which is also what the bank statement will show.
+- `GET /supplier/{id}/utang` is a **read that is not a module** (query in `pembelian_repository.go`, `SupplierUseCase` borrows `PembelianRepository`). Ordered **oldest first**, unlike every other list, because it is a queue to work through.
+- Prefix `PU`.
 
-### Dokumen and file attachments (migration 000016)
+### Penerimaan pembayaran and the receivable side (migration 000024, isu #20)
 
-Isu #5. Uploaded files — photographed invoices, damaged-goods photos, signed delivery notes — attached to whichever document they belong to. Two things make it unlike every other slice: it holds a store that is not the database, and its reference is polymorphic.
+Money received from customers — the mirror of `pembayaran_utang`. **Read that module first whenever in doubt here.** Tables exist since `000006`; `000024` only adds the value guards. **No `ALTER TYPE`**; writes no `kartu_stok`, so it touches no trigger, no periode, no ruang freeze.
 
-- **Upload first, attach later, and that is forced by the physical world.** The photo is taken while the box is being opened, before the `pembelian` exists. So a row is born with `ref_table` and `ref_id` NULL, and `POST /dokumen/{id}/tempel` claims it afterwards. **The nullable `ref_id` is the feature**: it is what makes an orphan possible and, through a partial index `WHERE ref_id IS NULL`, what makes one cheap to find.
-- **Attaching is one endpoint here, not a `dokumen_ids` field on every document.** A module that starts accepting attachments adds one line to `repository.RefTableDokumen` — no migration, no DTO change, no second copy of the rules. That map is also the only thing standing between `ref_table` and an arbitrary string: there is no foreign key behind a polymorphic reference, and it is why `StatusRef` may interpolate the table name into SQL at all — what reaches the query is a key of the map, never the caller's string.
-- **The write order is the one thing that cannot be swapped.** Upload writes the file, then the row, and deletes the file if the row fails. Deletion goes the other way: file first, then the row's `deleted_at`. Both follow the same rule — whichever half survives a crash has to be the recoverable one. A row pointing at a missing file cannot be repaired by anyone, because nothing knows what the file should have contained; a file whose row was never written is caught by the caller, and a row still marked live is simply retried.
-- **MIME comes from the bytes, extension comes from the MIME, and the storage name comes from a UUID.** The client's filename is display text and reaches the filesystem never — `nama_asli` may be `../../config.json` and mean nothing. `LocalDokumenStorage.path` **rejects** rather than sanitises: `filepath.Base` would quietly turn a traversal into a write to the wrong place, and a bug that makes no sound is worse than an error.
-- **The size limit is enforced on the stream** (`io.LimitReader`, reading one byte past the limit so "exactly at" is distinguishable from "truncated"). `Config.BodyLimit` is derived from `dokumen.max_size_mb` in `config.NewFiber` — Fiber's default is 4 MB and fasthttp refuses an oversized body before any handler runs, so leaving it alone silently caps a configured 10 MB at 4.
-- **Downloads stay behind the token, and always as an attachment.** `Content-Disposition: attachment` plus `X-Content-Type-Options: nosniff`, so a stored HTML or SVG cannot execute in the application's origin. `dispositionLampiran` reduces the quoted form to safe ASCII and carries the real name in RFC 5987 `filename*` — `nama_asli` is arbitrary client bytes, and a CR in a header value is header injection.
-- **The cleanup job works from rows, never from a directory scan.** A scan would sweep up files whose row is written but not yet committed — the seconds between `Storage.Tulis` and `tx.Commit`. It is safe against a second worker in two layers: a session-level `pg_advisory_lock` (on a `*sql.Conn`, since releasing it from another pooled connection does nothing), and one transaction with a row lock per file, so an attach racing a sweep blocks instead of losing its bytes.
-- **Soft delete, and it is the only `DELETE` in the API.** The row survives with `deleted_at`; only the file goes. That trace is also what makes the sweep re-runnable without remembering what it already did.
-- Removal is allowed **only while orphaned or while the parent is `DRAFT`**. Attaching to a `BATAL` parent is refused for the mirror reason: it could never be removed again.
-- `dokumen` carries **no role guard beyond being authenticated**, and that is not the reads-are-open rule stretched over writes. Attachments belong to no module, so no data owner can be named; what protects them is state — inert until claimed, refused past `BATAL` or ten files, unremovable past `DRAFT`.
-- Config lives under `dokumen.*` and is read by **both** entrypoints. `dokumen.storage_path` must resolve to the same directory in `web` and `worker`, which in compose is one volume mounted on both — point them apart and the sweep finds rows, finds no files, and marks them deleted anyway.
-- `checksum_sha256` reports `duplikat_dari_id` and never refuses: one scan legitimately belongs to two documents.
-
-### Periode and book closing (migration 000017)
-
-Isu #6. The act that makes a month refuse further stock movements. The tables and the trigger's respect for them predate this by fourteen migrations; what was missing was any Go at all, so every month stayed open forever.
-
-- **It is master-data shaped but cross-cutting.** Follow `supplier`, not `pembelian` — no number, no lines, no posting. What makes it unlike a master slice is that the row it writes is read by the `kartu_stok` trigger on every insert, so **every module that writes stock inherits the refusal without a line of code** — `mutasi` and `pemakaian` already have it for free, and sales and stock opname will too, once built. That is also why the write guard is `SUPERADMIN` rather than a data owner — closing a month is not this module's data changing, it is every other module losing the ability to post into it.
-- **A month with no row is open**, which is migration `000004`'s decision, and it shapes everything: closing a month **creates** its row (hence the upsert), `Get` answers a synthetic `BUKA` rather than 404, and `Search` cannot list months nobody has touched — the table records closings, not a calendar.
-- **Routes are keyed `(tahun, bulan)`, not `/{id}`**, the only module that departs from that pattern. The pair is the real identity, `periode_tahun_bulan_uidx` says so, and an id-keyed route could not address the ordinary case at all since an unclosed month has no id. The response carries **no `id` field either**, so a stored month and a synthetic one have the same shape.
-- **The reversing-row date is the decision this issue was really about.** Posting is dated on the document; cancellation is dated `time.Now()`. So **voiding a document whose period has since closed still works** — the reversal lands in the current period and the closed month's figures do not move. That is the ordinary accounting treatment, and the alternative leaves a mistyped document from a closed month with no way out. The cost is stated plainly in `PembelianUseCase.Batal` and pinned by `TestBatalDokumenPeriodeTutupMasukPeriodeBerjalan`: the document reads `BATAL` while the closed month's ledger still carries its movement, so **anything reporting per period must read `kartu_stok`, never the document status**. What *can* block a cancellation is the **current** period being closed.
-- **Closing and posting are serialised by an advisory lock, not by a row lock.** The trigger takes `pg_advisory_xact_lock_shared` on `hash('periode:' || tahun || '-' || bulan)` before reading the status; `PeriodeRepository.Lock` takes the exclusive side. `SELECT ... FOR SHARE` on the row was rejected because an unclosed month **has no row** — precisely the case that matters, since closing is what creates it. The key expression is duplicated between migration `000017` and `periodeLockKey`, and the two must produce the same string or neither side waits for the other. `TestTutupMenungguPostingYangSedangBerjalan` fails against the pre-`000017` trigger, so it is a real test rather than a decorative one.
-- The lock lives in the same `hashtextextended(..., 0)` key space as the `(barang, ruang)` lock, separated only by the `'periode:'` prefix. A 64-bit collision costs an unrelated writer a short wait, never a wrong answer. The periode lock is taken **first**, uniformly, so there is no path to a deadlock.
-- **Reopening is allowed, `SUPERADMIN` only**, and `000017` adds `dibuka_oleh`/`ts_buka` for it. Without them, closing after a reopening overwrites `ditutup_oleh`/`ts_tutup` and nothing records that the month was ever reopened. `Tutup` therefore leaves the reopening columns alone — a closing that cleared them would erase the only thing they exist for. A pair of columns rather than an audit table: full history of every closing is a different question, and its table can be added when it is actually asked.
-- **`Buka` is an UPDATE, not an upsert, and the asymmetry with `Tutup` is the point.** Reopening a month with no row would insert a row saying `BUKA`, which is what a missing row already means. It repeats `status = 'TUTUP'` in the `WHERE`, so `sql.ErrNoRows` covers both "never closed" and "someone reopened it first" — one message fits both, and it is a 409. Closing an already-closed month is a 409 too: neither changes anything, and a 200 would let a caller believe otherwise.
-- **Closing is not required to be sequential.** August may be closed while July is open. Requiring an order would force closing every unused month first, and nothing can break from the gap — enforcement is per month inside the trigger, not a running total.
-- **`periksaPeriode` in `shared.go` is for the message, not the guard**, exactly like `ExistsByKode` against a unique index. A trigger's `RAISE` carries no constraint name, so `invalidOnCheck` cannot separate a closed period from insufficient stock and every call site had to say "either". The pre-check runs in `Posting` (on the document's date) and in `Batal` (on **today's**, since that is what the reversal is dated) across all three stock-writing modules, and answers 400 to match what the trigger's rejection maps to. A closing that commits between the check and the insert is still caught by the trigger, just with the vaguer message.
-- No `created_at`/`updated_at` and no `set_updated_at()` trigger. `ts_tutup` and `ts_buka` already answer the useful question, and nothing else about the row changes.
-- `truncateMaster` deletes `periode` before `users` (it references both actor columns). Getting this wrong does not fail a later test's insert — it silently refuses its posting.
+- Second module touching no stock; every consequence `pembayaran_utang` draws from that applies unchanged — no `DIAJUKAN`, two-person control in the route split, caches recomputed from one statement. `DRAFT → POSTED → BATAL`.
+- Same three rules, same uncashed-giro trap: `CairkanGiro` is what moves `status_pembayaran`, and the remaining-balance check runs again at clearing.
+- **A `TUNAI` nota may never receive an allocation — no counterpart on the payable side to copy.** `pembelian` has no cash/credit split; every purchase behaves like a `KREDIT` one until paid. `periksaSisaPiutang` refuses a `TUNAI` nota **by name** (`"penjualan ini TUNAI, tidak pernah jadi piutang"`), not with "sisa piutang habis" — it never had a balance, since `RecalculateStatusPembayaran` marks it `LUNAS` the instant it posts. This is also why `penjualanAlokasiEfektif` never has to special-case `jenis_pembayaran`: nothing can allocate against a `TUNAI` nota, so the predicate only ever sees `KREDIT` rows.
+- **`penjualanKreditRetur` is a named zero (`0::NUMERIC(20, 2)`), not a bare literal.** The payable side needed `nilai_kredit_utang` as a column because harga pokok carries freight the supplier never received; `retur_penjualan_detail` has carried both `harga_satuan_input` and `hpp_satuan_dasar` since `000006`, so a sales return's credit will most likely just be its own total. Wired into `RecalculateStatusPembayaran`, `PiutangBerjalan`, and `FindPiutangPelanggan`, so the day `retur_penjualan` exists **one fragment changes and none of the three callers do.**
+- **`PenjualanRepository.RecalculateStatusPembayaran` is a full cache now.** `TUNAI` → `LUNAS` unconditionally (only ever called for a `TUNAI` nota once, at `Posting`, before the header's status flips). `KREDIT` → `BELUM`/`SEBAGIAN`/`LUNAS` from `penjualanAlokasiEfektif + penjualanKreditRetur` against `p.total`. Four callers, same count as the payable side.
+- **`PiutangBerjalan` and `FindPiutangPelanggan` both gained the same subtraction**, closing a ratchet: before this module `PiutangBerjalan` summed raw `total` with nothing to reduce it, so `plafon_kredit` could only ever be consumed, never freed. `FindPiutangPelanggan`'s response shape is unchanged — only what feeds `sisa_piutang` got real.
+- `FindSisaPiutang` mirrors `FindSisaUtang`, called only after `LockByID` — the lock is what stops two payments both reading the same remaining balance. It additionally returns `JenisPembayaran`, which `SisaUtang` has no counterpart for.
+- `HasPostedAlokasi` is wired into `PenjualanUseCase.Batal` the way the payable one is into `PembelianUseCase.Batal`.
+- **The `plafon_kredit` race is still not closed**, and isu #20 says so explicitly rather than implying otherwise. Two `KREDIT` notas posted at the same moment can both pass `periksaPlafon`; the fix would be an advisory lock keyed on `id_pelanggan`, the shape `KunciSaldo` uses for `(id_barang, id_ruang)`.
+- Borrows only `PenjualanRepository`, never `PelangganRepository` — the shape `PembayaranUtangUseCase` has with `PembelianRepository`. `id_pelanggan` is validated by the foreign key alone.
+- Prefix `PP`.
 
 ### Mutasi antar ruang (migration 000018)
 
-Isu #7. Goods moving from one `ruang` to another — the fourth document to write `kartu_stok` and the first to write **in both directions at once**. The tables came from migration `000007` and `'MUTASI_KELUAR'`/`'MUTASI_MASUK'` have been in `jenis_transaksi` since `000002`, so **no `ALTER TYPE`**; `000018` adds the status CHECK, the cancellation columns, `mutasi_status_idx`, and a `(tanggal DESC, id DESC)` index.
+Goods moving between rooms — the first document writing `kartu_stok` **in both directions at once**. Tables from `000007`, enum values since `000002`, so **no `ALTER TYPE`**; `000018` adds the status CHECK, cancellation columns, and indexes.
 
-`Create` and `Update` validate `id_ruang_asal` — never `id_ruang_tujuan` — against the caller's active `unit_kerja` (isu #12 fase 5): cross-unit transfers stay allowed, only the room goods are said to be leaving is checked. See "`id_ruang` validated against the active unit" below. `Get` and `List` inherit the identical source-only asymmetry on the read side (fase 6) — see "Read-path scoping" below.
-
-- **One `mutasi_detail` line is two `kartu_stok` rows, in one transaction.** That is migration `000007`'s own description of the table. Splitting it into two documents would let goods leave the warehouse without ever entering the shop, with nothing holding the halves together. Goods appearing with no origin are not a mutasi at all — that is `stok_opname`, and `SO_SURPLUS`/`SO_DEFISIT` are waiting for it.
-- **The incoming row is valued at exactly `nilai_keluar` from the outgoing row, read back from `RETURNING`.** This is the module's whole correctness argument and the most expensive thing to get wrong. Migration `000007` states the rule — cost follows the source room or moving goods changes the value of inventory — but the application *cannot compute that cost*: the source room's moving average is known only to `kartu_stok_hitung_saldo`, which reads it inside the advisory lock, and the trigger overwrites `nilai_keluar` and `harga_pokok_satuan` on every outgoing row anyway. So the order of the two inserts is forced, and the constraint is what makes it right. `ReturPembelianUseCase.Batal` fills `NilaiMasuk` from a `NilaiKeluar` for the same reason.
-- **`mutasi_detail.harga_pokok_satuan_dasar` is written at posting, not at draft**, from what the outgoing row reported. The column is nullable precisely for that. A cost typed on a draft is the average at draft time, which is a different number and wrong in a way nobody would notice.
-- **No `DIAJUKAN`, and the reason differs from `pembayaran_utang`'s.** `DRAFT → POSTED → BATAL`, seven endpoints instead of nine. The rule for the other three stock writers is that an append-only ledger makes a wrong posting unrepairable, so it buys an approval stage. Mutasi's mistake is far cheaper: goods recorded in the wrong room, while **total stock and total inventory value do not move at all** — no outside party, no money, and the correction is another mutasi the same person may already write. `pembayaran_utang` drops the stage because voiding leaves no residue; mutasi's cancellation *does* leave residue. The justification is the size of the bet, not the tidiness of the undo.
-- **Dropping `DIAJUKAN` moves the entire two-person control into the route table**, which is why that split matters more here than it looks: `INVENTARIS` reaches `DRAFT`, `SUPERADMIN` posts and voids. The cost is that there is no "this draft is ready" signal — `DRAFT` means both "still being typed" and "please post it" — so the list endpoint **must** be able to filter `status=DRAFT`, and `terlama_dulu` orders it oldest first like `GET /supplier/{id}/utang`, because a queue is read to be worked through. If that turns out not to be enough, add `DIAJUKAN`; adding a value to `mutasi_status_check` is far cheaper than removing one would have been.
-- **Two advisory locks in one transaction, which is a real ABBA.** The trigger locks per `(id_barang, id_ruang)` and a mutasi takes two for the same product, ordered by which way the goods go — so two opposite transfers deadlock. Impossible before this module, since every other document touched one room. `KartuStokRepository.KunciSaldo` takes them all up front in canonical order; the alternative (map `40P01` to a 409 and ask the client to retry) hands a real defect to whoever is at the counter. `TestMutasiBerlawananArahTidakDeadlock` fails with `deadlock detected` on every run without it, so it is a real test rather than a decorative one.
-- **The periode lock is taken first, uniformly**, because that is the order the trigger takes them on every insert. A writer that pre-locks balances without it opens a different cycle: a book closing queued for the exclusive periode lock, a posting holding it shared and waiting on our balance lock, and us queued behind the closing. `PeriodeRepository.LockShared` exists only for that.
-- **Cancellation is not symmetric in value, and cannot be made so.** The row leaving the destination room is valued at that room's current moving average, which may have shifted. So a transfer and its void always cancel in quantity and not always in value — the same limitation already recorded for `pembelian`. It can also be **refused outright**: if the goods have since left the destination room, the reversing row drives that balance negative and the trigger says no. That is correct, and the remedy is another mutasi.
-- **The same product may appear on two lines**, unlike `penerimaan_susulan`, `retur_pembelian`, and `pembayaran_utang`, which each forbid it with a unique index. There the quota is held on a parent line and two rows each pass alone; here the quota is the source room's balance, the usecase sums lines per product before checking, and the trigger checks every insert. Two lines in different input units are a legitimate way to type a transfer.
-- **Both rooms may change while `DRAFT`**, unlike `pembayaran_utang`, which keeps `id_supplier` out of its update DTO. No `mutasi_detail` row names a room, so nothing is left pointing at the wrong place. The `id_ruang_asal <> id_ruang_tujuan` check is checked against the **stored** row, not the patch: moving only one of the two can collide with the other one already there.
-- `periksaSaldo` is for the message, not the guard — same relationship `periksaPeriode` has to a closed period. It runs *after* `KunciSaldo`, which is what makes the figure it reports actually true for the rest of the transaction rather than merely friendlier.
-- No money column anywhere: no subtotal, discount, PPN, freight, or koli. `pembelian_alokasi.go` has nothing to offer and `math/big.Rat` is needed only to convert quantities. Prefix is `MT`.
-
-### Unit kerja and location-bound authority (migration 000019, isu #12)
-
-Isu #12 proposes answering not just *who* but *acting as what, and where* — a
-work-context system where `user_role` grants a role at a specific `unit_kerja`,
-and a session carries exactly one grant as its active context. The full
-proposal is six phases, and **this codebase has all five that were
-scoped**: the decisions, the `unit_kerja` master and `ruang.id_unit_kerja`
-(phase 2), `user_role.id_unit_kerja` itself with its `NULL`-safe `ReplaceRoles`
-diff and the `grants` DTO (phase 3, migration `000020`), active session
-context via `POST /api/v1/auth/switch-context` (phase 4, no migration — see
-"Konteks aktif per sesi" below), and `id_ruang` validated against the active
-unit on write paths (phase 5, no migration — see "`id_ruang` validated
-against the active unit" below). Phase 6 — read-path scoping and a
-role-as-snapshot column on documents — was explicitly deferred by the issue
-itself, not overlooked; see that section for why.
-
-Three decisions the issue asked to make now, even before the phases that need
-them are built, because two of them touch tables every stock-writing module
-already depends on and the price of deciding late is a breaking change to
-numbers already printed on paper:
-
-- **`document_counter` gets a per-unit series.** The key becomes `(prefix,
-  id_unit_kerja, tahun, bulan)` rather than `(prefix, tahun, bulan)`, so a
-  document number is traceable to the outlet that issued it. **Not
-  implemented yet** — `DocumentCounterRepository.Next` still keys on the old
-  triple, and every transaction module still reserves numbers the old way.
-  Change the key before any two real outlets start sharing one series: once a
-  number is on paper in a supplier's hands, the key cannot change under it.
-- **`periode` stays global**, not per `unit_kerja`. One close/open per
-  `(tahun, bulan)` for the whole company. The alternative — an outlet closing
-  August while another is still posting into it — produces a consolidated
-  report that cannot be explained, and nothing in this codebase asks for that.
-  If a real need for per-unit closing shows up later, `periode` gains
-  `id_unit_kerja` and the `kartu_stok` trigger's advisory-lock key
-  (`'periode:' || tahun || '-' || bulan`, duplicated between migration
-  `000017` and `periodeLockKey`) has to grow the unit into that same
-  expression on both sides, or one side stops waiting for the other.
-- **Cross-unit `mutasi` is allowed.** A transfer's `id_ruang_asal` and
-  `id_ruang_tujuan` may belong to different `unit_kerja` — moving stock
-  between outlets is exactly what `mutasi` is for, and restricting it to one
-  unit would leave no document for the ordinary case of restocking a branch
-  from the central warehouse. Nothing about `mutasi`'s posting changes: it
-  stays partitioned by `(id_barang, id_ruang)`, never by unit.
-
-**This is not `users.role_active` revived.** "Users and roles" below says
-plainly not to reintroduce that column, and the reason still holds: it was
-`UNIQUE` across the whole table rather than per user, and its FK pointed at
-`user_role (id)` without `user_id`. Phase 3 does add a column to `user_role`
-(`id_unit_kerja`), but nothing on `users` itself, and the mechanism is entirely
-different: a grant is a row a caller *holds*, not a pointer to "the" active
-one — a user can hold the same role at two units simultaneously as two rows,
-which `role_active` structurally could not express even before its bug. Phase
-4's active-context claim (see "Konteks aktif per sesi" below) confirms the
-shape: it lives in the JWT, not in a column on `users`, and a session's active
-grant is one row of `user_role` copied into the token — never a pointer stored
-server-side.
-
-**`unit_kerja` is a plain master slice — follow `supplier`.** Nullable
-case-insensitive unique `kode` (`unit_kerja_kode_lower_uidx`), PATCH presence
-semantics via `Optional[T]`, retirement with `is_aktif = false`, no `DELETE`.
-It carries no telephone/address/NPWP — just `kode`, `nama`, `is_aktif`, and the
-usual audit columns — so its shape is closer to `satuan`, but it follows
-`supplier`'s `ExistsByKode` (optional, checked only when supplied) rather than
-`satuan`'s `ExistsByNama` (required, unique). `nama` is **not** unique.
-
-**`ruang.id_unit_kerja` is `NOT NULL`, and the backfill lives in the migration,
-not the seeder.** A `ruang` with no unit is a `ruang` nobody can decide is
-theirs to use, so the column is required from the start rather than eased in.
-The migration itself creates one default unit (`kode = 'PUSAT'`, `nama = 'Unit
-Utama'`) and points every existing `ruang` row at it inside the same
-transaction, *before* adding the `NOT NULL` — that is what makes the migration
-safe on a database that already has `ruang` rows, not only on a fresh one.
-Relying on a seeder for the backfill would only ever have been safe for a
-fresh database, since a seeder is never guaranteed to run before a later
-migration's `NOT NULL` lands on a database upgrading in place. `001_ruang.sql`
-was updated to point its five rows at `'PUSAT'` by lookup, not by a hardcoded
-id, since the migration makes no promise about which id that default row gets.
-
-`RuangUseCase.Create` validates `id_unit_kerja` names an active `unit_kerja`
-before writing — the same reasoning as `RoleRepository.CountActiveByIDs` for
-role grants: the foreign key alone cannot tell a retired unit from a live one,
-and its message names a constraint instead of the field. `ruang` still has no
-`PATCH`, so a room's unit cannot be changed through the API — that was already
-true before this issue and phase 2 did not need to add it.
-
-### Wewenang bertempat: `user_role.id_unit_kerja` (migration 000020, isu #12 fase 3)
-
-A grant is now the pair `(role, unit_kerja)`, not just a role. `NULL` means "every
-unit" — the shape the seeded `SUPERADMIN` grant takes, and the shape every grant
-made before this migration keeps, since the column was added with no default.
-`user` is the module that owns this: granting and revoking happen while editing
-a user (`ReplaceRoles`), never while editing a role, same as before this phase.
-
-**Two unique indexes, not one, because a unique index does not constrain
-`NULL`.** `user_role_grant_uidx` on `(user_id, role_id, id_unit_kerja)` covers
-every scoped grant, but PostgreSQL treats `NULL <> NULL`, so that index alone
-would let ten identical *global* grants for the same `(user, role)` pair sit in
-the table at once. `user_role_grant_global_uidx` — a partial index
-`(user_id, role_id) WHERE id_unit_kerja IS NULL` — is what actually closes that
-gap. Both are required; dropping either one reopens a different hole.
-
-**The same role may now be held at more than one unit, as two distinct rows.**
-"INVENTARIS at outlet A" and "INVENTARIS at outlet B" are not a duplicate to
-collapse — they are two grants, and both indexes above are built around that
-being legal. Everywhere a single row used to mean "this user has this role", it
-now means "this user has this role, possibly several times, each at a
-different place or nowhere in particular."
-
-**`ReplaceRoles`'s diff had to become `NULL`-safe, and the old code could not
-have been patched in place.** The delete used to be `role_id <> ALL($2)` — that
-comparison is `NULL` (not `TRUE`) whenever either side is `NULL`, so a plain
-port to `(role_id, id_unit_kerja) <> ALL(...)` would silently keep every global
-grant no matter what the replacement set said, because a `NULL` id_unit_kerja
-can never prove itself `<>` anything. The fix is `NOT EXISTS (... WHERE
-t.role_id = ur.role_id AND t.id_unit_kerja IS NOT DISTINCT FROM
-ur.id_unit_kerja)` — `IS NOT DISTINCT FROM` is the one comparison PostgreSQL
-defines to treat two `NULL`s as equal. `TestUserRevokingGlobalGrantActuallyDeletesIt`
-pins exactly this: revoking a user's only (global) grant down to `[]` must
-leave zero `user_role` rows, not one nobody can prove should be gone.
-
-**The insert is two statements, not one, for the same underlying reason.** A
-single `INSERT ... ON CONFLICT` names exactly one arbiter index, and a scoped
-grant and a global grant are protected by two different ones. `ReplaceRoles`
-therefore filters its input in Go — rows with a non-nil `IDUnitKerja` go
-through `ON CONFLICT (user_id, role_id, id_unit_kerja) DO NOTHING`, rows with a
-nil one go through `ON CONFLICT (user_id, role_id) WHERE id_unit_kerja IS NULL
-DO NOTHING` — rather than trying to make one statement's arbiter clause satisfy
-both indexes at once, which PostgreSQL has no syntax for.
-
-**The DTO changed shape, not just name.** `role_ids` (`Optional[[]int64]`)
-became `grants` (`Optional[[]model.GrantRequest]`), where `GrantRequest` is
-`{id_role, id_unit_kerja}` and `id_unit_kerja` is an optional, nullable
-pointer. Keeping the old key name on a payload that no longer holds bare ids
-would have been the misleading choice. The three-state presence semantics are
-unchanged: absent leaves grants alone, `[]` revokes everything, a list
-replaces the whole set — and deduplication is now by the `(id_role,
-id_unit_kerja)` pair (`usecase.toGrants`), not by id alone, so
-`[{id_role:1},{id_role:1,id_unit_kerja:2}]` is two grants, not one collapsed
-into a conflict. `model.Optional[[]model.GrantRequest]` is registered in
-`config.NewValidator` alongside the other `Optional` instantiations, or its
-`dive` tag would silently stop validating each `GrantRequest`'s own fields —
-the mechanism `TestValidatorDivesIntoOptionalSlice` already pins for
-`Optional[[]int64]` extends here without changes to the validator itself,
-because `dive` descends into struct fields automatically once
-`WithRequiredStructEnabled()` is set.
-
-**`id_unit_kerja` is validated active independently of `id_role`, with its own
-message.** `UserUseCase.requireActiveGrants` runs `RoleRepository.CountActiveByIDs`
-against the distinct role ids and, only if any grant names a unit,
-`UnitKerjaRepository.CountActiveByIDs` against the distinct unit ids — two
-separate counts because a bad role and a bad unit are different problems, and
-collapsing them into one message would leave an operator guessing which field
-to fix. Both are pre-checks only; `invalidOnForeignKey` remains the backstop
-for the race where a role or unit is retired between the check and the write.
-
-**`FindRolesByUserIDs` still costs one query for a whole page**, `LEFT JOIN
-unit_kerja` added alongside the existing `JOIN role`. A grant whose unit was
-retired after being granted is still returned — same rule as a retired role —
-because the grant is still real and still needs revoking; `RoleRef.IsAktif`
-already told the role story, and `RoleRef.IsAktifUnitKerja` is its counterpart
-for the unit, added in phase 4 alongside `IDUserRole` once the grant's own row
-identity and its unit's liveness both turned out to matter beyond just this
-view — see "Konteks aktif per sesi" below for what needs them.
-
-**`db/seeder_postgres/004_superadmin.sql`'s `ON CONFLICT` had to change target.**
-It used to name `(user_id, role_id)`, matching the bare index this migration
-drops. It now names `(user_id, role_id) WHERE id_unit_kerja IS NULL` — the
-partial index — since the seeded grant is, and must stay, global.
-
-Phase 3 ends here; phase 4 (active session context) is its own section below,
-and phase 5 (`id_ruang` validated against the active unit on write paths)
-remains future work under the same issue.
-
-### Konteks aktif per sesi: `switch-context` (isu #12 fase 4, no migration)
-
-Phase 3 made a grant `(role, unit_kerja)`; phase 4 is what makes a **session**
-answer "acting as which one, right now" — a token now authorizes as **one**
-active grant rather than the union of everything the user holds. No schema
-change: this phase lives entirely in the JWT claims and the two usecases that
-mint them, `Login` and the new `SwitchContext`.
-
-- **`model.Grant` and `model.ActiveContext` are the one pair of types for
-  three jobs.** They are the JWT claim shape, `Session`'s own fields, and what
-  `LoginResponse`/`SessionResponse` hand a client — the same struct, tagged
-  once, rather than three shapes kept in sync by hand. `claims.Grants
-  []model.Grant` and `claims.Aktif *model.ActiveContext` decode straight into
-  `Session.Grants`/`Session.Aktif` with no intermediate conversion; only
-  `entity.RoleGrant` (the database-shaped version, keyed by `Role Role` and
-  carrying `IsAktifUnitKerja`) needs `usecase.toGrantList`/`toActiveContext` to
-  cross into it.
-- **`Session.HasRole` compares the active grant alone, never the full list.**
-  `s.Aktif != nil && strings.EqualFold(s.Aktif.Role, name)` — that one-line
-  change is the entire enforcement mechanism. `RequireRole` and every guard in
-  `route.go` are **byte-for-byte unchanged**; a session with `Aktif == nil`
-  fails every `RequireRole` check by construction, because `HasRole` has
-  nothing to compare against. That is the measure the issue itself proposed
-  for whether the design fit, and it does: **grep confirms zero lines changed
-  in `middleware/auth.go` or `route.go`'s guards** for this phase.
-- **Login auto-selects when there is no ambiguity, and refuses to guess
-  otherwise.** Exactly one usable grant becomes the active context
-  automatically — the ordinary case, one person, one role, one place. Two or
-  more issues a token with `Aktif: nil`, which authorizes nothing at all until
-  `switch-context` is called. There is no default among several grants that
-  would not risk someone acting under an authority they did not realize they
-  had picked, so none is chosen. A session with `Aktif == nil` can still reach
-  `auth/me` and `switch-context` — both are open to any authenticated caller
-  and need no special case for this, since neither carries a `RequireRole`
-  guard to begin with.
-- **`attachRolesForLogin` now filters on unit activity too, via
-  `grantUsableBy`.** Before phase 3 it only excluded a retired role; a grant
-  scoped to a retired `unit_kerja` is equally unusable and must not become the
-  active context, appear in the switcher menu, or count toward "exactly one
-  grant". `grantUsableBy` is the single predicate both `Login`'s filtering and
-  `SwitchContext`'s validation share, so the two can never drift on what
-  "usable" means.
-- **`SwitchContext` re-reads the grant from the database — the one place in
-  the whole design a token's claims are not trusted.** Everywhere else,
-  authorization is purely a claims read, which is the entire point of
-  choosing stateless JWT. Here it cannot be: the caller is naming a grant by
-  id, and a stale token could name one that has since been revoked, or whose
-  role or unit has since been retired. `UserRepository.FindGrantByID` +
-  `grantUsableBy` (ownership, role active, unit active-or-absent) is that
-  check, and it runs against the database at request time — a deliberate,
-  narrow exception to "no per-request lookup", scoped to exactly one endpoint.
-- **Every rejection reason collapses to one 403.** Grant does not exist,
-  belongs to another user, role retired, unit retired — `SwitchContext`
-  answers `model.Forbidden("grant does not exist or is not usable")` for all
-  four, the same reasoning `Login` already applies to an unknown username:
-  distinguishing them would let a caller probe which grant ids exist for
-  other users.
-- **`SwitchContext` takes a `userID int64`, not a `*model.Session`.** The
-  usecase layer needing only the caller's id — not the whole session object —
-  is what it actually needs; the controller extracts it via
-  `middleware.SessionFrom` and passes the bare id down, the same shape
-  `product_controller.go` already uses for `created_by`.
-- **Switching context cannot revoke the token being switched away from, and
-  is not trying to.** `SwitchContext` mints a brand new token; the old one is
-  still signed, still unexpired, and still authorizes exactly what it did the
-  moment it was issued. This is not a bug being tolerated — it is the same
-  "tokens cannot be revoked" limitation stated in "Authentication and
-  authorization" above, restated here because switch-context is exactly where
-  someone might assume otherwise. `jwt.ttl_minutes` is the only bound, same as
-  everywhere else. **Do not "fix" this with a Redis blacklist** — same
-  rejection as the general case, for the same reason: it reinstates the
-  per-request lookup JWT was chosen to avoid.
-- **This is not a security boundary against the token's own holder.** Active
-  context is a *least-privilege and clarity* control — it stops someone from
-  acting under an authority they forgot they were holding, not from a caller
-  who already has a token doing anything that token's claims allow. Holding a
-  token that carries a CASHIER-at-outlet-A grant and an INVENTARIS-at-outlet-B
-  grant means both are yours; switching only changes which one is *active*,
-  never what you are entitled to switch to.
-- **`TestAlgNoneTokenIsRejected` and `TestRouteGuardsRunBeforeHandler` needed
-  no changes** beyond updating the literal claims/session values they
-  construct to the new shape — pinned in the DoD precisely because a passing
-  test here is what proves phase 4 did not quietly touch the security
-  primitives the issue promised to leave alone.
-
-Phase 4 ends here. Phase 5 — validating `id_ruang` against the active unit —
-is its own section below. Phase 6 — read-path scoping, built afterwards once
-it was proven necessary — is the section after that.
-
-### `id_ruang` validated against the active unit (isu #12 fase 5, no migration)
-
-The last phase. `unit_kerja → ruang` is one-to-many — an outlet with both a
-warehouse and a shopfront has two rooms in one unit — so knowing the active
-unit is never enough to infer *which* room a document means. The client still
-picks; what changes is that the id it sends is checked, not merely offered
-from a filtered list.
-
-- **Two decisions were made before writing any of this, both explicit
-  trade-offs rather than defaults, and both open questions in the issue
-  itself:**
-  - **Write paths only, at the time. Reads stay exactly as open as before —
-    for now.** Every list and get endpoint is unfiltered by unit at the end
-    of this phase, same as every phase before it. The issue frames this as
-    the two-day-versus-three-week fork and recommends exactly this for a
-    first pass — scoping reads means touching every list endpoint's filter
-    constant and its `COUNT` twin, and one missed pair makes `total_item`
-    disagree with the rows. Reads were scoped afterwards, once asked for, as
-    phase 6; see that section for what changed and what didn't need to.
-  - **`mutasi` checks `id_ruang_asal` only, never `id_ruang_tujuan`.**
-    Phase 1 already decided cross-unit transfers are allowed, and the active
-    unit is exactly one unit — requiring *both* rooms to match it would make
-    every mutasi this check permits same-unit in practice, quietly reversing
-    that decision. Checking the source room alone matches the real
-    authority being asserted: an INVENTARIS person is vouching that goods are
-    leaving a room they are responsible for; where those goods land is not a
-    claim about their own authority.
-- **`periksaRuangUnitAktif` (`usecase/shared.go`) is the one function every
-  call site shares**, the same role `periksaPeriode` plays for closed
-  months — except this one guards nothing on the database side, because
-  `ruang.id_unit_kerja` cannot change after a room is created (`ruang` has no
-  `PATCH`). There is no race to be defensive about; the check is simply
-  correct once and stays correct. A `nil` `aktifIDUnitKerja` — the caller's
-  active grant applies everywhere, or (defensively) there is no active
-  context at all — skips the check entirely, the same reading `id_unit_kerja
-  IS NULL` already carries everywhere else in this codebase. An unknown
-  `id_ruang` is deliberately let through (returns `nil`): that failure
-  belongs to the foreign key, not to this check.
-- **Validation, not a default — the same rule `created_by` already
-  follows.** `AktifIDUnitKerja *int64` rides on `CreatePembelianRequest`,
-  `CreateMutasiRequest`, and `UpdateMutasiRequest`, filled by the controller
-  from `session.Aktif.IDUnitKerja` via the new `aktifIDUnitKerja(ctx)`
-  helper — never from the body, and never used to silently substitute a room
-  the client didn't ask for. A server that filled in a default while still
-  accepting whatever `id_ruang` the body sent would make the scoping
-  decorative; `id_ruang` is used exactly as sent, or the write is refused
-  403.
-- **Only two modules have `id_ruang` in their own request body at all —
-  `pembelian` and `mutasi` — so only they gained this check.**
-  `penerimaan_susulan` and `retur_pembelian` copy `id_ruang` from the parent
-  `pembelian`'s own header, never accept one in their own body, so the
-  parent's Create already validated it; checking again on the child would be
-  redundant at best and wrong if it ever re-read a stale copy. `pembelian`'s
-  own `PATCH` has no `id_ruang` field to begin with (unchanged from before
-  this issue), so only `Create` needed the check there; `mutasi` needed it on
-  both `Create` and `Update`, since "both rooms may change while `DRAFT`" (see
-  "Mutasi antar ruang" above) already lets `id_ruang_asal` move after
-  creation.
-- **`mutasi`'s `Update` only checks when `id_ruang_asal` is actually present
-  in the patch, and only the new value** — mirroring the existing
-  `id_ruang_asal <> id_ruang_tujuan` check just above it, which is checked
-  against the *effective* value (patch value if present, else the stored
-  one) for the identical reason: a patch that never touches the field cannot
-  have broken anything, and re-validating a stored value that cannot have
-  changed (`ruang` has no `PATCH`) would be pure waste.
-- **`RuangRepository.IDUnitKerjaByID`** is a one-column read, not
-  `FindByID`'s join — this check needs only the unit id, and pulling `kode`,
-  `nama_ruang`, `is_aktif`, and a name lookup along for a fact nobody asked
-  for would be waste on a path every `pembelian`/`mutasi` write now takes.
-- **`PembelianUseCase` and `MutasiUseCase` each borrow `RuangRepository`** for
-  exactly this one query, the same "borrow a repository for a narrow read"
-  shape `UserUseCase` already uses for `UnitKerjaRepository` and
-  `SupplierUseCase` for `PembelianRepository`.
-- **`users.id_ruang_default` was deliberately not built.** The issue raises
-  it explicitly as a possible convenience — saving the client one field on
-  every request — and just as explicitly warns not to confuse it with this
-  authorization boundary: one saves typing, the other is what stops a write
-  from naming a room outside the caller's authority. Add it only if the
-  convenience is actually asked for, and never let it double as validation.
-- **This does not close isu #12 outright** — the five load-bearing phases are
-  built: the decisions, the `unit_kerja` master and `ruang.id_unit_kerja`,
-  `user_role.id_unit_kerja` with its `NULL`-safe diff, active session context
-  via `switch-context`, and `id_ruang` validated against it. What the issue
-  left explicitly optional (phase 6, "baru kalau terbukti perlu") bundled
-  three independent pieces; read-path scoping was the one asked for and is
-  its own section next. `users.id_ruang_default` and a role-as-snapshot
-  column on transaction documents remain deferred, not overlooked.
-
-### Read-path scoping (isu #12 fase 6, no migration)
-
-The optional phase, built after being explicitly asked for rather than
-inferred as "obviously also needed." The issue bundles three independent
-pieces under phase 6 and says to build none of them until proven necessary;
-only the first was — the other two (`users.id_ruang_default`, a
-role-as-snapshot column on transaction documents) are still deferred.
-
-- **What "scoped" means depends on the shape of the read, and conflating
-  them is the mistake to avoid.** A `Get` answers **404**, not 403, for a
-  resource outside the caller's active unit — the same one the room's own
-  foreign key would produce for an id that never existed, on purpose: a
-  scoped read has to make "outside your unit" and "does not exist" the same
-  fact from the caller's side, or the 403 case itself confirms the resource
-  is real. A `List` (and `product/{id}/stok`, which has list shape) simply
-  **omits** rows outside the unit, silently, the same way a page with no
-  matches always looks — there is no id to 404 against and nothing to
-  confirm or deny.
-- **`diLuarUnitAktif` (`usecase/shared.go`) is the read-side counterpart of
-  `periksaRuangUnitAktif`** from phase 5, and deliberately a separate
-  function rather than a shared one: the write-side check returns
-  `model.Forbidden`, and reusing it for reads would make a scoped Get leak
-  exactly the fact it exists to hide. `diLuarUnitAktif` returns a bare
-  `bool`; every call site maps `true` to `model.NotFound` itself, so the
-  403-shaped mistake has to be written out loud at each site rather than
-  inherited by accident. A `nil` `aktifIDUnitKerja` excludes nothing — the
-  same reading `nil` carries everywhere else in this codebase.
-- **Every scoped module gained one column read alongside the document
-  already being read, never a second query.** `pembelian`, `penerimaan_susulan`,
-  and `retur_pembelian` each carry an unexported `IDUnitKerjaRuang int64` on
-  their entity, filled by joining `ruang.id_unit_kerja` into the same read
-  query that already joins `ruang` for its name — `pembelianReadColumns`,
-  `susulanReadColumns`, and `returReadColumns` each gained one column, and
-  their `scanXRead` gained one scan target. `mutasi` is the same shape but
-  named `IDUnitKerjaRuangAsal`, joined from `asal.id_unit_kerja` rather than
-  `ruang.id_unit_kerja` — see below for why only that one room.
-- **The `detail()` helper every write-path re-read goes through is where the
-  check actually lives, threaded as a parameter rather than read from
-  ambient state.** `pembelian`, `penerimaan_susulan`, `retur_pembelian`, and
-  `mutasi` each already had a `detail(ctx, db, id)` helper — `Get` was one of
-  several callers, alongside every posting/approval action that re-reads its
-  own document to build a response. All four gained an `aktifIDUnitKerja
-  *int64` parameter: `Get` (and, on `pembelian`, `Sisa`) passes the caller's
-  real active unit; every write-path call — `Create`'s re-read, `Ajukan`,
-  `Posting`, `Tolak`, `Batal`, `ReplaceDetail`, `BagiRataKoli` — passes `nil`.
-  The reasoning is the same as `periksaRuangUnitAktif`'s write-side check
-  running only on the fields actually being written: a caller who just
-  posted a document is, by construction, allowed to see the response posting
-  produced, whatever their active unit is at that moment. Scoping the
-  write-path re-read would make a legitimate action's own response look like
-  a 404.
-- **A filter clause that reaches a joined table forces the `COUNT` query to
-  join it too, and three of the four modules had to change for exactly
-  that.** `pembelianFilter`, `susulanFilter`, and `returFilter` each gained a
-  `$N::BIGINT IS NULL OR ruang_alias.id_unit_kerja = $N` clause, and each
-  module's `Search` had been running its `COUNT` against a bare `FROM table`
-  that never reached `ruang` — because nothing before phase 6 needed to.
-  Changing the `COUNT` query to use the same `xFrom` constant as the row
-  query is what "write the filter once, and both queries use it" (see
-  "PostgreSQL specifics" below) actually requires once the filter itself
-  reaches a join. `mutasi` needed the identical fix to its own `Search`,
-  even though `mutasiFrom` already joins both rooms unconditionally for the
-  room *names* — the `COUNT` query had never used `mutasiFrom` either, for
-  the same reason.
-- **`mutasi` checks `id_ruang_asal` only, never `id_ruang_tujuan` — the read
-  side inherits the identical asymmetry phase 5 already made on the write
-  side, for the identical reason.** Requiring both rooms to match the active
-  unit would make every mutasi this scoping lets through same-unit in
-  practice, quietly re-deciding that cross-unit transfers are allowed (isu
-  #12 fase 1). A transfer whose destination sits in a different unit than
-  the caller's stays fully visible to whoever owns the source room; a caller
-  who only owns the destination cannot see it at all, even though the goods
-  are headed there. That is deliberate: visibility follows the room a
-  caller is asserting authority over, not every room a document happens to
-  touch. `TestMutasiGetVisibleWhenOnlyDestinationRuangOutsideActiveUnit`
-  pins exactly the case a reader arriving from the other three modules would
-  expect to be scoped and isn't.
-- **`GET /product/{id}/stok` is scoped too, but it is a list-shaped read, not
-  a `Get`, and the fix landed in `KartuStokRepository.SaldoPerRuang` rather
-  than in a `detail()`-style helper.** The filter sits on the *outer* query,
-  after the `DISTINCT ON (ks.id_ruang)` subquery has already picked one row
-  per room — filtering a room out earlier could, in principle, only change
-  which room wins each `DISTINCT ON` group, and since the key is the room
-  itself, it cannot actually change any row that survives. Keeping the
-  filter outside is what makes that true by construction rather than by
-  argument. Unlike a `Get`, there is no id to 404 against — a room outside
-  the active unit is just missing from the list, the same as a room the
-  product has never moved through.
-- **Query-string spoofing is closed the same way `ActorID` already is.**
-  Every `AktifIDUnitKerja` field added by this phase carries `json:"-"` on a
-  body-bound request or `query:"-"` on a query-bound one — Fiber v3's query
-  binder is `gorilla/schema` under an alias tag, and `query:"-"` is what
-  excludes a field from it, confirmed against the vendored binder source
-  rather than assumed. The controller then overwrites the field
-  unconditionally after binding, from `aktifIDUnitKerja(ctx)` (the existing
-  helper from phase 5), regardless of whether the tag alone would have been
-  enough — the same defense-in-depth `ActorID` already gets from
-  `middleware.SessionFrom`.
-- **Tests live in `fase6_read_scope_test.go`, one file spanning every scoped
-  module, rather than one file per module** — unlike phase 5, whose write-side
-  tests split naturally along `pembelian`/`mutasi`. A read scoped identically
-  across five different resource shapes is one behavior repeated five times,
-  and reading the five Get/List pairs together is what makes the one real
-  asymmetry — `mutasi`'s source-only check — legible as a deliberate
-  exception rather than a module that was simply forgotten.
-
-### Stok per ruang (no migration)
-
-`GET /api/v1/product/{id}/stok` — isu #7 fase 1, and the **first read of `kartu_stok` in the codebase**. `KartuStokRepository` had only `Insert`, `FindByRef`, and `HasRef`; nothing needed a balance until now, because purchases and follow-up receipts only add and a return's quota comes from an invoice line.
-
-- Three repository methods, built as their own phase because everything after this wants them: `SaldoTerakhir` (one pair), `SaldoBatch` (many pairs, one query, `unnest` of two arrays like `FindFaktorBatch`), and `SaldoPerRuang` (one product across rooms, backing the endpoint). `SaldoBatch` is what `pemakaian` and `penjualan` each use for their own negative-stock pre-check (`PemakaianUseCase.periksaSaldo`, `PenjualanUseCase.periksaSaldo`); `stok_opname` will need the same thing too.
-- **A pair with no rows is a balance of zero, not a missing record.** Same reading the trigger takes when it COALESCEs the previous row, and the same shape `periode` uses for a month nobody has closed. `SaldoTerakhir` returns the zero value; `SaldoBatch` simply omits the key.
-- **It is a read and never a guard**, and every call site has to keep treating it that way. The balance is decided inside the trigger under an advisory lock precisely so no reader can get in front of it.
-- Follows `riwayat_beli`: no table, no migration, the query lives in the repository that owns `kartu_stok`, and `ProductUseCase` borrows it for the resource the endpoint hangs off. **No pagination** — one row per room the product has moved through, `ruang` is small, and every caller wants all of them to pick a source room from.
-- Rooms the product has never been in do not appear; a room that emptied out still does, with zero. Unknown product is a 404, a product that has never moved is an empty list.
-- **`SaldoPerRuang` additionally scopes by the caller's active `unit_kerja` since isu #12 fase 6** — see "Read-path scoping" above for the mechanism and why the filter sits outside the `DISTINCT ON` subquery rather than inside it.
-
-### Riwayat harga beli (no migration)
-
-`GET /api/v1/product/{id}/riwayat-beli` — isu #4 fase 4, and the replacement for the purchase order this system deliberately does not have. It is the worked example of a **read that is not a module**: no table, no migration, no DTO to fill in, nothing that can fall out of step. Copy this shape rather than a slice when a request is answerable from documents that already exist.
-
-- **Nothing new is stored.** Every POSTED `pembelian_detail` row is already a price that was actually paid, which is worth more than a quotation because a quotation is only what was promised in a chat. Adding a table for this would create a second source of truth for a fact the first one already carries.
-- **The SQL lives in `pembelian_repository.go`, the endpoint hangs off product.** `ProductUseCase` borrows `PembelianRepository` the way `UserUseCase` borrows `RoleRepository` — the query is over another module's tables, so it stays in that module's repository. A usecase of its own would be a module for one query.
-- **Two prices, and collapsing them into one is the mistake to avoid.** `harga_satuan_dasar` (= `subtotal / qty_dasar`) is the invoice per base unit and is what a supplier's next quote is compared against; `harga_pokok_satuan_dasar` is after the nota discount, PPN share, and freight, and is what margin is judged against. Negotiating with the second holds the supplier responsible for the carrier's bill; costing with the first drops freight entirely.
-- `harga_satuan_input` is reported but is **not comparable**: it is per input unit, so 120.000/DUS and 10.000/PCS look nothing alike while being the same price.
-- **The product is looked up first**, so an unknown id answers 404 and a product nobody has bought answers an empty page. Those are different facts and a client that cannot tell them apart shows the wrong message.
-- **Only POSTED.** A DRAFT is a typed page and a BATAL is a purchase that was withdrawn; neither is a price anyone paid. One condition covers both, rather than a second clause excluding BATAL.
-- `DISTINCT ON (p.id_supplier)` is what makes it one row per supplier, and it forces the inner `ORDER BY` to lead with `id_supplier` — which is not a useful reading order, hence the wrapping query that re-sorts by date. The outer `ORDER BY` ends in `id_supplier`, unique across the subquery *because* `DISTINCT ON` made it so. The inner tiebreaker `d.id DESC` matters: one document may carry the same product twice.
-- The division is safe because `pembelian_detail_qty_dasar_check` makes `qty_dasar > 0`. Casting to `NUMERIC(20,4)` rounds halves away from zero, matching `formatNumeric` — a figure computed in SQL and one recomputed in Go have to agree.
+- **One `mutasi_detail` line is two `kartu_stok` rows, in one transaction.** Splitting it into two documents would let goods leave the warehouse without entering the shop, with nothing holding the halves together. Goods appearing with no origin are not a mutasi at all — that is `stok_opname`.
+- **The incoming row is valued at exactly `nilai_keluar` from the outgoing row, read back from `RETURNING`.** The module's whole correctness argument. Cost follows the source room, or moving goods changes the value of inventory — but the application *cannot compute that cost*: the source room's moving average is known only to `kartu_stok_hitung_saldo` inside its advisory lock, and the trigger overwrites `nilai_keluar`/`harga_pokok_satuan` anyway. So the order of the two inserts is forced.
+- **`mutasi_detail.harga_pokok_satuan_dasar` is written at posting, not at draft** (the column is nullable for that). A cost typed on a draft is the average at draft time — a different number, wrong in a way nobody would notice.
+- **No `DIAJUKAN`, for a different reason than `pembayaran_utang`'s.** Mutasi's mistake is cheap: goods recorded in the wrong room, while **total stock and total inventory value do not move at all** — no outside party, no money, and the correction is another mutasi the same person may write. `pembayaran_utang` drops the stage because voiding leaves no residue; mutasi's cancellation *does* leave residue. **The justification is the size of the bet, not the tidiness of the undo.**
+- **Dropping `DIAJUKAN` moves the two-person control into the route table**: `INVENTARIS` reaches `DRAFT`, `SUPERADMIN` posts and voids. The cost is that there is no "this draft is ready" signal, so the list endpoint **must** be able to filter `status=DRAFT`, and `terlama_dulu` orders it oldest first like `GET /supplier/{id}/utang`. If that is not enough, add `DIAJUKAN` — adding a value to `mutasi_status_check` is far cheaper than removing one would have been.
+- **Two advisory locks in one transaction, which is a real ABBA.** The trigger locks per `(id_barang, id_ruang)` and a mutasi takes two for the same product, ordered by direction — so two opposite transfers deadlock. `KartuStokRepository.KunciSaldo` takes them all up front in canonical order; mapping `40P01` to a 409 and asking the client to retry would hand a real defect to whoever is at the counter. `TestMutasiBerlawananArahTidakDeadlock` fails with `deadlock detected` without it.
+- **The periode lock is taken first, uniformly**, because that is the order the trigger takes them. A writer pre-locking balances without it opens a different cycle: a closing queued for the exclusive periode lock, a posting holding it shared and waiting on our balance lock, and us queued behind the closing. `PeriodeRepository.LockShared` exists only for that.
+- **Cancellation is not symmetric in value and cannot be made so** — the row leaving the destination room is valued at that room's current average. So a transfer and its void always cancel in quantity, not always in value. It can also be **refused outright** if the goods have since left the destination room; the remedy is another mutasi.
+- **The same product may appear on two lines**, unlike the quota-on-a-parent-line modules: here the quota is the source room's balance, the usecase sums lines per product before checking, and the trigger checks every insert. Two lines in different input units are a legitimate way to type a transfer.
+- **Both rooms may change while `DRAFT`** (no `mutasi_detail` row names a room). The `id_ruang_asal <> id_ruang_tujuan` check runs against the **stored** row, not the patch: moving only one of the two can collide with the other already there.
+- `periksaSaldo` is for the message, not the guard — it runs *after* `KunciSaldo`, which is what makes the figure it reports true for the rest of the transaction.
+- No money column anywhere. Prefix `MT`.
 
 ### Pemakaian internal (migration 000021, isu #9)
 
-Goods leaving for internal use — repair, office supplies, a sample — with no nota and no return. The fifth document to write `kartu_stok`, and the first that takes goods out with **no counterparty at all**: no supplier, no customer, no destination room. What survives is a record of who asked and what for.
+Goods leaving for internal use — no nota, no return, **no counterparty at all**. Tables and enum values predate it, so **no `ALTER TYPE`**; `000021` aligns the status vocabulary and adds the list index.
 
-The tables `pemakaian`/`pemakaian_detail` and the `'PEMAKAIAN'`/`'PEMBATALAN_PEMAKAIAN'` `jenis_transaksi` values have existed since migrations `000007`/`000002` — so **no `ALTER TYPE`**, same luck as `mutasi` in `000018`. `000021` only aligns the status vocabulary (`POSTED`/`BATAL`, the promise `000018` wrote down and left for this module to keep) and adds the `(tanggal DESC, id DESC)` list index. No unique index on `(id_pemakaian, id_product)` was added either — see below.
-
-- **What is posted is `qty_disetujui_dasar`, never `qty_dasar`, and getting this backwards is the single most expensive mistake in the module.** `qty_dasar` is what was asked for, frozen the moment a line is typed and never touched again — not even by approval. `qty_disetujui_dasar` is nil until `Setujui` and is the only thing `Posting` reads; 0 means that line was refused on its own even though the document as a whole was approved. Filling it at `Create` instead of `Setujui` would let a requester approve their own request through the back door.
-- **A line whose approved quantity is nil or zero is skipped at posting, never inserted as a `kartu_stok` row moving nothing.** `kartu_stok` must never carry a row with no movement. If every line ends up zero, posting is refused outright (400) — the nota was approved but nothing is actually leaving, and that is a rejection in substance, not an internal usage.
-- **The state machine has one stage more than `pembelian`, and one of the two differences from it is deliberate irreversibility.** `DRAFT → DIAJUKAN → DISETUJUI → POSTED → BATAL`, with `DIAJUKAN → DITOLAK` as a branch. `DITOLAK` is **terminal** — it does not return to `DRAFT` the way `pembelian`'s rejection does. There, a rejection means "the paper was mistyped, fix it"; here it is a business decision — the goods are not being handed over — and looping it back to `DRAFT` would blur that decision into a revision and erase the only trace the request was ever refused. A requester who still wants the goods submits a new request, and that is exactly what should be visible.
-- **`DISETUJUI` sits between `DIAJUKAN` and `POSTED`, and it is not a wasted state.** Approval decides *how much* may leave; posting records that it actually did, and the two can fall on different days — approved today, handed over from the warehouse tomorrow. `ts_disetujui` and `posted_at` are two separate columns precisely because of that gap.
-- **`disetujui_oleh`, `ts_disetujui`, and `catatan_persetujuan` are reused for a rejection too, not only an approval.** The schema carries no separate `ditolak_oleh` column, so `Tolak` writes through the same three columns `Setujui` does — `PemakaianRepository.Tolak` and `.Setujui` are near-identical statements for exactly this reason.
-- **`id_pemohon` is not `created_by`.** A clerk may type the request on behalf of someone with no account of their own — `created_by` records who typed it, `id_pemohon` who is asking for the goods. `pemakaian_penyetuju_check` compares `disetujui_oleh` against `id_pemohon`, not `created_by`, and `PemakaianUseCase.Setujui`/`.Tolak` catch the same rule in Go first — before the CHECK — so the message names the reason instead of arriving as an unlabelled `23514`. The CHECK stays as the backstop, the same relationship `ExistsByKode` has to a unique index. `id_pemohon` is validated only by the foreign key: anyone in `users` may be a requester, including someone with no role at all.
-- **Posting mirrors the outgoing half of `mutasi` exactly, for the same reason.** The room's moving average is known only to `kartu_stok_hitung_saldo`, inside its advisory lock, so the application cannot compute `hpp_satuan_dasar`/`hpp_total` — they are copied from what `KartuStokRepository.Insert`'s `RETURNING` reports back, never calculated in Go. `total_hpp` on the header is the sum of every line's `hpp_total`, written once right after the posting loop.
-- **This is the second module after `mutasi` whose stock can genuinely run short**, and unlike `retur_pembelian`'s guard this one is not theoretical — a negative-stock rejection here is an everyday occurrence. `PemakaianUseCase.periksaSaldo` is `mutasi`'s `periksaSaldo` adapted to one room: not a guard, only a friendlier message than the trigger's constraint-free `RAISE`, checked after the balance locks are held so what it reads cannot move underneath it.
-- **`KartuStokRepository.KunciSaldo` is taken before posting even though every line shares one room** — the balance-locking discipline is `mutasi`'s, reused rather than skipped. Two `pemakaian` documents naming the same products in a different line order are a textbook ABBA regardless of room count, because the trigger takes one advisory lock per *insert*, not per document. `TestDuaPemakaianBersamaanProdukSamaTidakDeadlock` pins it, mirroring `TestMutasiBerlawananArahTidakDeadlock`.
-- **Cancellation writes reversing rows with `jenis_transaksi = 'PEMBATALAN_TRANSAKSI'`, not `'PEMBATALAN_PEMAKAIAN'`** — following the other four `kartu_stok` writers rather than the module's own enum value. `id_kartu_stok_asal` already says what a reversal undoes; two vocabularies for one meaning is exactly what `000021` spent itself removing elsewhere. `'PEMBATALAN_PEMAKAIAN'` has existed since `000002` and stays unused — `DROP VALUE` does not exist in PostgreSQL.
-- **Cancellation needs no `periksaSaldo` of its own.** It only ever adds stock back to the room it left, so it can never drive a balance negative — unlike `mutasi`'s `Batal`, which can be refused outright if the destination room has since emptied out.
-- **No unique index on `(id_pemakaian, id_product)`**, following `mutasi` rather than `penerimaan_susulan`/`retur_pembelian`/`pembayaran_utang`. There the quota lives on a parent line, so two rows for the same source each pass the check alone and only together exceed it. Here the quota is the room's balance, summed per product before checking and rechecked by the trigger on every insert — two lines for one product in different input units (1 DUS for the workshop, 3 PCS for the office) are a legitimate way to type a request.
-- **`PemakaianUseCase` has no use for `periksaRuangUnitAktif`**, unlike `pembelian` and `mutasi`. Isu #9 does not ask for `id_ruang` to be validated against the caller's active `unit_kerja` (isu #12 fase 5), and this module does not add that scope on its own initiative — see "Unit kerja and location-bound authority" above for what fase 5/6 cover and what they deliberately leave to be asked for later. It gained a `RuangRepository` anyway once isu #15 landed, for `LockShared` alone — see "Stok opname dan pembekuan ruang" below.
-- Prefix is `PM`; the series is its own, independent of `BL`, `PS`, `RB`, `PU`, and `MT`.
+- **What is posted is `qty_disetujui_dasar`, never `qty_dasar` — the most expensive mistake here.** `qty_dasar` is what was asked for, frozen when the line is typed and never touched, not even by approval. `qty_disetujui_dasar` is nil until `Setujui` and is the only thing `Posting` reads; 0 means that line was refused on its own. Filling it at `Create` would let a requester approve their own request through the back door.
+- **A line whose approved quantity is nil or zero is skipped at posting**, never inserted as a row moving nothing. If every line is zero, posting is refused (400) — that is a rejection in substance, not an internal usage.
+- `DRAFT → DIAJUKAN → DISETUJUI → POSTED → BATAL`, with `DIAJUKAN → DITOLAK` as a branch. **`DITOLAK` is terminal** — it does not return to `DRAFT` the way `pembelian`'s rejection does. There a rejection means "the paper was mistyped"; here it is a business decision, and looping it back would blur that into a revision and erase the only trace the request was refused. A requester who still wants the goods submits a new request.
+- **`DISETUJUI` is not a wasted state.** Approval decides *how much* may leave; posting records that it did, and the two can fall on different days — hence separate `ts_disetujui` and `posted_at`.
+- **`disetujui_oleh`, `ts_disetujui`, and `catatan_persetujuan` are reused for a rejection too** — the schema carries no separate `ditolak_oleh`.
+- **`id_pemohon` is not `created_by`.** A clerk may type the request for someone with no account. `pemakaian_penyetuju_check` compares `disetujui_oleh` against `id_pemohon`; `Setujui`/`Tolak` catch the same rule in Go first so the message names the reason, with the CHECK as backstop. `id_pemohon` is validated only by the foreign key — anyone in `users` may be a requester.
+- Posting mirrors the outgoing half of `mutasi`: `hpp_satuan_dasar`/`hpp_total` are copied from `Insert`'s `RETURNING`, never calculated in Go. `total_hpp` on the header is the sum, written once after the posting loop.
+- **The second module after `mutasi` whose stock can genuinely run short**, and here it is an everyday occurrence, not a defensive branch. `periksaSaldo` is `mutasi`'s adapted to one room — not a guard, just a friendlier message, checked after the balance locks are held.
+- **`KunciSaldo` is taken even though every line shares one room.** Two documents naming the same products in a different line order are a textbook ABBA regardless of room count, because the trigger locks per *insert*, not per document (`TestDuaPemakaianBersamaanProdukSamaTidakDeadlock`).
+- **Cancellation writes `jenis_transaksi = 'PEMBATALAN_TRANSAKSI'`, not `'PEMBATALAN_PEMAKAIAN'`** — following the other `kartu_stok` writers. `id_kartu_stok_asal` already says what a reversal undoes; two vocabularies for one meaning is what `000021` spent itself removing. `'PEMBATALAN_PEMAKAIAN'` stays unused — `DROP VALUE` does not exist.
+- Cancellation needs no `periksaSaldo`: it only ever adds stock back.
+- **No unique index on `(id_pemakaian, id_product)`** — following `mutasi`: the quota is the room's balance, summed per product before checking and rechecked by the trigger.
+- Prefix `PM`.
 
 ### Penjualan and the receivable side (migration 000022, isu #10)
 
-The sales nota — a cashier's ticket handed to a walk-in or account customer. The sixth document to write `kartu_stok`, and the first that takes goods out **to an outside party with money moving on the other side of it**: `pembelian` forms a payable, `mutasi` forms nothing at all, this is the first to form a **receivable**, and only on a `KREDIT` nota.
+The sales nota. Sixth writer of `kartu_stok`, and the first taking goods out **to an outside party with money on the other side**. Tables and enum predate it, so **no `ALTER TYPE`**; `000022` locks the vocabularies in CHECKs, adds `penjualan_kredit_pelanggan_check`, and swaps the list index.
 
-The tables `penjualan`/`penjualan_detail` and the `'PENJUALAN'` `jenis_transaksi` value have existed since migrations `000006`/`000002` — so **no `ALTER TYPE`**, the same luck `mutasi` (`000018`) and `pemakaian` (`000021`) had. `000022` only locks the status/`jenis_pembayaran`/`status_pembayaran` vocabularies in CHECKs, adds `penjualan_kredit_pelanggan_check` — a rule that was never guarded at all before this — and swaps the list index for the `(tanggal DESC, id DESC)` shape every other document's list migration adds. No unique index on `(id_penjualan, id_product)` either, for the reason `mutasi`/`pemakaian` already give: the quota is the room's balance, not a quantity held on a parent line.
-
-- **HPP is never typed, the single most expensive thing to get wrong here.** `hpp_satuan_dasar`, `hpp_total`, and `total_hpp` are nullable precisely because they have no answer before posting. The room's moving average is known only to `kartu_stok_hitung_saldo`, inside its advisory lock, so the application copies back what the outgoing `kartu_stok` row's `RETURNING` actually reported — the identical rule `mutasi_detail.HargaPokokSatuanDasar` and `PemakaianDetail.HPPTotal` already follow. Once `total_hpp` is there, margin is free: `total - total_hpp`, no new table and no recomputation, which is the only reason the column exists.
-- **No `DIAJUKAN`, and — unlike `mutasi` — not because the stake is small.** Goods really leave the shop, money really moves, and a `KREDIT` nota creates a receivable against someone's name; the stake here is larger than `mutasi`'s, not smaller. What rules out an approval stage is a practical constraint instead: a cashier cannot make a customer wait at the counter for a supervisor to approve a cash sale typed in seconds. So the two-person control moves entirely to the **cancellation** side rather than disappearing — `CASHIER` creates, types lines, and posts a nota in one motion; `SUPERADMIN` alone may void one. A mistyped line is corrected with a `retur_penjualan` (its own trail is more honest anyway) or a cancellation by a supervisor, never by the cashier who posted it.
-- **`status_pembayaran` for a cash nota cannot come from the ordinary rule, so the rule is extended rather than bent.** The ordinary rule — recomputed from POSTED allocations and POSTED returns — answers `BELUM` for a `TUNAI` nota that plainly was paid in full, because a cash sale has no allocation at all; the money changed hands at the counter with no document pointing at it. `PenjualanRepository.RecalculateStatusPembayaran` resolves this by reading `jenis_pembayaran` directly: `TUNAI` + `POSTED` is `LUNAS` by construction, `KREDIT` stays `BELUM` until `penerimaan_pembayaran` exists to reduce it. Still a derived cache, never set from a form — the derivation is just from the document's own type rather than from allocations that do not exist yet. Only `Posting` calls it today; nothing else can move the answer until the payment module is built, and that module must not double-count `TUNAI` notas when it arrives.
-- **`penjualan_kredit_pelanggan_check` is the one CHECK this migration adds that guards something previously unguarded at all.** `id_pelanggan` stays nullable — a cash sale at the counter needs no customer on file, and forcing one would fill `pelanggan` with meaningless "walk-in" rows — but a receivable with no customer can be billed to nobody, has no `plafon_kredit` to check, and gives a future allocation no owner. Caught in Go first, in `Create` and again in `Update` against the *effective* post-patch values (the same pattern `MutasiUseCase.Update` uses for `id_ruang_asal <> id_ruang_tujuan`), so the message names the field; the CHECK is the backstop, arriving as `23514` through `invalidOnCheck`.
-- **The price billed is a snapshot, and `id_harga_jual` is a proposal that must prove itself when given.** `harga_satuan_input` is never forced to equal `product_harga_jual` — bargaining happens at the counter, and the nota is what is true. When `id_harga_jual` is supplied, `PenjualanUseCase.siapkanDetail` validates it against `ProductRepository.FindHargaBerlakuBatch`, resolved once for the whole basket: the version named has to be the one actually in force for that line's own product and satuan on the document's date, or the reference is more misleading than none at all. This is the resolver isu #8 built with a comment saying it was "for `penjualan`" — the first caller.
-- **This is the second module after `pemakaian` whose stock can genuinely run short as an everyday event, not a theoretical defence** — a cashier types 10 when the shelf holds 7. `PenjualanUseCase.periksaSaldo` is `pemakaian`'s adapted with no approval step to trim against; it runs after `kunciJalurStok` (periode lock, then `KartuStokRepository.KunciSaldo`), so what it reads cannot move underneath it, and its message names the product and the room.
-- **No proportional allocation of any kind — unlike `pembelian`, there is nothing here for `pembelian_alokasi.go` to do.** No freight, no nota discount split across lines, no PPN share: `subtotal` is a straight sum of `qty_input × harga_satuan_input − diskon_baris` over the lines, and `total = subtotal − diskon_nota + pembulatan`. `diskon_nota` may not exceed `subtotal`; `total` may not go negative — "a negative total is not a sale." `pembulatan` is typed by the cashier rather than computed to a configured rounding multiple, a deliberate choice to avoid a new config key `config.example.json`/`docker-compose.yml` would otherwise need for a decision this issue left open.
-- **Fase 2 — `plafon_kredit`, enforced at `Posting`, under the document's own row lock.** `PelangganUseCase.Piutang` (`GET /pelanggan/{id}/piutang`) is a **read that is not a module**, following `riwayat_beli`/`utang_supplier`: the query (`PenjualanRepository.FindPiutangPelanggan`) lives in `penjualan_repository.go`, and `PelangganUseCase` borrows `PenjualanRepository` the way `SupplierUseCase` borrows `PembelianRepository` — the same shape, mirrored onto the receivable side. `sisa_piutang` equals `total` for now: `retur_penjualan` and `penerimaan_pembayaran` are both out of scope for isu #10, so nothing yet reduces it, and the day either exists this figure starts accounting for it without the response shape changing. `PenjualanUseCase.periksaPlafon` sums a customer's running receivable (`PenjualanRepository.PiutangBerjalan`, POSTED `KREDIT` notas only) and adds the nota being posted; the total may not exceed `plafon_kredit`, and `NULL` means unlimited — the same reading `pelanggan.plafon_kredit` carries everywhere else. **No `SUPERADMIN` override exists.** Posting already sits behind `CASHIER` alone, and a bypass would put a second actor at the one moment this codebase deliberately kept to one; if a real need shows up, it belongs on the posting request as an explicit, recorded field, never a silent skip. This check has no CHECK or trigger behind it — no constraint can compare a limit against a running `SUM` — so unlike `periksaSaldo` it *is* the guard rather than a friendlier message ahead of one, and it does not close the race between two `KREDIT` notas for the same customer posted at the same moment; isu #10 does not ask for the fix (an advisory lock keyed on `id_pelanggan`, the same shape `KunciSaldo` uses for `(id_barang, id_ruang)`), so none is added.
-- **Cancellation follows the same shape as `mutasi`/`pemakaian`'s, with one thing deliberately left for later.** Reversing rows carry `jenis_transaksi = 'PEMBATALAN_TRANSAKSI'`, dated `time.Now()` so a nota whose period has since closed can still be voided into the current one; `hpp_satuan_dasar`/`hpp_total`/`total_hpp` are **not** cleared, since they are a snapshot of what actually happened and `status = BATAL` already says the nota no longer counts. **Not yet guarded, and deliberately left as a `TODO` in `PenjualanUseCase.Batal` rather than silently omitted:** cancellation should be refused while a POSTED `retur_penjualan` or a payment allocation points at this nota, exactly `HasPostedRetur`'s role on the payable side — but neither module exists yet to point at `penjualan`, so the guard cannot be written until one does.
-- `PenjualanUseCase` has no use for `periksaRuangUnitAktif`, following `pemakaian` rather than `pembelian`/`mutasi`: isu #10 does not ask for `id_ruang` to be validated against the caller's active `unit_kerja`, and this module does not add that scope on its own initiative. It gained a `RuangRepository` anyway once isu #15 landed — see "Stok opname dan pembekuan ruang" — but only for `LockShared`, never for that check.
-- A photographed, signed nota may be attached like every other document: `entity.RefTablePenjualan` and one line in `repository.RefTableDokumen` are the entire cost, exactly as isu #5 designed it.
-- Prefix is `PJ`; the series is its own, independent of `BL`, `PS`, `RB`, `PU`, `MT`, and `PM`.
+- **HPP is never typed — the most expensive thing to get wrong here.** `hpp_satuan_dasar`, `hpp_total`, `total_hpp` are nullable precisely because they have no answer before posting; the application copies back what the outgoing row's `RETURNING` reported. Once `total_hpp` exists, margin is free (`total - total_hpp`), which is the only reason the column exists.
+- **No `DIAJUKAN` — and, unlike `mutasi`, not because the stake is small.** Goods leave, money moves, a `KREDIT` nota creates a receivable. What rules out approval is practical: a cashier cannot make a customer wait at the counter. So the two-person control moves entirely to **cancellation** — `CASHIER` creates, types, and posts in one motion; `SUPERADMIN` alone may void. A mistyped line is corrected with a `retur_penjualan` or a supervisor's cancellation, never by the cashier who posted it.
+- **`status_pembayaran` for a cash nota cannot come from the ordinary rule, so the rule is extended rather than bent.** The ordinary rule would answer `BELUM` for a `TUNAI` nota plainly paid in full, because a cash sale has no allocation at all. `RecalculateStatusPembayaran` reads `jenis_pembayaran` directly: `TUNAI` + `POSTED` is `LUNAS` by construction. `KREDIT` answers from effective allocations (see "Penerimaan pembayaran"). Still a derived cache, never set from a form.
+- **`penjualan_kredit_pelanggan_check` guards something previously unguarded.** `id_pelanggan` stays nullable — a cash sale needs no customer on file, and forcing one would fill `pelanggan` with "walk-in" rows — but a receivable with no customer can be billed to nobody, has no `plafon_kredit` to check, and gives a future allocation no owner. Caught in Go first in `Create` and in `Update` against the *effective* post-patch values (the pattern `MutasiUseCase.Update` uses).
+- **The price billed is a snapshot; `id_harga_jual` is a proposal that must prove itself when given.** `harga_satuan_input` is never forced to equal `product_harga_jual` — bargaining happens at the counter and the nota is what is true. When `id_harga_jual` is supplied, `siapkanDetail` validates it against `FindHargaBerlakuBatch` (resolved once for the whole basket): the version named must be the one in force for that line's product and satuan on the document's date, or the reference is more misleading than none.
+- **Second module after `pemakaian` whose stock runs short as an everyday event.** `periksaSaldo` runs after `kunciJalurStok` (periode → ruang → balances), so what it reads cannot move underneath it.
+- **No proportional allocation of any kind** — no freight, no nota discount split across lines, no PPN share, so `pembelian_alokasi.go` has nothing to offer. `subtotal` is a straight sum of `qty_input × harga_satuan_input − diskon_baris`; `total = subtotal − diskon_nota + pembulatan`. `diskon_nota` may not exceed `subtotal`; `total` may not go negative. `pembulatan` is typed by the cashier rather than computed to a configured multiple — a deliberate choice avoiding a new config key for a decision the issue left open.
+- **`plafon_kredit` is enforced at `Posting`, under the document's own row lock.** `periksaPlafon` sums the customer's running receivable (`PiutangBerjalan`) and adds the nota; `NULL` means unlimited. **No `SUPERADMIN` override exists** — posting already sits behind `CASHIER` alone, and a bypass would put a second actor at the one moment this codebase kept to one. If needed, it belongs on the posting request as an explicit recorded field, never a silent skip. **This check has no CHECK or trigger behind it** (no constraint can compare a limit against a running `SUM`), so unlike `periksaSaldo` it *is* the guard — and it does not close the two-simultaneous-notas race.
+- `GET /pelanggan/{id}/piutang` is a **read that is not a module** — `FindPiutangPelanggan` in `penjualan_repository.go`, borrowed by `PelangganUseCase`.
+- **Cancellation** writes `'PEMBATALAN_TRANSAKSI'` dated `time.Now()`; `hpp_*` are **not** cleared (a snapshot of what happened; `status = BATAL` already says it no longer counts). `HasPostedAlokasi` refuses cancellation while a POSTED `penerimaan_pembayaran` allocation points at the nota (an uncashed giro counts). **Still open:** a POSTED `retur_penjualan` should block the same way, but that module does not exist.
+- A photographed nota may be attached: `entity.RefTablePenjualan` plus one line in `repository.RefTableDokumen` is the entire cost.
+- Prefix `PJ`.
 
 ### Stok opname dan pembekuan ruang (migration 000023, isu #15)
 
-The physical count — isu #15. `stok_opname`/`stok_opname_detail` have existed since migration `000007`, and `SO_SURPLUS`/`SO_DEFISIT` have been in `jenis_transaksi` since `000002` — so **no `ALTER TYPE`**, the same luck `mutasi` (`000018`) and `pemakaian` (`000021`) had. It is the seventh document to write `kartu_stok`, the first that moves goods to or from **nowhere at all** (no supplier, no customer, no other room — only the system's own record of what is on the shelf changes), and the only document that can write in **both directions in one nota without the rows ever pairing up**: some lines surplus, some deficit, each standing on its own.
+The physical count. Tables from `000007`, enum values since `000002`, so **no `ALTER TYPE`**; `000023` adds the freeze and the vocabulary. Seventh writer of `kartu_stok`, the first moving goods to or from **nowhere at all**, and the only one that can write **both directions in one nota without the rows ever pairing up**. It is also the only module that, while open, changes what every OTHER `kartu_stok` writer may do.
 
-It is also the only module that, while open, changes what every OTHER module writing `kartu_stok` may do.
+- **The primary key columns are `idstok_opname`/`idstok_opname_detail`, not `id`** — the one table spelled that way. The entity field is still `ID`; only the SQL names the column. Not renamed: foreign keys already point at them and nothing is gained by the churn.
+- **Two selisih columns, not one signed column.** `stok_opname_detail_selisih_check` forbids both being positive at once, so direction is a fact rather than a sign that can get lost on a sum.
+- **`id_kartu_stok_cutoff` is `NOT NULL`** — see "Goods the system has never seen" below.
 
-- **The primary key columns are `idstok_opname`/`idstok_opname_detail`, not `id`** — the one table in this project spelled that way. The entity field is still `ID`, like everywhere else; only the repository's SQL has to name the column correctly. Not "fixed" by a rename migration: the columns already carry foreign keys pointing at them and nothing is gained by the churn.
-- **`id_kartu_stok_cutoff` is `NOT NULL`.** Every line must point at a real `kartu_stok` row as its system-balance reference. A `(product, room)` pair that has never moved through this room has no row to point at — and no way to know its cost — so it **cannot be counted here at all**. See "Barang yang sistem belum pernah lihat" below.
-- **Two selisih columns, not one signed column.** `stok_opname_detail_selisih_check` forbids both `stok_selisih_lebih` and `stok_selisih_kurang` being positive at once, so direction is stored as a fact rather than a sign that can get lost on a sum.
+#### Pembekuan ruang
 
-#### Pembekuan ruang selama opname berjalan
+While a `stok_opname` is `DRAFT` or `DIAJUKAN`, its `id_ruang` is **frozen**: no module — present or future — may post a `kartu_stok` row naming that room. The freeze lifts at `POSTED` or `BATAL`. Counting a shelf while goods move through it is guessing, and once the freeze exists the goods physically cannot leave either, so the rule matches reality rather than adding friction.
 
-While a `stok_opname` is `DRAFT` or `DIAJUKAN`, its `id_ruang` is **frozen**: no other document — `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `mutasi`, `pemakaian`, or `penjualan` — may post a `kartu_stok` row naming that room, from any module, present or future. The freeze lifts the instant the opname is `POSTED` or `BATAL`. Counting a shelf while goods keep moving through it is not counting, it is guessing — and once the freeze exists, the goods physically cannot leave a shelf mid-count either, so the rule matches reality rather than adding friction to it.
-
-- **What is frozen is posting, not paperwork.** A `DRAFT` may still be typed, submitted, and stacked up in every other module while the count runs; a supplier's invoice arriving mid-count is still typed in. Only the movement of goods is held back.
-- **The radius is one `ruang`, not one `unit_kerja` and not the whole company.** A warehouse may be counted while its shop keeps selling, because they are different rooms — this is what makes the rule usable day to day. The one exception that genuinely crosses a unit boundary: a `mutasi` whose **either** room is frozen is refused, even when the two rooms belong to different units and different sessions altogether — a branch that restocks from a warehouse currently being counted cannot receive the shipment, because the warehouse cannot let it leave either. This is the one place isu #12 fase 1's "cross-unit mutasi is allowed" and this freeze meet, and it is worth finding both decisions from either side.
-- **Enforced by the `kartu_stok` trigger itself** (migration `000023`), not by a call each of those five other modules makes — the same shape `periode` (isu #6) already uses, and for the same reason: the thing being protected is what every OTHER module may do, so the enforcement has to live where none of them can forget to call it. `kartu_stok_hitung_saldo()` reads `stok_opname` for `NEW.id_ruang` with `status IN ('DRAFT', 'DIAJUKAN')`, between the `periode:` lock and the `(id_barang, id_ruang)` lock, and `RAISE`s with `ERRCODE = '55000'` (`object_not_in_prerequisite_state`) rather than `check_violation` — that code already carries two meanings (insufficient stock, closed periode) and a third would make every message at every call site say "one of three things". `repository.IsObjectNotInPrerequisiteState` and `usecase.conflictOnRuangBeku` are the dedicated funnel, answering **409**: the request itself is not wrong, the room it names is simply not ready.
-- **Read from `status`, never `ts_verified IS NULL`.** The two look like they answer the same question, but `ts_verified` is wrong in both directions: a `BATAL`-before-verification opname leaves it `NULL` forever (freezing the room permanently, with no way out), and a `DIAJUKAN → DRAFT` rejection leaves it **filled** (unfreezing a room whose count is not actually settled). `status IN ('DRAFT', 'DIAJUKAN')` answers "not finished", which is what is actually meant.
-- **The self-reference exception.** A row whose own `ref_table = 'stok_opname'` and `ref_id_transaksi` equals the opname currently freezing that room always passes — otherwise an opname could never post the very adjustment it exists to make. This is checked by value, not by transition order ("flip status to POSTED, then insert") — the trigger reads `stok_opname.status` directly, so the order two lines of Go happen to run in can never silently break it.
-- **`stok_opname_ruang_terbuka_uidx`** — a partial unique index `ON stok_opname (id_ruang) WHERE status IN ('DRAFT', 'DIAJUKAN')` — is two things at once: it is what stops two opnames racing open against the same room (two snapshot cutoffs over one shelf, each posting its own selisih — the same correction booked twice), and, since the freeze exists, it is also what gives "which opname is freezing this room" a single answer, which is exactly what the trigger reads.
-- **Advisory lock ordering: `periode:` → `ruang:` → `(barang, ruang)`, uniform across the whole project.** The trigger takes `pg_advisory_xact_lock_shared` on `hashtextextended('ruang:' || id_ruang::TEXT, 0)` right after the periode lock and before reading `stok_opname`; `RuangRepository.Lock`/`.LockShared` (Go) take the exclusive/shared sides. The key expression is duplicated between migration `000023` and `repository.ruangLockKey` — if the two ever produce different strings, neither side waits for the other, the same warning `periodeLockKey` already carries.
-  - **`StokOpnameUseCase.Buka` (`Create`) and every transition that changes whether a room is frozen take the exclusive side** — `Create` and `Batal` from `DRAFT`/`DIAJUKAN`, neither of which pre-locks a balance for anything else to protect. `Ajukan`/`Tolak` take **no** ruang lock at all: `DRAFT` and `DIAJUKAN` are both frozen, so neither transition changes the answer.
-  - **Every module that pre-locks balances before writing `kartu_stok` — `mutasi`, `pemakaian`, `penjualan`, and `stok_opname`'s own `Posting`/`Batal`-from-`POSTED` — takes the *shared* side, before `KartuStokRepository.KunciSaldo`.** This is what keeps the frozen status `periksaRuangBeku` reads from moving underneath the rest of the transaction, the identical reasoning `PeriodeRepository.LockShared` already has for `periode:`. `mutasi` takes **both** rooms' `ruang:` locks, sorted by id (`MutasiUseCase.kunciRuangPasangan`) — the same ABBA risk its `(id_barang, id_ruang)` locking already guards against, one level up: two opposite transfers between the same two rooms could otherwise take the two `ruang:` locks in opposite orders and deadlock.
-  - `pembelian`, `penerimaan_susulan`, and `retur_pembelian` do **not** pre-lock balances at all (they never did, even before isu #15), so they take no `ruang:` lock of their own — `periksaRuangBeku` on those three is a plain read, exactly like `periksaPeriode` already is for them.
-- **`periksaRuangBeku` (`usecase/shared.go`) is for the message, not the guard** — the identical relationship `periksaPeriode` has to a closed period. It calls `StokOpnameRepository.FindOpenByRuang`, and a free room (`sql.ErrNoRows`) means nothing to check. Wired into `Posting` and `Batal` of all six other `kartu_stok` writers, right after `periksaPeriode` in each. `penjualan` inherited it the same way `mutasi` and `pemakaian` inherited the closed-periode refusal from isu #6 — no code written for it beyond calling the shared function, because the trigger already covers every future module too.
-- **`GET /api/v1/ruang` reports which opname, if any, is freezing each room.** `RuangRepository`'s read query gained a `LEFT JOIN stok_opname` against that same open-status condition, surfacing `nomor_opname_beku` (null when free) on every `RuangResponse` — one join, not a new endpoint, so a caller whose posting was refused can see the cause and who to chase without a second call.
+- **What is frozen is posting, not paperwork.** Drafts may still be typed and submitted in every other module; only movement is held back.
+- **The radius is one `ruang`**, not a `unit_kerja` and not the company — a warehouse can be counted while its shop keeps selling. The one exception crossing a unit boundary: a `mutasi` whose **either** room is frozen is refused, even across units and sessions — a branch restocking from a warehouse being counted cannot receive the shipment, because the warehouse cannot let it leave. This is where isu #12 fase 1's "cross-unit mutasi is allowed" and this freeze meet.
+- **Enforced by the `kartu_stok` trigger itself**, not by a call each module makes — the shape `periode` already uses, and for the same reason: what is protected is what every OTHER module may do, so enforcement lives where none can forget it. `kartu_stok_hitung_saldo()` reads `stok_opname` for `NEW.id_ruang` with `status IN ('DRAFT','DIAJUKAN')`, between the `periode:` lock and the `(id_barang, id_ruang)` lock, and raises `ERRCODE = '55000'` rather than `check_violation` — that code already carries two meanings and a third would make every message say "one of three things". `IsObjectNotInPrerequisiteState` + `conflictOnRuangBeku` answer **409**: the request is not wrong, the room is simply not ready.
+- **Read from `status`, never `ts_verified IS NULL`.** `ts_verified` is wrong in both directions: a `BATAL`-before-verification opname leaves it `NULL` forever (freezing the room permanently), and a `DIAJUKAN → DRAFT` rejection leaves it **filled** (unfreezing a room whose count is not settled).
+- **The self-reference exception**: a row whose `ref_table = 'stok_opname'` and `ref_id_transaksi` equals the freezing opname always passes, or an opname could never post the adjustment it exists to make. Checked **by value**, not by transition order, so the order two lines of Go run in can never silently break it.
+- **`stok_opname_ruang_terbuka_uidx`** (partial unique on `id_ruang WHERE status IN ('DRAFT','DIAJUKAN')`) is two things at once: it stops two opnames racing open against one room (two cutoffs, the same correction booked twice) and it gives "which opname is freezing this room" a single answer, which is what the trigger reads.
+- **Advisory lock order, uniform project-wide: `periode:` → `ruang:` → `(barang, ruang)`.** The trigger takes `pg_advisory_xact_lock_shared` on `hashtextextended('ruang:' || id_ruang::TEXT, 0)`; `RuangRepository.Lock`/`.LockShared` take the exclusive/shared sides. **The key expression is duplicated between migration `000023` and `repository.ruangLockKey` — if the two ever differ, neither side waits** (same warning as `periodeLockKey`).
+  - `Buka`/`Create` and `Batal` from `DRAFT`/`DIAJUKAN` take the **exclusive** side. `Ajukan`/`Tolak` take **no** ruang lock — both states are frozen, so neither changes the answer.
+  - **Every module that pre-locks balances** (`mutasi`, `pemakaian`, `penjualan`, and this module's `Posting`/`Batal`-from-`POSTED`) takes the **shared** side *before* `KunciSaldo`, keeping the frozen status `periksaRuangBeku` read from moving underneath the transaction — the reasoning `PeriodeRepository.LockShared` already has. `mutasi` takes **both** rooms' locks sorted by id (`kunciRuangPasangan`) — the same ABBA risk one level up.
+  - `pembelian`, `penerimaan_susulan`, `retur_pembelian` do not pre-lock balances at all, so they take no ruang lock; `periksaRuangBeku` there is a plain read, like `periksaPeriode`.
+- **`periksaRuangBeku` (`shared.go`) is for the message, not the guard** — the relationship `periksaPeriode` has to a closed period. Wired into `Posting` and `Batal` of all six other writers, right after `periksaPeriode`.
+- **`GET /api/v1/ruang` reports which opname is freezing each room** — one `LEFT JOIN stok_opname` surfacing `nomor_opname_beku` (null when free), not a new endpoint, so a caller whose posting was refused sees the cause and who to chase without a second call.
 
 #### Alur status
 
-`DRAFT → DIAJUKAN → POSTED → BATAL`, plus `DIAJUKAN → DRAFT` on rejection — following `pembelian`, not `pemakaian`. A rejection here means "recount, the figures do not add up", a paper correction rather than a business decision, and since the freeze exists, a terminal rejection that never released it would leave the room dead forever.
+`DRAFT → DIAJUKAN → POSTED → BATAL`, plus `DIAJUKAN → DRAFT` on rejection — following `pembelian`, not `pemakaian`. A rejection here means "recount, the figures do not add up", a paper correction; a terminal rejection that never released the freeze would leave the room dead forever.
 
-- `tgl_tutup` is stamped at `Ajukan`, the date the count itself finished; `posted_at` answers when the books were settled, and the two can be different days.
-- `verified_by`/`ts_verified` are written by **both** `Posting` and `Tolak` — the schema carries no separate "who rejected it" column, the same reuse `entity.Pemakaian.DisetujuiOleh` makes of one pair of columns for both outcomes. `Tolak` itself carries no reason field at all: unlike `pemakaian`'s `catatan_persetujuan`, there is no column to hold one.
-- **`Batal` is reachable from any non-`BATAL` status**, not only `POSTED` — the one deliberate departure from the guarded single-source-status transitions every other document uses. An opname abandoned while `DRAFT`/`DIAJUKAN` has written nothing to `kartu_stok`, so cancelling it is pure status change plus releasing the freeze; `alasan_batal` is required regardless, following `retur_pembelian`'s `alasan`.
-- Prefix is `SO`; the series is its own, independent of `BL`, `PS`, `RB`, `PU`, `MT`, `PM`, and `PJ`.
+- `tgl_tutup` is stamped at `Ajukan` (when the count finished); `posted_at` is when the books were settled — possibly different days.
+- `verified_by`/`ts_verified` are written by **both** `Posting` and `Tolak` (no separate rejection column, the reuse `pemakaian` makes). `Tolak` carries no reason field — there is no column to hold one.
+- **`Batal` is reachable from any non-`BATAL` status**, the one deliberate departure from guarded single-source transitions: an opname abandoned while `DRAFT`/`DIAJUKAN` wrote nothing to `kartu_stok`, so cancelling is pure status change plus releasing the freeze. `alasan_batal` is required regardless.
+- Prefix `SO`.
 
-#### Membuka opname dan menarik snapshot
+#### Opening a count and pulling the snapshot
 
 ```
-POST /api/v1/stok_opname                    -- buat header, ts_cutoff = now(), ruang mulai beku
-POST /api/v1/stok_opname/{id}/tarik-saldo   -- isi baris dari saldo ruang saat cutoff
+POST /api/v1/stok_opname                    -- header, ts_cutoff = now(), room freezes
+POST /api/v1/stok_opname/{id}/tarik-saldo   -- fill lines from the room's balance at cutoff
 ```
 
 - **`ts_cutoff` is stamped by the server from `now()` at `Create`, never accepted from the body.** A client-chosen cutoff is a client-chosen selisih.
-- **`TarikSaldo` reads "the balance right now" and that is correct only because of the freeze.** `KartuStokRepository.SaldoRuang` (the mirror of `SaldoPerRuang`: one room, every product, instead of one product, every room) has no timestamp filter at all — it does not need one, because `TarikSaldo` can only run on a `DRAFT`, and the room has been frozen since `Create`. Nothing else could have written a `kartu_stok` row for it since, so "right now" and "at `ts_cutoff`" are the same figure by construction rather than by a query that has to prove it.
-- **Refuses to run twice** (`StokOpnameRepository.HasDetail`) — pulling the balance a second time is the cleanest way to end up with two snapshots inside what is supposed to be one document.
-- **`PUT .../detail` replaces the whole line set, and is also how a line the automatic pull missed gets added by hand** — a product found on the shelf that was never registered as moving through this room cannot be added this way either: the same `id_kartu_stok_cutoff` requirement `TarikSaldo` is bound by applies to every line, drawn from the identical `SaldoRuang` read.
-- **`PATCH .../detail/{id_detail}` is the one deliberate exception in this whole API to "lines are replaced wholesale, never edited one at a time".** A purchase's lines are one piece of paper retyped as a whole; an opname's lines are filled in by someone walking the room product by product, and requiring the entire list to be resent every time one line finishes would lose the count every time the network drops — and since the freeze exists, every extra minute of that is a minute the room stays shut. It fills `stok_so` and/or `keterangan`; `stok_selisih_lebih`/`stok_selisih_kurang` are recomputed by the same `UPDATE` statement from `stok_so` against the frozen `stok_awal`, never accepted from the request — the same rule `status_pembayaran` follows.
+- **`TarikSaldo` reads "the balance right now", and that is correct only because of the freeze.** `KartuStokRepository.SaldoRuang` (the mirror of `SaldoPerRuang`) has no timestamp filter and needs none: `TarikSaldo` only runs on a `DRAFT`, the room has been frozen since `Create`, so "right now" and "at `ts_cutoff`" are the same figure **by construction** rather than by a query that has to prove it.
+- **Refuses to run twice** (`HasDetail`) — a second pull is the cleanest way to two snapshots inside one document.
+- `PUT .../detail` replaces the whole line set and is also how a missed line is added by hand — but the `id_kartu_stok_cutoff` requirement applies to every line either way.
+- **`PATCH .../detail/{id_detail}` is the one deliberate exception in this API to "lines are replaced wholesale".** An opname's lines are filled in by someone walking the room product by product; resending the whole list per line would lose the count every time the network drops, and every extra minute is a minute the room stays shut. It fills `stok_so` and/or `keterangan`; the selisih columns are recomputed by the same `UPDATE` from `stok_so` against the frozen `stok_awal`, **never accepted from the request**.
 
-#### `stok_so = NULL` bukan nol
+#### `stok_so = NULL` is not zero
 
-A line whose `stok_so` is still `NULL` is skipped **entirely** at posting: no selisih, no `kartu_stok` row, no change to what the room is recorded as holding. Reading `NULL` as zero would erase that product's whole recorded stock the moment its shelf simply had not been reached yet — the single most expensive mistake this module could make, worse even than the freeze failing, because it would happen silently on every partial count. `Ajukan` refuses a document with **no** line counted at all (an empty count is not a document), but never blocks on a partial one — a shelf-by-shelf or category-by-category count is a legitimate way to work, and the response reports `jumlah_belum_dihitung` so a verifier decides with open eyes rather than being blocked by it or kept in the dark about it.
+A line whose `stok_so` is still `NULL` is skipped **entirely** at posting: no selisih, no row, no change. Reading `NULL` as zero would erase that product's whole recorded stock because its shelf had not been reached yet — **the most expensive mistake this module could make**, worse than the freeze failing, because it happens silently on every partial count. `Ajukan` refuses a document with **no** line counted (an empty count is not a document) but never blocks a partial one; the response reports `jumlah_belum_dihitung` so a verifier decides with open eyes.
 
-#### Jebakan utama: menyetel saldo vs memposting selisih
+#### Posting: setting a balance vs posting a selisih
 
-The freeze makes the balance at posting time **equal**, by construction, to `stok_awal` frozen at `TarikSaldo` — but "should be equal" is exactly why an inequality has to be treated as evidence something leaked through the freeze, not smoothed over.
+- **What is posted is `selisih` against the frozen `stok_awal`, never a value the balance is forced to become.** `stok_selisih_lebih = max(stok_so − stok_awal, 0)`, `stok_selisih_kurang = max(stok_awal − stok_so, 0)`, computed once by `UpdateDetailHitung`. Both columns are **always recomputed, never accepted from a form.**
+- **`Posting` re-verifies the room's current balance against the frozen `stok_awal`, under the balance lock, and refuses 409 if they differ** (`periksaSaldoBergeser`). Under an intact freeze this can never fire — which is exactly why it exists: the only thing that could trip it is a bug in the freeze, and the honest response is to refuse, not to post a selisih computed against a balance that has moved.
+- **Surplus is valued at the room's own moving average**, read via `SaldoTerakhir` *after* the balance lock — goods that turn up were always on the shelf, so pricing them at the average leaves it unmoved. It is the one incoming row in this codebase with **no invoice and no counterparty to copy from**.
+- **Deficit is an ordinary outgoing row** and can never be refused for insufficient stock while the freeze is intact (`stok_selisih_kurang ≤ stok_awal`, still the live balance). `invalidOnCheck` stays wired as the last-resort net.
+- **A line whose selisih is zero writes nothing** — `id_kartu_stok_penyesuaian` stays `NULL` forever for it.
+- **If every line is zero or uncounted, the document still posts with no adjustment rows.** The one place this module and `pemakaian` disagree on principle: there an all-zero posting is pointless, here "no selisih found" is the best possible outcome of a count and must be recordable.
+- **The adjustment rows are dated `ts_cutoff`, not `time.Now()`** — the selisih is a fact about the shelf at that instant, and shrinkage reporting asks about the month counted. Consequently **posting is refused if the periode containing `ts_cutoff` is `TUTUP`** — the opposite pressure from every other module's cancellation: a month closes *after* its counts post. The balance chain is untouched by the backdating, since the trigger orders by `id`, never by date.
+- **Cancellation from `POSTED` is dated `time.Now()`**, like every other reversal, and can be refused outright if a surplus's goods have since left. `NilaiMasuk` on a deficit-reversal is copied from the original `NilaiKeluar`; on a surplus-reversal it is an explicit `"0"` and the trigger prices the outgoing leg. Quantity always balances; value does not always.
 
-- **What is posted is `selisih` against the frozen `stok_awal`, never a value the balance is forced to become.** `stok_selisih_lebih = max(stok_so − stok_awal, 0)`, `stok_selisih_kurang = max(stok_awal − stok_so, 0)`, computed once by `UpdateDetailHitung` and never touched again.
-- **`Posting` re-verifies the room's *current* balance against the frozen `stok_awal`, under the balance lock, for every counted line — and refuses 409 if they differ** (`StokOpnameUseCase.periksaSaldoBergeser`). Under an intact freeze this branch can never fire, and that is exactly why it has to exist: the only thing that could ever trip it is a bug in the freeze itself, and the honest response to that is to refuse and say so, not to silently post a selisih computed against a balance that has since moved.
-- Both derived columns are **always** recomputed, **never** accepted from a form — the same rule `status_pembayaran` and `status_penerimaan` follow.
+#### Goods the system has never seen
 
-#### Posting: dua arah, satu nota
-
-- **Surplus is valued at the room's own moving average, read (`KartuStokRepository.SaldoTerakhir`) *after* the balance lock is held** — goods that turn up again are goods that were always on the shelf, so pricing them at the average in force leaves that average completely unmoved. It is the one incoming row in this whole codebase with **no invoice and no counterparty behind it** at all: `pembelian` has a faktur, `mutasi`'s incoming half copies `nilai_keluar` from its own outgoing row, `penerimaan_susulan` copies from a parent line — surplus has none of that to copy from.
-- **Deficit is an ordinary outgoing row** — the trigger overwrites `nilai_keluar`/`harga_pokok_satuan` from the running average, exactly like the outgoing halves of `mutasi` and `pemakaian`. It can never be refused for insufficient stock while the freeze is intact: `stok_selisih_kurang = stok_awal − stok_so ≤ stok_awal`, and `stok_awal` is still the live balance. `invalidOnCheck` stays wired in as the last-resort net regardless.
-- **Lock order for `Posting`: `periode:` → `ruang:` → `(barang, ruang)`, one level deeper than `mutasi`/`pemakaian`.** `StokOpnameUseCase.kunciJalurStok` is the one place all three appear together.
-- **A line whose selisih comes out zero writes nothing** — `id_kartu_stok_penyesuaian` stays `NULL` forever for it, the same "`kartu_stok` never carries a row that moved nothing" rule `pemakaian` follows for a zero-approved line.
-- **If every line is zero or uncounted, the document still posts, with no adjustment rows at all.** This is the one place `stok_opname` and `pemakaian` disagree on principle: `pemakaian` refuses an all-zero posting because "nothing left" makes the whole request pointless, while here "no selisih found" is the best possible outcome of a count and has to be recordable — refusing it would make a clean count impossible to document as having happened.
-- **The adjustment rows are dated `ts_cutoff`, not `time.Now()`** — the selisih is a fact about the shelf at that instant, and monthly shrinkage reporting has to ask about the month counted, not the month the paperwork was finished. Consequently, **posting is refused if the periode containing `ts_cutoff` is `TUTUP`** — the opposite pressure from every other module's cancellation: a month is meant to close *after* its counts are posted, not the other way around. The balance chain itself is untouched by the backdated timestamp, since `kartu_stok_hitung_saldo` orders by `id`, never by date.
-- **Cancellation from `POSTED` is dated `time.Now()`, like every other reversal in this codebase**, and can be refused outright if a surplus's goods have since left the room again — the same shape `mutasi.Batal` already has. `NilaiMasuk` on a deficit-reversal is copied from the original row's `NilaiKeluar`; on a surplus-reversal it is sent as an explicit `"0"` and the trigger prices the outgoing leg. Quantity always balances; value does not always, for the identical reason `pembelian`'s and `mutasi`'s reversals do not.
-
-#### Barang yang sistem belum pernah lihat
-
-A product found on the shelf that has **no** `kartu_stok` row for `(product, this room)` cannot be counted here at all — `id_kartu_stok_cutoff NOT NULL` leaves no reference to point at, and its moving average is unknowable from any count. The alternative — a nullable cutoff reference plus a manually typed cost — was deliberately **not** taken: it would let inventory value be invented through a document nobody double-checks. The real remedy is `pembelian` (a nota that was missed) or `mutasi` (from the room that already has it on its books), entered **after** the opname closes — while it is open, the frozen room refuses both anyway.
-
-#### Read-path scoping (isu #12 fase 6)
-
-`stok_opname` follows `pembelian`/`mutasi`, not `pemakaian`/`penjualan`: `id_ruang` is on the request body, and the mechanism was already built. `periksaRuangUnitAktif` runs on `Create`; there is no later transition to re-check, since nothing about `id_ruang` can change afterwards. `Get` scopes via `diLuarUnitAktif` → 404; `List`'s filter reaches `r.id_unit_kerja`, so its `COUNT` query has to share `stokOpnameFrom` with the row query, the same trap three other modules already hit in fase 6. Every write-path re-read of `detail()` (`Posting`, `Tolak`, `Batal`, ...) passes `nil` — whoever just acted on the document is allowed to see the result of their own action. **The freeze itself is never scoped by unit** — the trigger refuses by room, not by who is posting, so a cross-unit `mutasi` into a room being counted is refused regardless of whose active `unit_kerja` initiated it.
+A product on the shelf with **no** `kartu_stok` row for `(product, this room)` cannot be counted here at all — `id_kartu_stok_cutoff NOT NULL` leaves nothing to point at, and its moving average is unknowable from a count. The alternative (nullable cutoff + a typed cost) was deliberately **not** taken: it would let inventory value be invented through a document nobody double-checks. The remedy is a `pembelian` (a missed nota) or a `mutasi`, entered **after** the opname closes — while it is open the frozen room refuses both anyway.
 
 ### Product, units, and versioned prices (migration 000011)
 
 Three tables, one slice: `product`, `product_satuan`, `product_harga_jual`.
 
-- **The base unit is inserted by the usecase, not the caller** — `faktor = 1`, from `id_satuan_dasar`, in the same transaction as the product. Nothing in the schema enforces it, so a product that slipped through without one would break every conversion built on it. A caller who lists the base unit again collapses into that row; listing it with any other factor is a 400.
-- **`product_satuan.faktor` is `BIGINT`.** Conversions must be whole numbers. A unit holding 2.5 base units cannot be represented, and silently rounding it would corrupt stock arithmetic.
+- **The base unit is inserted by the usecase, not the caller** — `faktor = 1`, from `id_satuan_dasar`, in the same transaction. Nothing in the schema enforces it, so a product slipping through without one would break every conversion built on it. A caller listing the base unit again collapses into that row; listing it with any other factor is a 400.
+- **`product_satuan.faktor` is `BIGINT`.** Conversions must be whole; a unit holding 2.5 base units cannot be represented, and rounding it would corrupt stock arithmetic.
 - **`berlaku_sampai` is exclusive and `NULL` means open-ended**, because `product_harga_jual_no_overlap` ranges over `daterange(berlaku_dari, berlaku_sampai, '[)')`. Closing a version means setting it to the **next version's start date**, not the day before — that leaves neither gap nor overlap.
-- `CloseOpenHargaJual` guards with `berlaku_dari < $3`. Without it, a version starting on or after the new date would be closed to a date at or before its own start, violating `product_harga_jual_periode_check`. A pre-existing future price is a real case, not hypothetical.
-- **Overlap is caught only by the GiST exclusion constraint** (`23P01` → `repository.IsExclusionViolation` → 409). The check spans rows, so no pre-check in Go can replace it: two concurrent requests can both find no overlap and both insert.
-- **`is_default_input` is capped at one per product** by a partial unique index from `000011`. Setting a new default therefore *moves* the flag — `ClearDefaultSatuan` runs first, in the same transaction. Two flagged units in one create request are rejected in Go first, so the message names the field rather than an index.
-- A price may only be set for a unit already in `product_satuan`. **No foreign key ties `product_harga_jual.id_satuan` to `product_satuan`**, so the usecase has to check it.
-- `kode_barang` and `id_satuan_dasar` are **absent from the update DTO** and must stay that way. `kode_barang` identifies the item across every document referencing it; `id_satuan_dasar` would invalidate every `faktor` and every quantity already posted to `kartu_stok`.
-- `InsertSatuan` uses `ON CONFLICT ... DO UPDATE`, not `DO NOTHING`: a success response must never mean the stored factor disagrees with the request.
-- `harga` is scanned as `harga::TEXT`. `NUMERIC(20,2)` into a `float64` rounds money on the way out.
-- Detail is three queries (product, units, prices); list is two and carries **no** children, with the keys omitted rather than empty.
+- `CloseOpenHargaJual` guards with `berlaku_dari < $3`; without it a version starting on or after the new date would be closed to a date at or before its own start. A pre-existing future price is a real case.
+- **Overlap is caught only by the GiST exclusion constraint** (`23P01` → 409). The check spans rows, so no pre-check in Go can replace it.
+- **`is_default_input` is capped at one per product** by a partial unique index, so setting a new default *moves* the flag — `ClearDefaultSatuan` runs first in the same transaction. Two flagged units in one request are rejected in Go so the message names the field.
+- A price may only be set for a unit already in `product_satuan`. **No foreign key ties `product_harga_jual.id_satuan` to `product_satuan`**, so the usecase must check.
+- `kode_barang` and `id_satuan_dasar` are **absent from the update DTO** and must stay so: `kode_barang` identifies the item across every document; `id_satuan_dasar` would invalidate every `faktor` and every quantity already posted.
+- `InsertSatuan` uses `ON CONFLICT DO UPDATE`, not `DO NOTHING`: a success response must never mean the stored factor disagrees with the request.
+- `harga` is scanned as `harga::TEXT` — `NUMERIC(20,2)` into a `float64` rounds money on the way out.
+- Detail is three queries; list is two and carries **no** children, keys omitted rather than empty.
 
-**Harga jual siap pakai (isu #8, no migration — the schema was already complete).** Three pieces, all inside this same slice: the resolver, the correction/deletion of a version, and a cross-product price list.
+**Harga jual siap pakai (isu #8, no migration).** Three pieces in the same slice:
 
-- **`GET /product/{id}/harga-jual` resolves which version is in force, and the resolution is a `WHERE`, never a `DISTINCT ON`.** Because `product_harga_jual_no_overlap` guarantees at most one version can be valid for a given product, satuan, and date, "which one applies" has at most one candidate — there is no "latest wins" tie to break. If that exclusion constraint is ever relaxed, this resolver becomes ambiguous right along with it, which is why the query is written as a plain range check rather than a `DISTINCT ON ... ORDER BY berlaku_dari DESC` that would keep working (wrongly) after such a change.
-- **`FindHargaBerlakuBatch` mirrors `FindFaktorBatch`: one query for a whole basket of `(product, satuan)` pairs**, `unnest` of two arrays, a pair missing from the result meaning no price is in force rather than an error. Built with a comment saying it was for `penjualan`, and since isu #10 it is: `PenjualanUseCase.siapkanDetail` calls it once per document to validate every line's optional `id_harga_jual` against what is actually in force. Also still exercised directly against the repository in its own tests, from before that caller existed.
-- **The WIB truncation decision, made and tested well before anything needed it, and it turned out `penjualan` never does.** `berlaku_dari`/`berlaku_sampai` are `DATE`; `penjualan.tanggal` is `TIMESTAMPTZ`, and cutting a timestamp down to "which calendar date" is timezone-dependent — a sale at 00:30 WIB on the 15th is 17:30 UTC on the *14th*, and truncating in UTC would silently price it against the wrong day. `tanggalHargaJual` in `internal/usecase/product_usecase.go` decides this once: **WIB as a fixed UTC+7 offset** (`time.FixedZone`, not `time.LoadLocation("Asia/Jakarta")`), because Indonesia's western zone observes no daylight saving, so the offset never changes and a fixed zone does not depend on a tzdata database being present in whatever container this runs in. It is what today's default `tanggal` goes through on `GET /product/{id}/harga-jual` when the query param is omitted — the one place this codebase truncates a live instant down to a date. `penjualan.tanggal` never needs it: the client sends an explicit `YYYY-MM-DD`, parsed the same plain way `pembelian.tanggal`/`mutasi.tanggal` always have been, so there is no live instant to truncate and no timezone ambiguity to resolve. `TestTanggalHargaJualMidnightBoundaryWIB` pins the boundary case directly, in an internal test file (`harga_jual_test.go`, package `usecase`) alongside `pembelian_alokasi_test.go` — the second pure-function test in the repository, and for the identical reason: nothing here touches a database.
-- **`PATCH`/`DELETE /product/{id}/harga-jual/{id_harga}` correct or remove a version, both refused 409 once a `penjualan_detail` row references it.** `penjualan_detail.harga_satuan_input` is already a snapshot, so touching the master row never changes what a past document billed — but it would leave `id_harga_jual` pointing at a row that no longer describes the price-list version that document actually came from, and that reference is the only trace of which version that was. `ProductRepository.HargaJualDipakaiDokumen` is the one guard both paths share, checked inside the same transaction as the write so the two cannot see different rows.
-- **`PATCH` accepts only `harga`.** `id_satuan` and `berlaku_dari` are absent from the DTO on purpose: `berlaku_dari` shifts which date range a version covers and can collide with a neighbour, so that correction is delete-and-retype rather than an in-place shift — which is also what should show up in the trail. `id_satuan` is immutable for the same reason `kode_barang` is on `product`: changing it silently rewrites what a row already means.
-- **`DELETE` here is hard, not soft — the third exception to "master data has no `DELETE`", after `user_role` and `dokumen`.** The row it is allowed to remove is one no document references (guarded by the same `HargaJualDipakaiDokumen` check `PATCH` uses), so there is no audit trail to lose: nothing ever depended on it. Write this reasoning down wherever the next reader might reach for a soft-delete pattern instead — it does not apply here for the same reason it does not apply to `user_role`.
-- **`DELETE` always reopens the version before it, in the same transaction as the delete.** `CloseOpenHargaJual` closes a version at the *new* version's `berlaku_dari` when one opens; `ReopenPreviousHargaJual` is the exact inverse, run when one is deleted: it hands the deleted version's own `berlaku_sampai` back to whichever version has `berlaku_sampai` equal to the deleted version's `berlaku_dari`. Skipping this — deleting without reopening — leaves a **gap**: a date range covered by no price at all, which the fase 1 resolver then answers "no price" for a product that plainly has one. A version with nothing before it (the product's very first price) has nothing to reopen; zero rows affected is not an error, it is the honest answer.
-- **`GET /product/harga-jual` (no `{id}`) is the cross-product list, and it is a read that is not its own module** — no new table, no migration, one query added to `ProductRepository`, the same shape `riwayat_beli` set for a projection over rows a repository already owns. Registered ahead of `/product/:id` in `route.go` so the literal `harga-jual` segment cannot be swallowed by the `:id` parameter; `TestStaticSegmentBeatsParamAtSamePosition` in the `route` package pins that Fiber's router actually resolves it that way rather than trusting the claim.
-- **The list is `LEFT JOIN`, not `JOIN`, and the date filter lives in the join's `ON` clause, not in `WHERE`.** A product with no price in force on the requested date — including one with no price at all, ever — is exactly the row this list exists to surface, so it must still produce one row with null price columns. Putting the date range check in `WHERE` instead would silently turn the `LEFT JOIN` back into an inner join and drop precisely those products. `daftarHargaFrom` is shared between the `COUNT` and the row query, same discipline as every other filtered list in this codebase.
-- **`ORDER BY` ends in `(p.id, h.id_satuan)`.** `p.id` alone is unique per product but not per row, since one product can carry several priced satuan; `h.id_satuan` is what makes those rows deterministic, and it can be `NULL` only for a product with zero price rows — which can only ever produce that one row, so the pair stays unambiguous.
+- **`GET /product/{id}/harga-jual` resolves the version in force with a `WHERE`, never a `DISTINCT ON`.** The exclusion constraint guarantees at most one candidate, so there is no "latest wins" tie to break. Written as a plain range check on purpose: a `DISTINCT ON ... ORDER BY berlaku_dari DESC` would keep working (wrongly) if that constraint were ever relaxed.
+- **`FindHargaBerlakuBatch` mirrors `FindFaktorBatch`** — one query for a whole basket, `unnest` of two arrays, a missing pair meaning no price in force rather than an error. `PenjualanUseCase.siapkanDetail` is the caller.
+- **The WIB truncation decision.** `berlaku_*` are `DATE`; a timestamp cut down to "which calendar date" is timezone-dependent (00:30 WIB on the 15th is 17:30 UTC on the *14th*). `tanggalHargaJual` decides it once: **WIB as a fixed UTC+7 offset** (`time.FixedZone`, not `time.LoadLocation`) — Indonesia's western zone has no DST, so the offset never changes and nothing depends on tzdata being present in a container. It applies only to the default `tanggal` on `GET /product/{id}/harga-jual`; `penjualan.tanggal` never needs it, since the client sends an explicit `YYYY-MM-DD`. Pinned by `TestTanggalHargaJualMidnightBoundaryWIB` (internal test, no database).
+- **`PATCH`/`DELETE /product/{id}/harga-jual/{id_harga}` are both refused 409 once a `penjualan_detail` row references the version.** `harga_satuan_input` is already a snapshot, so touching the master never changes what a document billed — but it would leave `id_harga_jual` pointing at a row no longer describing the version that document came from, and that reference is the only trace of which version that was. `HargaJualDipakaiDokumen` is the shared guard, checked inside the same transaction as the write.
+- **`PATCH` accepts only `harga`.** `berlaku_dari` shifts which range a version covers and can collide with a neighbour, so that correction is delete-and-retype — which is also what should show up in the trail. `id_satuan` is immutable for the reason `kode_barang` is.
+- **`DELETE` here is hard** — the third exception to "master data has no `DELETE`", after `user_role` and `dokumen`. The row it may remove is one no document references, so there is no audit trail to lose.
+- **`DELETE` always reopens the previous version, in the same transaction.** `ReopenPreviousHargaJual` is the exact inverse of `CloseOpenHargaJual`: it hands the deleted version's `berlaku_sampai` to whichever version ends at the deleted version's `berlaku_dari`. Skipping it leaves a **gap** — a date range with no price, which the resolver then answers "no price" for. A version with nothing before it has nothing to reopen; zero rows affected is the honest answer, not an error.
+- **`GET /product/harga-jual` (no `{id}`) is the cross-product list**, a read that is not its own module. Registered **ahead of `/product/:id`** in `route.go` so the literal segment is not swallowed by the parameter (`TestStaticSegmentBeatsParamAtSamePosition`).
+- **That list is `LEFT JOIN`, and the date filter lives in the join's `ON` clause, not in `WHERE`.** A product with no price in force on the requested date is exactly the row the list exists to surface; putting the range check in `WHERE` silently turns the `LEFT JOIN` back into an inner join and drops precisely those products. `daftarHargaFrom` is shared between `COUNT` and rows.
+- **`ORDER BY` ends in `(p.id, h.id_satuan)`.** `p.id` alone is unique per product but not per row, since one product can carry several priced satuan.
 
 ### Users and roles (migration 000010)
 
-One user holds many grants. `user_role` is the only record of that. What a user *may* do is still the union of every grant they hold — `RoleRepository`/`UnitKerjaRepository` validate against all of them, and the management view (`GET /api/v1/user`) lists all of them. What a **session** authorizes as, since isu #12 fase 4, is exactly one of them at a time — see "Konteks aktif per sesi" above. Don't conflate the two: a user's grants are a set; a session's active context is a single choice from that set.
+One user holds many grants; `user_role` is the only record of that. What a user *may* do is the union of every grant they hold; what a **session** authorizes as is exactly one of them at a time. **Don't conflate the two.**
 
-- **`users.role_active` is gone.** Migration `000002` declared `UNIQUE (role_active)`, which is unique across the whole table rather than per user, so the system could hold exactly one cashier and the second was rejected by the database. Its FK also pointed at `user_role (id)` without `user_id`, so user A's active role could point at user B's grant. Migration `000010` drops the column outright rather than repairing it. Don't reintroduce it; if a "default module on login" preference is ever wanted, that is a UI preference column, not a permission gate. See "Wewenang bertempat" above for why `user_role.id_unit_kerja` (migration `000020`) is not this column resurrected under a new name.
-- **Roles are seeded, then editable.** `SUPERADMIN`, `CASHIER`, `INVENTARIS` come from `db/seeder_postgres/003_role.sql`. `PATCH /api/v1/role/{id}` can rename them, and **renaming a role that authorization code checks by name breaks that code** — nothing in the database can catch it. Retire with `is_aktif = false` and add a new role instead.
-- **A grant is `(role, unit_kerja)`, not just role, since migration `000020`.** `grants` on `POST`/`PATCH /api/v1/user` replaces the whole set: absent leaves grants alone, `[]` revokes everything, a list ends with exactly those grants. An explicit `null` is rejected, because `[]` already says "no grants". Each entry is `model.GrantRequest{IDRole, IDUnitKerja}` — `IDUnitKerja` nil means the role applies everywhere. `Optional[[]model.GrantRequest]` is the DTO, and it must stay registered in `config.NewValidator` alongside the other `Optional` instantiations.
-- **The same role may be granted more than once per user, one row per unit.** "INVENTARIS at outlet A" and "INVENTARIS at outlet B" are two distinct `user_role` rows, not a duplicate — `usecase.toGrants` deduplicates by the `(id_role, id_unit_kerja)` **pair**, not by role id alone, so sending both in one request grants both. `entity.User.Roles` reflects this: it is `[]entity.RoleGrant`, and the same role's name can legitimately appear more than once in it.
-- **`ReplaceRoles` is a diff, not delete-then-insert.** Rows for grants that survive the change are left alone so `user_role.created_at` keeps saying when the grant actually started. The comparison is **`NULL`-safe** (`IS NOT DISTINCT FROM` on `id_unit_kerja`, inside a `NOT EXISTS` anti-join), not `<>` — `id_unit_kerja <> ...` is `NULL` (never `TRUE`) whenever either side is `NULL`, so a naive port of the old `role_id <> ALL($2)` pattern would silently keep every global grant no matter what. See "Wewenang bertempat" above for the full trap and how the insert side works around the same limitation by using two `ON CONFLICT` statements instead of one.
-- `user_role` is the one table in the codebase where `DELETE` is correct. It is a join table that no transaction table references, so revoking a grant breaks no foreign key and erases no document history — `created_by` on documents points at `users`, not at `user_role`.
-- **A roles-only patch still has to move `updated_at`**, which is what `UserRepository.Touch` is for: it writes no other column, fires the `users_set_updated_at` trigger, and yields `sql.ErrNoRows` so an unknown id still answers 404.
-- **Role ids and unit ids are both validated before the write**, not left to the foreign key: the FK cannot tell a retired row from a live one, and its message names a constraint rather than the field. `RoleRepository.CountActiveByIDs` and `UnitKerjaRepository.CountActiveByIDs` each compare a count against the number of **deduplicated** ids for their own kind — pass duplicates and a valid request is wrongly rejected. The two checks are independent and produce different messages, so an operator learns which field was wrong. `repository.IsForeignKeyViolation` (SQLSTATE `23503`) is the race backstop for both, mapping to a 400.
-- **Passwords are bcrypt hashes, hashed in the usecase.** `model.UserResponse` has no password field at all, which is what makes a leak structurally impossible rather than a matter of remembering. bcrypt refuses input over 72 **bytes** while the DTO's `max=72` counts **runes**, so `hashPassword` maps `bcrypt.ErrPasswordTooLong` to `model.Invalid` for the multibyte case.
-- Attaching grants to a page of users is **one extra query, not one per user** (`FindRolesByUserIDs` with `= ANY($1)`, `LEFT JOIN unit_kerja`). `pgx/stdlib` implements `CheckNamedValue`, so a Go `[]int64` (and, since fase 3, `[]*int64` for a nullable `BIGINT[]`) passes through `database/sql` untouched — no array wrapper needed.
-- The `role_id` list filter is an **`EXISTS`, never a join**. A join to `user_role` returns one row per matching role and silently multiplies the page when a user holds several, breaking both `LIMIT` and `total_item`.
-- A user's grant list **includes grants whose role, or whose unit, was retired after being granted** — the grant is still real and still needs revoking. `RoleRef.is_aktif` tells a retired role apart; `RoleRef.is_aktif_unit_kerja` (fase 4) is its counterpart for the unit, nil exactly when `id_unit_kerja` is nil. This management view intentionally shows *everything held*, retired or not — the filtering down to what a session may act as happens only in `AuthUseCase.attachRolesForLogin`/`grantUsableBy`, never here.
-- `username`, `email`, and `role.nama` are unique **case-insensitively** via `lower(...)` indexes, same as master codes. `email` is nullable, so any number of users may have none.
-- **The JWT claim carries every usable grant, plus which one is active — see "Konteks aktif per sesi" above for the full design.** It is not a flat role-name list any more; `model.Grant`/`model.ActiveContext` are the shape, shared by the claims, `Session`, and the login/switch-context responses alike.
+- **`users.role_active` is gone.** Migration `000002` declared `UNIQUE (role_active)` — unique across the whole table rather than per user, so the system could hold exactly one cashier. Its FK also pointed at `user_role (id)` without `user_id`, so user A's active role could point at user B's grant. `000010` drops it rather than repairing it. **Don't reintroduce it**; a "default module on login" preference would be a UI preference column, not a permission gate.
+- **Roles are seeded, then editable.** `PATCH /api/v1/role/{id}` can rename them, and **renaming a role that authorization code checks by name breaks that code** — nothing in the database can catch it. Retire with `is_aktif = false` and add a new role instead.
+- **A grant is `(role, unit_kerja)`.** `grants` on `POST`/`PATCH /api/v1/user` replaces the whole set: absent leaves grants alone, `[]` revokes everything, a list ends with exactly those. An explicit `null` is rejected, because `[]` already says "no grants".
+- **The same role may be granted more than once per user, one row per unit.** `usecase.toGrants` deduplicates by the `(id_role, id_unit_kerja)` **pair**, not by role id. `entity.User.Roles` is `[]entity.RoleGrant`, so the same role name can legitimately appear twice.
+- **`ReplaceRoles` is a diff, not delete-then-insert** — surviving grants are left alone so `created_at` keeps saying when the grant started. See "Unit kerja (isu #12)" for the `NULL`-safe comparison and the two-`ON CONFLICT`-statement insert.
+- `user_role` is the one table where `DELETE` is correct: a join table no transaction table references, so revoking breaks no foreign key and erases no history (`created_by` points at `users`, not at `user_role`).
+- **A roles-only patch still has to move `updated_at`** — that is `UserRepository.Touch`: writes no other column, fires the trigger, and yields `sql.ErrNoRows` so an unknown id still answers 404.
+- **Role ids and unit ids are both validated before the write**, not left to the foreign key (which cannot tell retired from live and names a constraint rather than a field). `CountActiveByIDs` compares a count against the number of **deduplicated** ids — pass duplicates and a valid request is wrongly rejected. `IsForeignKeyViolation` is the race backstop.
+- **Passwords are bcrypt hashes, hashed in the usecase.** `model.UserResponse` has no password field at all, which makes a leak structurally impossible rather than a matter of remembering. bcrypt refuses input over 72 **bytes** while the DTO's `max=72` counts **runes**, so `hashPassword` maps `bcrypt.ErrPasswordTooLong` to `model.Invalid`.
+- Attaching grants to a page is **one extra query, not one per user** (`FindRolesByUserIDs` with `= ANY($1)`). `pgx/stdlib` implements `CheckNamedValue`, so a Go `[]int64` (and `[]*int64` for a nullable `BIGINT[]`) passes through `database/sql` untouched.
+- The `role_id` list filter is an **`EXISTS`, never a join** — a join returns one row per matching role and silently multiplies the page, breaking both `LIMIT` and `total_item`.
+- A user's grant list **includes grants whose role or unit was retired** — the grant is still real and still needs revoking. `RoleRef.is_aktif` / `is_aktif_unit_kerja` tell them apart. Filtering down to what a session may act as happens only in `attachRolesForLogin`/`grantUsableBy`.
+- `username`, `email`, and `role.nama` are unique **case-insensitively** via `lower(...)` indexes. `email` is nullable, so any number of users may have none.
+
+### Unit kerja, active context, and scoping (isu #12, migrations 000019–000020)
+
+Answering not just *who* but *acting as what, and where*. All five load-bearing phases are built, plus the read-scoping piece of the optional phase 6. **Deferred, not overlooked: `users.id_ruang_default` and a role-as-snapshot column on documents.**
+
+**This is not `users.role_active` revived.** A grant is a row a caller *holds*, not a pointer to "the" active one; a user can hold the same role at two units as two rows, which `role_active` structurally could not express. The active context lives in the JWT, never in a column on `users`.
+
+#### Fase 1 — three decisions made up front
+
+- **`document_counter` should get a per-unit series** — key `(prefix, id_unit_kerja, tahun, bulan)`. **Not implemented yet**; `Next` still keys on the old triple. **Change the key before any two real outlets share one series** — once a number is on paper in a supplier's hands, the key cannot change under it.
+- **`periode` stays global**, one close/open per `(tahun, bulan)` for the whole company. An outlet closing August while another posts into it produces a consolidated report nobody can explain. If per-unit closing is ever needed, `periode` gains `id_unit_kerja` and the advisory-lock key must grow the unit into **both** copies of the expression (migration `000017` and `periodeLockKey`) or one side stops waiting for the other.
+- **Cross-unit `mutasi` is allowed.** Moving stock between outlets is what `mutasi` is for; restricting it would leave no document for restocking a branch from the central warehouse. Posting stays partitioned by `(id_barang, id_ruang)`, never by unit.
+
+#### Fase 2 — the `unit_kerja` master and `ruang.id_unit_kerja` (migration 000019)
+
+- **A plain master slice — follow `supplier`**: nullable case-insensitive unique `kode`, `Optional[T]` PATCH, retirement via `is_aktif`, no `DELETE`. Carries only `kode`, `nama`, `is_aktif`, audit columns. `nama` is **not** unique. Uses `supplier`'s `ExistsByKode` (optional, checked only when supplied), not `satuan`'s `ExistsByNama`.
+- **`ruang.id_unit_kerja` is `NOT NULL`, and the backfill lives in the migration, not the seeder.** The migration creates one default unit (`kode = 'PUSAT'`) and points every existing `ruang` at it **before** adding the `NOT NULL`, in the same transaction — that is what makes it safe on a database that already has rows. A seeder backfill would only ever be safe on a fresh database, since nothing guarantees a seeder runs before a later migration's `NOT NULL`. `001_ruang.sql` points its rows at `'PUSAT'` **by lookup, not by a hardcoded id**.
+- `RuangUseCase.Create` validates `id_unit_kerja` names an *active* unit — the foreign key cannot tell retired from live. `ruang` still has no `PATCH`, so a room's unit cannot change through the API.
+
+#### Fase 3 — `user_role.id_unit_kerja` (migration 000020)
+
+A grant is the pair `(role, unit_kerja)`. **`NULL` means "every unit"** — the shape the seeded `SUPERADMIN` grant takes and every pre-migration grant keeps.
+
+- **Two unique indexes, not one, because a unique index does not constrain `NULL`.** `user_role_grant_uidx` on `(user_id, role_id, id_unit_kerja)` covers scoped grants, but PostgreSQL treats `NULL <> NULL`, so it alone would allow ten identical *global* grants. `user_role_grant_global_uidx` — partial on `(user_id, role_id) WHERE id_unit_kerja IS NULL` — closes that. **Both are required.**
+- **`ReplaceRoles`'s diff had to become `NULL`-safe, and the old code could not be patched in place.** The delete used to be `role_id <> ALL($2)`; that comparison is `NULL` (not `TRUE`) whenever either side is `NULL`, so a plain port would silently keep every global grant no matter what the replacement set said. The fix is `NOT EXISTS (... WHERE t.role_id = ur.role_id AND t.id_unit_kerja IS NOT DISTINCT FROM ur.id_unit_kerja)` — the one comparison PostgreSQL defines to treat two `NULL`s as equal. `TestUserRevokingGlobalGrantActuallyDeletesIt` pins it.
+- **The insert is two statements, for the same reason.** One `INSERT ... ON CONFLICT` names exactly one arbiter index, and scoped/global grants are protected by two different ones. `ReplaceRoles` filters its input in Go and runs each half against its own arbiter — PostgreSQL has no syntax for satisfying both at once.
+- **The DTO changed shape, not just name**: `role_ids` (`Optional[[]int64]`) → `grants` (`Optional[[]model.GrantRequest]`), where `GrantRequest` is `{id_role, id_unit_kerja}` with a nullable optional pointer. `Optional[[]model.GrantRequest]` **must stay registered in `config.NewValidator`** or its `dive` tag silently stops validating each entry.
+- **`id_unit_kerja` is validated active independently of `id_role`, with its own message** — a bad role and a bad unit are different problems. Both are pre-checks; `invalidOnForeignKey` is the race backstop.
+- **`FindRolesByUserIDs` still costs one query per page** (`LEFT JOIN unit_kerja` alongside the existing `JOIN role`), and still returns grants whose unit was retired.
+- `004_superadmin.sql`'s `ON CONFLICT` now names the **partial** index (`(user_id, role_id) WHERE id_unit_kerja IS NULL`) — the seeded grant is, and must stay, global.
+
+#### Fase 4 — active session context, `POST /auth/switch-context` (no migration)
+
+A token authorizes as **one** active grant, not the union of everything held. Lives entirely in the JWT claims and the two usecases that mint them.
+
+- **`model.Grant` and `model.ActiveContext` are one pair of types for three jobs** — the JWT claim shape, `Session`'s fields, and what `LoginResponse`/`SessionResponse` return. Only `entity.RoleGrant` needs `toGrantList`/`toActiveContext` to cross over.
+- **`Session.HasRole` compares the active grant alone, never the full list** — that one line is the entire enforcement mechanism. `RequireRole` and every guard in `route.go` are **byte-for-byte unchanged**; a session with `Aktif == nil` fails every check by construction.
+- **Login auto-selects when there is no ambiguity and refuses to guess otherwise.** Exactly one usable grant becomes active automatically; two or more issue a token with `Aktif: nil`, which authorizes nothing until `switch-context`. There is no default among several that would not risk someone acting under an authority they did not realize they picked. `auth/me` and `switch-context` remain reachable — neither carries a `RequireRole` guard.
+- **`grantUsableBy` is the single predicate `Login`'s filtering and `SwitchContext`'s validation share**, so the two cannot drift on what "usable" means (role active, unit active-or-absent, ownership).
+- **`SwitchContext` re-reads the grant from the database — the one place in the whole design a token's claims are not trusted.** The caller is naming a grant by id, and a stale token could name one since revoked or retired. A deliberate, narrow exception to "no per-request lookup", scoped to exactly one endpoint.
+- **Every rejection collapses to one 403** (`"grant does not exist or is not usable"`) — distinguishing them would let a caller probe which grant ids exist for other users.
+- `SwitchContext` takes a `userID int64`, not a `*model.Session` — the controller extracts it via `middleware.SessionFrom`.
+- **Switching cannot revoke the token being switched away from, and is not trying to.** The old token stays valid until expiry. Same limitation as everywhere; **do not "fix" it with a blacklist.**
+- **This is not a security boundary against the token's own holder** — it is a least-privilege and clarity control. Holding two grants means both are yours; switching only changes which is active.
+
+#### Fase 5 — `id_ruang` validated against the active unit (no migration)
+
+`unit_kerja → ruang` is one-to-many, so the active unit never implies *which* room a document means. The client still picks; the id it sends is now checked.
+
+- **`periksaRuangUnitAktif` (`shared.go`) is the shared function**, the role `periksaPeriode` plays for closed months — except it guards nothing on the database side, because `ruang.id_unit_kerja` cannot change (no `PATCH`), so there is no race. A `nil` `aktifIDUnitKerja` skips the check entirely — the reading `id_unit_kerja IS NULL` carries everywhere. An **unknown `id_ruang` is deliberately let through**: that failure belongs to the foreign key.
+- **Validation, not a default.** `AktifIDUnitKerja *int64` rides on the request DTOs, filled by the controller from `session.Aktif.IDUnitKerja` via `aktifIDUnitKerja(ctx)` — never from the body, and never used to substitute a room the client didn't ask for. A server filling in a default while still accepting whatever `id_ruang` the body sent would make the scoping decorative.
+- **Only `pembelian`, `mutasi`, and `stok_opname` have `id_ruang` in their own request body, so only they check it.** `penerimaan_susulan`/`retur_pembelian` copy it from the parent, whose `Create` already validated it. `pembelian`'s `PATCH` has no `id_ruang` field; `mutasi` needs it on `Create` **and** `Update` (both rooms may change while `DRAFT`); `stok_opname` only on `Create`.
+- **`mutasi` checks `id_ruang_asal` only, never `id_ruang_tujuan`.** The active unit is exactly one unit, so requiring both would make every permitted mutasi same-unit in practice, quietly reversing fase 1's decision. Checking the source alone matches the authority actually asserted: goods are leaving a room the caller is responsible for; where they land is not a claim about their own authority.
+- `mutasi`'s `Update` checks only when `id_ruang_asal` is present in the patch, and only the new value — mirroring the `asal <> tujuan` check just above it.
+- **`RuangRepository.IDUnitKerjaByID`** is a one-column read, not `FindByID`'s join — this check needs only the unit id, on a path every write now takes.
+- `PembelianUseCase`, `MutasiUseCase`, and `StokOpnameUseCase` each borrow `RuangRepository` for it — the "borrow a repository for a narrow read" shape.
+- **`users.id_ruang_default` was deliberately not built.** It saves the client one field; it is not an authorization boundary. Add it only if the convenience is asked for, and **never let it double as validation.**
+- **`pemakaian` and `penjualan` deliberately opt out** of both fase 5 and fase 6 — neither issue asked for the scope, and neither module adds it on its own initiative.
+
+#### Fase 6 — read-path scoping (no migration)
+
+Built after being explicitly asked for. Scoped: `ruang`, `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `mutasi`, `stok_opname`, and `product/{id}/stok`.
+
+- **What "scoped" means depends on the shape of the read.** A `Get` answers **404**, not 403, for a resource outside the active unit — the same answer an id that never existed gets, on purpose: a 403 would itself confirm the resource is real. A `List` (and `product/{id}/stok`, which is list-shaped) simply **omits** rows, silently, the way a page with no matches always looks.
+- **`diLuarUnitAktif` (`shared.go`) is deliberately a separate function from `periksaRuangUnitAktif`**, not a shared one: the write-side check returns `model.Forbidden`, and reusing it would make a scoped `Get` leak exactly the fact it exists to hide. It returns a bare `bool`; every call site maps `true` to `model.NotFound` itself, so the 403-shaped mistake must be written out loud rather than inherited. A `nil` active unit excludes nothing.
+- **Every scoped module gained one column alongside what it already read, never a second query** — an unexported `IDUnitKerjaRuang int64` on the entity, joined into the query that already joins `ruang` for its name. One column added to each `xReadColumns`, one scan target added to each `scanXRead`. `mutasi`'s is named `IDUnitKerjaRuangAsal` and comes from `asal.id_unit_kerja`.
+- **The check lives in the `detail()` helper, threaded as a parameter rather than read from ambient state.** `Get` (and `pembelian`'s `Sisa`) passes the caller's real active unit; **every write-path call — `Create`'s re-read, `Ajukan`, `Posting`, `Tolak`, `Batal`, `ReplaceDetail`, `BagiRataKoli` — passes `nil`.** A caller who just posted a document is by construction allowed to see the response their own action produced; scoping that re-read would make a legitimate action look like a 404.
+- **A filter clause reaching a joined table forces the `COUNT` query to join it too**, and four modules had to change for exactly that: each `Search` had been running `COUNT` against a bare `FROM table` that never reached `ruang`. Changing it to use the same `xFrom` constant as the row query is what "write the filter once, both queries use it" actually requires. `mutasi` needed the same fix even though `mutasiFrom` already joined both rooms for their names.
+- **`mutasi` inherits fase 5's source-only asymmetry on the read side too.** A transfer whose destination is in another unit stays fully visible to whoever owns the source room; a caller who owns only the destination cannot see it at all, even though the goods are headed there. **Visibility follows the room a caller asserts authority over, not every room the document touches.** `TestMutasiGetVisibleWhenOnlyDestinationRuangOutsideActiveUnit` pins the case a reader arriving from the other modules would expect to be scoped and isn't.
+- **`GET /product/{id}/stok` is scoped in `KartuStokRepository.SaldoPerRuang`, and the filter sits on the *outer* query**, after `DISTINCT ON (ks.id_ruang)` has picked one row per room. Filtering earlier could only change which row wins each group, and since the key *is* the room it cannot change any surviving row — keeping the filter outside makes that true by construction rather than by argument.
+- **Query-string spoofing is closed the way `ActorID` already is.** Every `AktifIDUnitKerja` field carries `json:"-"` (body-bound) or `query:"-"` (query-bound; Fiber v3's binder is `gorilla/schema` under an alias tag — confirmed against the vendored source, not assumed), and the controller **overwrites the field unconditionally after binding** regardless of whether the tag alone would suffice.
+- **The freeze in `stok_opname` is never scoped by unit** — the trigger refuses by room, not by who is posting.
+- Tests live in `fase6_read_scope_test.go`, one file spanning every scoped module, so the one real asymmetry reads as a deliberate exception rather than a forgotten module.
+
+### Periode and book closing (migration 000017)
+
+The act that makes a month refuse further stock movements. The tables and the trigger's respect for them predate this by fourteen migrations; what was missing was any Go at all.
+
+- **Master-data shaped but cross-cutting — follow `supplier`, not `pembelian`.** No number, no lines, no posting. What makes it unlike a master slice is that the row it writes is read by the `kartu_stok` trigger on every insert, so **every stock-writing module inherits the refusal without a line of code**. That is also why the write guard is `SUPERADMIN` rather than a data owner: closing a month is not this module's data changing, it is every other module losing the ability to post into it.
+- **A month with no row is open**, which shapes everything: closing **creates** the row (hence the upsert), `Get` answers a synthetic `BUKA` rather than 404, and `Search` cannot list months nobody has touched — the table records closings, not a calendar.
+- **Routes are keyed `(tahun, bulan)`, not `/{id}`** — the only module departing from that. The pair is the real identity, and an id-keyed route could not address the ordinary case at all, since an unclosed month has no id. The response carries **no `id` field**, so a stored and a synthetic month have the same shape.
+- **The reversing-row date is the decision this issue was really about.** Posting is dated on the document; cancellation is dated `time.Now()`. So **voiding a document whose period has since closed still works** — the reversal lands in the current period and the closed month's figures do not move. The alternative leaves a mistyped document from a closed month with no way out. The cost is stated plainly in `PembelianUseCase.Batal`: the document reads `BATAL` while the closed month's ledger still carries its movement, so **anything reporting per period must read `kartu_stok`, never the document status.** What *can* block a cancellation is the **current** period being closed.
+- **Closing and posting are serialised by an advisory lock, not a row lock.** The trigger takes `pg_advisory_xact_lock_shared` on `hash('periode:' || tahun || '-' || bulan)`; `PeriodeRepository.Lock` takes the exclusive side. `SELECT ... FOR SHARE` was rejected because an unclosed month **has no row** — precisely the case that matters. **The key expression is duplicated between migration `000017` and `periodeLockKey`; the two must produce the same string or neither side waits.** `TestTutupMenungguPostingYangSedangBerjalan` fails against the pre-`000017` trigger, so it is a real test.
+- The periode lock shares the `hashtextextended(..., 0)` key space with the `(barang, ruang)` and `ruang:` locks, separated only by prefix. A 64-bit collision costs an unrelated writer a short wait, never a wrong answer. **The periode lock is taken first, uniformly**, so there is no path to a deadlock.
+- **Reopening is allowed, `SUPERADMIN` only**, and `000017` adds `dibuka_oleh`/`ts_buka` for it — without them, closing after a reopening overwrites `ditutup_oleh`/`ts_tutup` and nothing records the month was ever reopened. `Tutup` therefore leaves the reopening columns alone. A pair of columns rather than an audit table: full history is a different question, answerable when actually asked.
+- **`Buka` is an UPDATE, not an upsert, and the asymmetry is the point.** Reopening a month with no row would insert a row saying `BUKA`, which is what a missing row already means. It repeats `status = 'TUTUP'` in the `WHERE`, so `sql.ErrNoRows` covers both "never closed" and "someone reopened it first" — one message, a 409. Closing an already-closed month is a 409 too: neither changes anything, and a 200 would let a caller believe otherwise.
+- **Closing is not required to be sequential.** August may be closed while July is open — requiring an order would force closing every unused month first, and enforcement is per month inside the trigger, not a running total.
+- **`periksaPeriode` (`shared.go`) is for the message, not the guard** — a trigger's `RAISE` carries no constraint name, so `invalidOnCheck` cannot separate a closed period from insufficient stock. It runs in `Posting` (on the document's date) and `Batal` (on **today's**, since that is what the reversal is dated), answering 400 to match the trigger's mapping. A closing that commits between check and insert is still caught, just with the vaguer message.
+- No `created_at`/`updated_at` and no trigger — `ts_tutup`/`ts_buka` already answer the useful question.
+
+### Dokumen and file attachments (migration 000016)
+
+Uploaded files attached to whichever document they belong to. Two things make it unlike every other slice: it holds a store that is not the database, and its reference is polymorphic.
+
+- **Upload first, attach later, forced by the physical world.** The photo is taken while the box is being opened, before the `pembelian` exists. A row is born with `ref_table`/`ref_id` NULL and `POST /dokumen/{id}/tempel` claims it afterwards. **The nullable `ref_id` is the feature** — it makes an orphan possible and, through a partial index `WHERE ref_id IS NULL`, cheap to find.
+- **Attaching is one endpoint, not a `dokumen_ids` field on every document.** A module that starts accepting attachments adds one line to `repository.RefTableDokumen` — no migration, no DTO change. That map is also the only thing standing between `ref_table` and an arbitrary string (there is no foreign key behind a polymorphic reference), and why `StatusRef` may interpolate a table name into SQL at all: what reaches the query is a key of the map, never the caller's string.
+- **The write order cannot be swapped.** Upload writes the file, then the row, deleting the file if the row fails; deletion goes file first, then `deleted_at`. Same rule both ways — whichever half survives a crash has to be the recoverable one. A row pointing at a missing file cannot be repaired by anyone, because nothing knows what the file should have contained.
+- **MIME comes from the bytes, extension from the MIME, storage name from a UUID.** The client's filename is display text and reaches the filesystem never. `LocalDokumenStorage.path` **rejects** rather than sanitises: `filepath.Base` would quietly turn a traversal into a write to the wrong place, and a bug that makes no sound is worse than an error.
+- **The size limit is enforced on the stream** (`io.LimitReader`, reading one byte past the limit so "exactly at" is distinguishable from "truncated"). `Config.BodyLimit` is derived from `dokumen.max_size_mb` in `config.NewFiber` — Fiber's 4 MB default would otherwise silently cap a configured 10 MB.
+- **Downloads stay behind the token and always as an attachment** — `Content-Disposition: attachment` plus `X-Content-Type-Options: nosniff`, so a stored HTML or SVG cannot execute in the application's origin. `dispositionLampiran` reduces the quoted form to safe ASCII and carries the real name in RFC 5987 `filename*`: `nama_asli` is arbitrary client bytes, and a CR in a header value is header injection.
+- **The cleanup job works from rows, never a directory scan** — a scan would sweep up files whose row is written but not yet committed. Safe against a second worker in two layers: a session-level `pg_advisory_lock` (on a `*sql.Conn`, since releasing from another pooled connection does nothing) and one transaction with a row lock per file, so an attach racing a sweep blocks instead of losing its bytes.
+- **Soft delete** — the row survives with `deleted_at`, only the file goes. That trace is what makes the sweep re-runnable.
+- Removal is allowed **only while orphaned or while the parent is `DRAFT`**. Attaching to a `BATAL` parent is refused for the mirror reason: it could never be removed again.
+- **No role guard beyond being authenticated**, and that is not the reads-are-open rule stretched over writes: attachments belong to no module, so no data owner can be named. **State protects them** — inert until claimed, refused past `BATAL` or ten files, unremovable past `DRAFT`.
+- Config under `dokumen.*`, read by **both** entrypoints. `dokumen.storage_path` must resolve to the same directory in `web` and `worker` (one volume mounted on both in compose) — point them apart and the sweep finds rows, finds no files, and marks them deleted anyway.
+- `checksum_sha256` reports `duplikat_dari_id` and never refuses: one scan legitimately belongs to two documents.
+
+### Reads that are not modules
+
+#### Stok per ruang
+
+`GET /api/v1/product/{id}/stok` — and the **first read of `kartu_stok`**. Three repository methods, built as their own phase because everything after wants them: `SaldoTerakhir` (one pair), `SaldoBatch` (many pairs, one query, `unnest`), `SaldoPerRuang` (one product across rooms). `SaldoBatch` backs every module's negative-stock pre-check.
+
+- **A pair with no rows is a balance of zero, not a missing record** — the reading the trigger takes when it COALESCEs, and the shape `periode` uses for an unclosed month. `SaldoTerakhir` returns the zero value; `SaldoBatch` omits the key.
+- **It is a read and never a guard.** The balance is decided inside the trigger under an advisory lock precisely so no reader can get in front of it.
+- **No pagination** — one row per room the product has moved through; `ruang` is small and every caller wants all of them. Rooms the product has never been in do not appear; a room that emptied out still does, with zero. Unknown product → 404; a product that has never moved → empty list.
+
+#### Riwayat harga beli
+
+`GET /api/v1/product/{id}/riwayat-beli` — the replacement for the purchase order this system deliberately does not have, and the worked example of a read that is not a module.
+
+- **Nothing new is stored.** Every POSTED `pembelian_detail` row is already a price actually paid, which is worth more than a quotation. A table for this would create a second source of truth.
+- **SQL in `pembelian_repository.go`, endpoint hangs off product.** `ProductUseCase` borrows `PembelianRepository` — the query is over another module's tables, so it stays in that module's repository.
+- **Two prices, and collapsing them is the mistake to avoid.** `harga_satuan_dasar` (= `subtotal / qty_dasar`) is the invoice per base unit and what a supplier's next quote is compared against; `harga_pokok_satuan_dasar` is after nota discount, PPN share, and freight, and is what margin is judged against. Negotiating with the second holds the supplier responsible for the carrier's bill; costing with the first drops freight entirely. `harga_satuan_input` is reported but **not comparable** (per input unit).
+- **The product is looked up first**, so an unknown id answers 404 and a product nobody has bought answers an empty page — different facts, and a client that cannot tell them apart shows the wrong message.
+- **Only POSTED** — a DRAFT is a typed page and a BATAL was withdrawn; one condition covers both.
+- `DISTINCT ON (p.id_supplier)` forces the inner `ORDER BY` to lead with `id_supplier`, hence the wrapping query that re-sorts by date; the outer `ORDER BY` ends in `id_supplier`, unique across the subquery *because* `DISTINCT ON` made it so. The inner tiebreaker `d.id DESC` matters: one document may carry the same product twice.
+- The division is safe because `qty_dasar > 0` is a CHECK. Casting to `NUMERIC(20,4)` rounds halves away from zero, matching `formatNumeric`.
 
 ### Inventory data model (migrations 000002–000008)
 
-`pembelian`, `penerimaan_susulan`, `retur_pembelian`, `pembayaran_utang`, `mutasi`, `pemakaian`, and `penjualan` now exercise this schema end to end; sales returns, stock opname, and receiving payments against a receivable (`penerimaan_pembayaran`) still have **no Go code**. Read these invariants before writing any inventory usecase; several are enforced by the database and will reject wrong code at runtime. `internal/usecase/pembelian_usecase.go` is the worked example of obeying them.
+Read these invariants before writing any inventory usecase; several are enforced by the database and will reject wrong code at runtime. `pembelian_usecase.go` is the worked example.
 
-- **`kartu_stok` is the only source of truth for stock and inventory value.** No master table carries a stock column. Never compute stock by summing documents.
-- **It is append-only, enforced by trigger.** `UPDATE`, `DELETE`, and `TRUNCATE` all raise. Corrections are new reversing rows that fill `id_kartu_stok_asal`.
-- **The trigger computes the balance, not the application.** On insert, `stok_awal`, `stok_akhir`, `harga_pokok_satuan`, `nilai_keluar`, and `nilai_akhir` are all overwritten. A usecase supplies only the direction (`stok_masuk` **or** `stok_keluar`, never both), `nilai_masuk`, and the reference columns. Sending a computed balance is silently discarded — don't rely on it.
+- **`kartu_stok` is the only source of truth for stock and inventory value.** No master table carries a stock column. **Never compute stock by summing documents.**
+- **It is append-only, enforced by trigger** — `UPDATE`, `DELETE`, `TRUNCATE` all raise. Corrections are new reversing rows filling `id_kartu_stok_asal`.
+- **The trigger computes the balance, not the application.** On insert it overwrites `stok_awal`, `stok_akhir`, `harga_pokok_satuan`, `nilai_keluar`, `nilai_akhir`. A usecase supplies only the direction (`stok_masuk` **or** `stok_keluar`, never both), `nilai_masuk`, and the reference columns. A computed balance sent in is silently discarded.
 - **Moving average:** incoming rows shift `harga_pokok_satuan`; outgoing rows never do. Stock reaching zero forces `nilai_akhir` to exactly 0 so rounding residue cannot accumulate.
-- Balance is partitioned by `(id_barang, id_ruang)` and ordered by **`id`, not date**. Inserts take a `pg_advisory_xact_lock` on that pair, so concurrent postings for the same product+room serialize.
-- The trigger raises on negative stock, on posting into a `periode` with status `TUTUP`, and — since `000023` — on posting into a `ruang` currently frozen by an open `stok_opname`. A month with **no** `periode` row counts as open, and a room with no open opname counts as free. Since `000017` it also takes a shared advisory lock on `(tahun, bulan)` before reading the periode status, and since `000023` a shared advisory lock on the room before reading `stok_opname` — both are what stop a book closing or an opname opening from overtaking a posting already in flight. See "Periode and book closing" and "Stok opname dan pembekuan ruang".
-- Quantities in `kartu_stok` are always in the base unit. `qty_input`/`id_satuan_input` are an audit trail of what the operator typed.
-- Documents store **snapshots** (`faktor_konversi`, prices, HPP); master data stores current rules. Master may change; snapshots never do. Returns must copy cost from the originating detail row, not from the current average — otherwise a sale and its return do not cancel out.
+- Balance is partitioned by `(id_barang, id_ruang)` and ordered by **`id`, not date**.
+- The trigger raises on negative stock, on posting into a `TUTUP` periode, and on posting into a `ruang` frozen by an open `stok_opname`. A month with no `periode` row is open; a room with no open opname is free.
+- Quantities in `kartu_stok` are always in the base unit; `qty_input`/`id_satuan_input` are an audit trail of what the operator typed.
+- **Documents store snapshots** (`faktor_konversi`, prices, HPP); master data stores current rules. Master may change; snapshots never do. **Returns must copy cost from the originating detail row**, not from the current average, or a sale and its return do not cancel out.
 - Stock moves only on posting, never on draft.
-- **Receivables and payables are mirror images.** `penerimaan_pembayaran`/`pembayaran_alokasi` face customers; `pembayaran_utang`/`pembayaran_utang_alokasi` face suppliers. Same rules on both sides, money flowing the other way. Payment↔invoice is many-to-many, which is why allocation is its own table.
-- `penjualan.status_pembayaran` and `pembelian.status_pembayaran` are **caches**; never let a form set either directly. `pembelian`'s is recomputed from POSTED allocations and POSTED returns, and remaining balance = document total − allocations − returns, counting POSTED rows only. `penjualan`'s is not yet symmetric with it: `penerimaan_pembayaran` does not exist, so there is nothing to sum an allocation from — `TUNAI` + `POSTED` reads `LUNAS` by construction (the money changed hands at the counter) and `KREDIT` stays `BELUM` until that module is built. See "Penjualan and the receivable side".
+- **Receivables and payables are mirror images.** Payment↔invoice is many-to-many, which is why allocation is its own table.
+- `penjualan.status_pembayaran` and `pembelian.status_pembayaran` are **caches**; never let a form set either.
 - **An uncashed giro is not a payment.** The balance drops only when `status_giro` becomes `CAIR`.
-- **Overpayment is normal**: `jumlah_dialokasikan` may be less than `jumlah`; the remainder sits as a credit for later invoices. Never force allocation to balance exactly.
-- **Freight is allocated by koli** (`metode_alokasi_angkut` defaults to `'KOLI'` since migration `000008`): `alokasi_biaya = (jumlah_koli / total_koli) × biaya_angkut`, where `biaya_angkut = total_koli × tarif_per_koli`. `jumlah_koli` is decimal because one line can occupy part of a koli. When every `jumlah_koli` is zero, fall back to `QTY` rather than dividing by zero. The method is stored per document, so changing it later never rewrites old allocations — those are frozen in `alokasi_biaya`.
+- **Overpayment is normal**: `jumlah_dialokasikan` may be less than `jumlah`. **Never force allocation to balance exactly.**
+- **Freight is allocated by koli** (`metode_alokasi_angkut` defaults to `'KOLI'`): `alokasi_biaya = (jumlah_koli / total_koli) × biaya_angkut`. `jumlah_koli` is decimal because one line can occupy part of a koli. When every `jumlah_koli` is zero, fall back to `QTY` rather than dividing by zero. The method is stored per document, so changing it later never rewrites old allocations.
 
-Enforced by CHECK constraints (so don't re-validate in Go, just surface the error): one-way movement, non-negative quantities and values, `faktor > 0`, `qty_dasar > 0`, `jumlah_koli >= 0`, `mutasi` source ≠ destination, requester ≠ approver in `pemakaian`, `bulan` 1–12, `jumlah > 0` and `jumlah_dialokasikan <= jumlah` on both payment tables, and non-overlapping `product_harga_jual` validity ranges (a GiST exclusion constraint needing `btree_gist`).
+Enforced by CHECK constraints — **don't re-validate in Go, just surface the error**: one-way movement, non-negative quantities and values, `faktor > 0`, `qty_dasar > 0`, `jumlah_koli >= 0`, `mutasi` source ≠ destination, requester ≠ approver in `pemakaian`, `bulan` 1–12, `jumlah > 0` and `jumlah_dialokasikan <= jumlah` on both payment tables, and non-overlapping `product_harga_jual` ranges (GiST exclusion needing `btree_gist`).
 
-Still **application-side only** (section E of the design notes) — the database will not catch these:
+**Still application-side only, and still owed: `retur_penjualan`'s cumulative-quota check** — the sole remaining item, the mirror of what `retur_pembelian` already closed. Everything else on that list (base-unit `product_satuan` row, koli balance and `bagi rata`, exact `alokasi_biaya` sums, posted documents rejecting detail edits, reversing rows on cancellation, follow-up and return quotas, returns reducing the payable, allocation ceilings on both sides, cancelled documents refusing allocations, recomputed `status_pembayaran` on both sides, `plafon_kredit`, one-transaction writes) is done. **The "HPP copied from the original" half of the reversal rule was dropped as unachievable** — the trigger overwrites `harga_pokok_satuan`/`nilai_keluar` on every outgoing row.
 
-- ~~`product_satuan` must include the base unit with `faktor = 1`~~ — done, enforced in `ProductUseCase.Create`
-- ~~`jumlah_koli` across details must equal the header's `total_koli` before a purchase may post; offer a "bagi rata" button that splits `total_koli` proportionally to `qty_dasar`~~ — done, `siapkanPosting` + `POST /pembelian/{id}/bagi-rata-koli`
-- ~~`alokasi_biaya` must sum exactly to `biaya_angkut`; push the rounding remainder onto the line with the largest `jumlah_koli`~~ — done, `bagiProporsional`
-- ~~posted documents must reject detail edits~~ — done for `pembelian`, `penerimaan_susulan`, `retur_pembelian`, `pembayaran_utang`, and `mutasi`, via `kunciDenganStatus`. Still owed by every other document type
-- ~~cancelling a posted document writes reversing `kartu_stok` rows with `id_kartu_stok_asal` set~~ — done for `pembelian`, `retur_pembelian`, `penerimaan_susulan`, and `mutasi`. **The "HPP copied from the original" half of that rule is not achievable** and was dropped: the trigger overwrites `harga_pokok_satuan` and `nilai_keluar` on every outgoing row, so reversals take the current moving average. See "Pembelian and the posting engine"
-- ~~a follow-up receipt must not exceed the outstanding amount (`qty_dasar − qty_diterima_dasar − Σ susulan`)~~ — done, `periksaSisa`, re-checked at posting under the purchase's row lock
-- ~~cumulative return qty must not exceed the source document's qty~~ — done for `retur_pembelian`, `periksaDapatDiretur`, re-checked at posting under the purchase's row lock. Note the ceiling is what **arrived** (`qty_diterima_dasar + Σ susulan − Σ retur`), not the invoice quantity. Still owed by `retur_penjualan`
-- ~~a POSTED return must reduce the payable~~ — done, via `nilai_kredit_utang` rather than `retur_pembelian.total`. See "Pembayaran utang and the payable side"
-- ~~allocation must not exceed the payment amount or the document's remaining balance~~ — done on the **payable** side, and re-checked at giro clearing rather than only at posting. Still owed by `penerimaan_pembayaran`
-- ~~cancelled documents must not accept allocations~~ — done on the payable side: an allocation's invoice must be POSTED, and a purchase with payments against it cannot be cancelled. Still owed on the receivable side, once `penerimaan_pembayaran` exists — `PenjualanUseCase.Batal` carries a `TODO` marking exactly this
-- ~~`pembelian.status_pembayaran` must be recomputed rather than set from a form~~ — done, `RecalculateStatusPembayaran`, called from every path that can change the answer. `penjualan.status_pembayaran` is recomputed too (`PenjualanRepository.RecalculateStatusPembayaran`), but only answers `TUNAI`→`LUNAS`/`KREDIT`→`BELUM` today — the `SEBAGIAN`/allocation-driven half of the answer is still owed, pending `penerimaan_pembayaran`
-- ~~credit sales must respect `plafon_kredit`~~ — done, `PenjualanUseCase.periksaPlafon`, checked at posting against the customer's running receivable (`PenjualanRepository.PiutangBerjalan`). It is the one guard in this whole list with no CHECK or trigger behind it — see "Penjualan and the receivable side" for the race it does not close
-- ~~a payment, all its allocations, and every touched `status_pembayaran` must be written in one database transaction~~ — done on the payable side
-
-Everything left in this list is on the **sales/receivable** side, and it has shrunk to what `penerimaan_pembayaran` and `retur_penjualan` will bring: allocation-driven `status_pembayaran`, allocation limits, and cancellation guards against POSTED returns/allocations. The payable side is finished, and remains the mirror to copy rather than a shape to invent.
-
-The daily reconciliation job over the balance chain (section F) is also not built.
+## Conventions
 
 ### Adding a module
 
-Follow the `supplier` slice, in this order: migration in `db/migrations_postgres/` (most inventory tables already exist — check first) → `entity` → `model` DTOs → `model/converter` → `repository` (methods take `DBTX`) → `usecase` (validate, own the transaction) → `delivery/http` controller → register in `route.RouteConfig` → wire in `config.Bootstrap` → update `docs/openapi.yaml`.
+Follow the `supplier` slice, in this order: migration in `db/migrations_postgres/` (**most inventory tables already exist — check first**) → `entity` → `model` DTOs → `model/converter` → `repository` (methods take `DBTX`) → `usecase` (validate, own the transaction) → `delivery/http` controller → register in `route.RouteConfig` → wire in `config.Bootstrap` → update `docs/openapi.yaml` **and `README.md`'s endpoint table**.
 
-If the slice writes more than one table, follow `user` instead — it is the worked example of a usecase holding two repositories and committing both tables in one transaction.
+Pick the template by shape from the table at the top of this file. Do not copy a master slice for a transaction document — you will leave out the row lock on every transition, the exact-decimal arithmetic, and the reuse of `DocumentCounterRepository`/`KartuStokRepository`.
 
-If the slice is a **transaction document** — one with a status, a generated number, and stock movements — follow `pembelian`. Copying a master slice for it will leave out the row lock on every transition, the exact-decimal arithmetic, and the reuse of `DocumentCounterRepository` and `KartuStokRepository`.
+**Every module that writes `kartu_stok` — including any built after this one — must call `usecase.periksaRuangBeku` at `Posting` and `Batal`, naming the room(s) it writes into.** The freeze itself needs no code (the trigger is unconditional); what a new module can forget is the *message*. **If the module pre-locks balances** (`KartuStokRepository.KunciSaldo` before the insert loop), it must also take `RuangRepository.LockShared` on every room it touches, **before** `KunciSaldo`.
 
-If the document **derives from a POSTED one** — a follow-up, a return, anything pointing at another document's detail rows — follow `penerimaan_susulan` or `retur_pembelian` rather than `pembelian`: the parent's row lock, the copied cost snapshot, the quota re-checked at posting, and the per-document unique index on the source line are what those two add. Take the one whose goods move the same direction as yours, and check the "Retur pembelian" notes for which parts are direction-specific.
-
-If the document has a status and a number but moves **no stock** — a payment, an allocation, anything purely financial — follow `pembayaran_utang` rather than `pembelian`: no approval state, no `KartuStokRepository`, and caches recomputed from one statement instead of reversed.
-
-If the request is answerable from rows that already exist — a report, a history, a comparison — do **not** add a slice at all. Follow `riwayat_beli` or `utang_supplier`: an entity for the projection, a query in the repository that already owns those tables, and a method on whichever usecase owns the resource the endpoint hangs off. No migration, no DTO to fill in, nothing to keep in step.
-
-If the slice is keyed on something that is not an `id` — a natural key the schema already declares unique — follow `periode`: routes on that key, no surrogate id in the response, and a synthetic answer for the key that has no row yet. It is also the model for a refusal that other modules inherit through the database rather than through a call.
-
-If the document moves stock **in two directions at once**, or writes `kartu_stok` without an approval stage, follow `mutasi`: the incoming row valued from the outgoing row's `RETURNING`, `KartuStokRepository.KunciSaldo` before the first insert, and `PeriodeRepository.LockShared` before that.
-
-If the document takes stock **out with no counterparty** — no supplier, no customer, no other room — and needs an approval stage that decides a *quantity* rather than a yes/no, follow `pemakaian`: the extra `DISETUJUI` state between `DIAJUKAN` and `POSTED`, the approved-quantity column left nil until approval and read instead of the requested one at posting, a terminal rejection that does not loop back to `DRAFT`, and `mutasi`'s balance-locking discipline even though every line shares one room.
-
-If the document takes stock **out to an outside party with money on the other side** — a sale, anything that can create a receivable or a payable on posting — follow `penjualan`: no `DIAJUKAN` for a practical reason rather than a small stake (the two-person control moves to cancellation instead, guarded `SUPERADMIN`-only, with the creating/posting role left able to post its own work), HPP copied from the ledger's `RETURNING` exactly like `mutasi`/`pemakaian`, a `status_pembayaran` cache that has to answer for a payment type with no allocation at all, and a credit-limit check with no CHECK or trigger behind it — the guard itself, not a friendlier message ahead of one.
-
-If the slice's data is a **file** — anything whose bytes live outside PostgreSQL — follow `dokumen`: the store goes behind an interface in `internal/repository`, the usecase owns the ordering between the file and its row, and whatever can be left behind is reconciled by a worker job working from rows.
-
-If the document moves stock **to or from nowhere at all** — a physical count reconciling the ledger against the shelf, not a movement between two named parties — follow `stok_opname`: no `ProductRepository` (a count is always in the base unit, so there is no conversion to resolve), a selisih posted against a frozen snapshot balance rather than a value the balance is set to, and lines that may be filled in one at a time (`PATCH .../detail/{id_detail}`) rather than only replaced wholesale.
-
-**Every module that writes `kartu_stok` — including any built after this one — must call `usecase.periksaRuangBeku` at `Posting` and `Batal`, naming the room(s) it writes into.** The freeze itself needs no code from a new module: the trigger enforces it unconditionally on every `kartu_stok` insert. What a new module can forget is the *message* — without the call, a refusal still happens, it just arrives as the trigger's bare 409 rather than one naming the opname and the room. If the module pre-locks its balances (`KartuStokRepository.KunciSaldo` before the insert loop, as `mutasi`/`pemakaian`/`penjualan`/`stok_opname` all do), it must also take `RuangRepository.LockShared` on every room it touches, before `KunciSaldo` — see "Stok opname dan pembekuan ruang" for why the lock order matters there and not for the three purchase-side modules that never pre-lock at all.
-
-Master data gets no `DELETE`: every master table is referenced by transaction tables, so deleting a used row either fails on a foreign key or destroys the audit trail. Retire rows with `is_aktif = false` instead. Three tables are exceptions: `user_role`, for the reasons in "Users and roles"; `dokumen`, whose `DELETE` is soft — the row stays with `deleted_at` set and only the file goes; and `product_harga_jual`, whose `DELETE` is hard, for the reasons in "Harga jual siap pakai" — the row it is allowed to remove is one no document has ever referenced, so there is no audit trail to lose.
+**Master data gets no `DELETE`** — every master table is referenced by transaction tables, so deleting a used row either fails on a foreign key or destroys the audit trail. Retire with `is_aktif = false`. Three exceptions: `user_role` (a join table nothing references), `dokumen` (soft — the row stays with `deleted_at`, only the file goes), and `product_harga_jual` (hard — the row it may remove is one no document has ever referenced, so there is no trail to lose).
 
 ### PostgreSQL specifics
 
-Since there is no ORM, these are hand-written every time — get them right:
+No ORM, so these are hand-written every time:
 
-- Placeholders are `$1, $2, …`, not `?`.
-- `LastInsertId()` is unsupported by the driver. To get a generated key, use `RETURNING id` with `QueryRowContext(...).Scan(&id)`.
-- Always use the `…Context` variants and thread the `context.Context` through. Note the limit: Fiber v3's `c.Context()` defaults to `context.Background()` and is **not** cancelled when the client disconnects, so a slow query is not aborted for free — attach an explicit timeout where one matters.
-- Identifiers fold to lowercase unless double-quoted; keep table and column names lowercase `snake_case` so quoting is never needed.
-- Use `TIMESTAMPTZ` (not `TIMESTAMP`) for anything representing a real point in time.
-- `updated_at` is maintained by the `set_updated_at()` trigger installed in migration `000001`; reuse it for new tables rather than setting the column from Go.
-- **Every `ORDER BY` paired with `LIMIT`/`OFFSET` ends in a unique column** (`ORDER BY nama, id`). Ordering on a non-unique column alone lets one row appear on two pages while another is never returned — a live bug the moment data outgrows a single page, not a theoretical one.
-- **Every search string goes through `repository.EscapeLike`** before it becomes a query argument. Unescaped, a user's `%` matches everything and a product literally named `100%` can never be found. This is a correctness bug, not an injection one — `$1` is safe either way.
-- **Write the filter once** as a package-level constant and use it for both the `COUNT` and the row query. Two copies drift, and then `total_item` disagrees with the rows. Keep the filter on `$1..$N` with pagination placeholders after it.
-- **Never `SELECT *`.** Declare the column list as a constant so `Scan` order cannot drift from it when a migration adds a column.
-- Nullable columns must be scanned into a pointer or a `sql.NullXxx`; scanning `NULL` into a plain `string` fails at runtime, and only once some row actually has the column empty.
-- A unique index does not constrain `NULL`s, so any number of rows may share `kode = NULL`. Only call `ExistsByKode` when a kode was actually supplied — a `NULL` check always answers false.
-- Uniqueness on master codes is **case-insensitive**, via `CREATE UNIQUE INDEX ... (lower(kode))` in migration `000009`. Existence checks must use `lower(...) = lower($1)` to match, and `ON CONFLICT` in a seeder must name the expression (`ON CONFLICT (lower(kode))`), not the bare column.
-- Check-then-insert never guarantees uniqueness; two requests can both pass. `repository.UniqueViolation` maps SQLSTATE `23505` so the loser of that race gets a 409 rather than a 500. The pre-check stays only for the friendlier message.
+- Placeholders are `$1, $2, …`, not `?`. `LastInsertId()` is unsupported — use `RETURNING id` with `QueryRowContext(...).Scan(&id)`.
+- Always use the `…Context` variants. Note the limit: Fiber v3's `c.Context()` defaults to `context.Background()` and is **not** cancelled on client disconnect, so a slow query is not aborted for free — attach an explicit timeout where one matters.
+- Identifiers fold to lowercase unless quoted; keep names lowercase `snake_case`. Use `TIMESTAMPTZ`, never `TIMESTAMP`. `updated_at` is maintained by the `set_updated_at()` trigger, not from Go.
+- **Every `ORDER BY` paired with `LIMIT`/`OFFSET` ends in a unique column** (`ORDER BY nama, id`). Ordering on a non-unique column alone lets one row appear on two pages while another is never returned — a live bug the moment data outgrows a page.
+- **Every search string goes through `repository.EscapeLike`.** Unescaped, a user's `%` matches everything and a product literally named `100%` can never be found. A correctness bug, not an injection one.
+- **Write the filter once** as a package-level constant used by both the `COUNT` and the row query — two copies drift and `total_item` disagrees with the rows. **If the filter reaches a joined table, the `COUNT` must share the same `FROM` constant.** Keep the filter on `$1..$N` with pagination placeholders after it.
+- **Never `SELECT *`.** Declare the column list as a constant so `Scan` order cannot drift when a migration adds a column.
+- Nullable columns must be scanned into a pointer or `sql.NullXxx`.
+- **A unique index does not constrain `NULL`s.** Any number of rows may share `kode = NULL`; only call `ExistsByKode` when a kode was supplied. For a nullable column that must still be unique when absent, add a **partial** index (see `user_role_grant_global_uidx`).
+- Uniqueness on master codes is **case-insensitive** via `lower(...)` indexes (migration `000009`) — existence checks must use `lower(...) = lower($1)`.
+- **Check-then-insert never guarantees uniqueness.** `repository.UniqueViolation` maps `23505` so the loser of the race gets a 409 rather than a 500; the pre-check stays only for the friendlier message.
 
 ### PATCH semantics
 
-A pointer cannot tell "field absent" from "field explicitly null", and `COALESCE($n, col)` silently keeps the old value for both — so an operator can never clear a mistyped phone number. Every partial update therefore uses `model.Optional[T]`, whose `UnmarshalJSON` records that the key was present at all:
+A pointer cannot tell "field absent" from "explicitly null", and `COALESCE($n, col)` silently keeps the old value for both — so an operator could never clear a mistyped phone number. Every partial update uses `model.Optional[T]`, whose `UnmarshalJSON` records that the key was present:
 
-- Nullable columns: `col = CASE WHEN $n::BOOLEAN THEN $m ELSE col END`, with the flag fed from `Optional.Present`.
-- `NOT NULL` columns: `COALESCE` is correct, and an explicit `null` is rejected with `model.Invalid` in the usecase.
-- `UPDATE ... RETURNING` supplies the response; `sql.ErrNoRows` from it means the id does not exist. Never `SELECT` first to check — two queries, still racy.
-- `id`, `created_at`, and `created_by` never appear in an update DTO. The controller binds the body first and then overwrites `ID` from the path.
-- Tags on an `Optional` field must lead with `omitempty`, and each instantiation must be registered in `config.NewValidator` — otherwise its validation tags are silently ignored. Registered today: `Optional[string]`, `Optional[bool]`, `Optional[[]int64]`, `Optional[int64]`, `Optional[[]model.GrantRequest]`.
-- A collection field works the same way, with the states meaning replace rather than set: absent leaves it alone, `[]` empties it, a list replaces it wholesale. `dive` does reach elements through the custom type func (`TestValidatorDivesIntoOptionalSlice` pins that), so `dive,gt=0` on an `Optional[[]int64]` is really enforced.
+- Nullable columns: `col = CASE WHEN $n::BOOLEAN THEN $m ELSE col END`, flag fed from `Optional.Present`.
+- `NOT NULL` columns: `COALESCE` is correct, and an explicit `null` is rejected with `model.Invalid`.
+- `UPDATE ... RETURNING` supplies the response; `sql.ErrNoRows` means the id does not exist. **Never `SELECT` first to check** — two queries, still racy.
+- `id`, `created_at`, `created_by` never appear in an update DTO. The controller binds the body, then overwrites `ID` from the path.
+- **Tags on an `Optional` field must lead with `omitempty`, and each instantiation must be registered in `config.NewValidator`** or its validation tags are silently ignored. Registered today: `Optional[string]`, `Optional[bool]`, `Optional[[]int64]`, `Optional[int64]`, `Optional[[]model.GrantRequest]`.
+- A collection field works the same way, meaning replace rather than set: absent leaves it alone, `[]` empties it, a list replaces it wholesale. `dive` does reach elements through the custom type func (`TestValidatorDivesIntoOptionalSlice`).
 
-## API contract
+### API contract
 
-`docs/openapi.yaml` is the contract. Update it in the same change as any route, request, or response shape change in `internal/delivery` and `internal/model`.
+`docs/openapi.yaml` is the contract. Update it in the same change as any route, request, or response shape change.
 
-It is also a **build input**, not just documentation: `docs/docs.go` pulls it in with `go:embed` so the server can serve Swagger UI at `/` and the spec at `/openapi.yaml`. Two consequences:
+It is also a **build input**: `docs/docs.go` pulls it in with `go:embed`. Two consequences — dropping `docs/` from the Docker build context **fails compilation** rather than merely losing the docs page (`.dockerignore` deliberately does not exclude it), and a malformed `openapi.yaml` is still served happily, since `go:embed` copies bytes and does not parse YAML.
 
-- Dropping `docs/` from the Docker build context **fails compilation** (`pattern openapi.yaml: no matching files found`) rather than merely losing the docs page. `.dockerignore` deliberately does not exclude it and the Dockerfile copies it in.
-- A malformed `openapi.yaml` is still served happily — `go:embed` copies bytes and does not parse YAML. `TestEmbeddedSpecIsTheRealContract` only checks the asset arrived and is not empty.
+`gofiber/contrib/swagger` is not used (its latest release still requires Fiber v2). The page is hand-rolled in `docs_controller.go` and loads Swagger UI's assets from unpkg, so the docs page needs internet access even though the API does not.
 
-`gofiber/contrib/swagger` is not used: its latest release (v1.3.0) still requires Fiber v2. The page is hand-rolled in `internal/delivery/http/docs_controller.go` and loads Swagger UI's assets from unpkg, so the docs page needs internet access even though the API does not.
+`web.swagger` turns it off (`WEB_SWAGGER=false`). When false, `Bootstrap` leaves `RouteConfig.DocsController` **nil** and neither route is registered — nil rather than a boolean, so the routes cannot be enabled without something to serve them. `NewViper` calls `SetDefault("web.swagger", true)` because `GetBool` answers false for an absent key, which would make a pre-existing `config.json` silently lose the docs.
 
-`web.swagger` turns it off (`WEB_SWAGGER=false`). When false, `config.Bootstrap` leaves `RouteConfig.DocsController` nil and **neither route is registered** — nil rather than a boolean so the routes cannot be enabled without something to serve them. `NewViper` calls `SetDefault("web.swagger", true)` because `GetBool` answers false for an absent key, which would otherwise make a pre-existing `config.json` silently lose the docs.
+**`README.md` is a third surface that goes stale**, not just a front page: it carries its own endpoint table, authorization matrix, and roadmap. A route change touches `route.go`, `docs/openapi.yaml`, *and* that table.
 
-`README.md` is a **third** surface that goes stale, not just a front page: it carries its own full endpoint table, authorization matrix, and roadmap. A route change touches `route.go`, `docs/openapi.yaml`, *and* that table.
-
-## Language
+### Language
 
 Identifiers and schema use the project's Indonesian domain vocabulary (`satuan`, `ruang`, `kartu_stok`, `berlaku_dari`) — keep it; don't translate to English when adding tables or fields. Go comments are English and explain *why*, not what. `README.md` and commit subjects are Indonesian (`feat: modul user & role, lingkungan Docker, dan Swagger di root`); `CLAUDE.md` and code comments are English.

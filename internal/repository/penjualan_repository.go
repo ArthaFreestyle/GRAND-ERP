@@ -40,6 +40,54 @@ const penjualanFrom = `
 	JOIN ruang r ON r.id = p.id_ruang
 	LEFT JOIN pelanggan pel ON pel.id = p.id_pelanggan`
 
+// penjualanAlokasiEfektif totals what has actually been received against a nota —
+// the receivable-side mirror of pembelianAlokasiEfektif in pembelian_repository.go
+// (isu #20).
+//
+// "Effective" carries the same giro rule: a POSTED payment counts, except a giro
+// that has not cleared. **An uncashed giro is not a payment.** Counting one would
+// mark a nota settled on the strength of a promise, and the customer would go on
+// disputing a balance the system believes is gone. A bounced giro (TOLAK) never
+// counts either, and needs no reversal precisely because it never counted.
+//
+// A correlated subquery rather than a grouped LEFT JOIN, for the same reason
+// pembelianAlokasiEfektif is one: it is driven by the outer rows and uses an index
+// on pembayaran_alokasi(id_penjualan), so it costs one index lookup per nota
+// instead of aggregating both tables before joining.
+//
+// Correlated on the alias `p`, so every query using it has to name the sales table
+// `p` — penjualanFrom, RecalculateStatusPembayaran, and PiutangBerjalan all do.
+//
+// It yields NUMERIC, not text: the fallback is cast to NUMERIC(20,2) rather than
+// left as the integer literal 0, so a nota nobody has paid reports "0.00" like
+// every other money field instead of a bare "0". Callers that want text add their
+// own ::TEXT.
+const penjualanAlokasiEfektif = `COALESCE((
+		SELECT SUM(pa.jumlah)
+		FROM pembayaran_alokasi pa
+		JOIN penerimaan_pembayaran pp ON pp.id = pa.id_penerimaan_pembayaran
+		WHERE pa.id_penjualan = p.id
+		  AND pp.status = 'POSTED'
+		  AND (pp.metode <> 'GIRO' OR pp.status_giro = 'CAIR')
+	), 0)::NUMERIC(20, 2)`
+
+// penjualanKreditRetur is the receivable-side placeholder for retur_penjualan's
+// credit against a nota — the counterpart of pembelianKreditRetur, deliberately
+// left at zero.
+//
+// retur_penjualan is out of scope for isu #20, and the asymmetry with the payable
+// side is worth spelling out rather than silently omitting: pembelianKreditRetur
+// exists because a purchase's harga pokok carries a freight share the supplier
+// never received, so the credit could never be the return's own total. Here there
+// is no such gap — retur_penjualan_detail has carried both harga_satuan_input and
+// hpp_satuan_dasar since migration 000006, so a sales return's credit has every
+// figure it needs already sitting on its own rows and can most likely just be its
+// own total once that module exists. Kept as a named fragment rather than a bare 0
+// so RecalculateStatusPembayaran, PiutangBerjalan, and FindPiutangPelanggan only
+// have to gain a real query here, not a new shape, the day retur_penjualan is
+// built.
+const penjualanKreditRetur = `0::NUMERIC(20, 2)`
+
 // penjualanFilter is shared by the COUNT and the row query. Two copies of a filter
 // eventually diverge and total_item starts lying about the data.
 //
@@ -202,29 +250,98 @@ func (r *PenjualanRepository) RecalculateTotalHPP(ctx context.Context, db DBTX, 
 }
 
 // RecalculateStatusPembayaran rebuilds the payment cache — the receivable-side
-// counterpart of PembelianRepository.RecalculateStatusPembayaran, and deliberately
-// simpler for now.
+// counterpart of PembelianRepository.RecalculateStatusPembayaran, and, since isu
+// #20, a full cache rather than a two-value placeholder.
 //
-// A TUNAI nota that is POSTED is LUNAS by construction: the money changed hands at
-// the counter and no separate allocation document exists to record that — see the
-// "uncashed giro" trap this module does NOT have, in CLAUDE.md. A KREDIT nota has no
-// allocation or return to sum yet, since penerimaan_pembayaran and retur_penjualan
-// are both out of scope for isu #10, so it stays BELUM until either is built —
-// exactly the answer a freshly POSTED pembelian would give if pembayaran_utang did
-// not exist. Only Posting calls this; nothing else can move the answer yet.
+// A TUNAI nota is LUNAS by construction: the money changed hands at the counter and
+// no allocation document exists, or ever will, to record that — see the "uncashed
+// giro" trap this module does NOT have, in CLAUDE.md. Only Posting calls this for a
+// TUNAI nota, before the header's own status flips to POSTED, so the CASE does not
+// need to test p.status itself to mean "this nota, once posted, is settled".
+//
+// A KREDIT nota now answers BELUM/SEBAGIAN/LUNAS from effective allocations —
+// penjualanAlokasiEfektif — plus the still-zero retur placeholder,
+// penjualanKreditRetur. Everything that can change the answer calls this: posting
+// and voiding a payment, clearing and rejecting a giro (isu #20 fase 3).
 func (r *PenjualanRepository) RecalculateStatusPembayaran(ctx context.Context, db DBTX, id int64) error {
 	const query = `
-		UPDATE penjualan SET status_pembayaran = CASE
-			WHEN jenis_pembayaran = 'TUNAI' THEN 'LUNAS'
+		UPDATE penjualan p SET status_pembayaran = CASE
+			WHEN p.jenis_pembayaran = 'TUNAI' THEN 'LUNAS'
+			WHEN p.total <= (` + penjualanAlokasiEfektif + `)
+			                + (` + penjualanKreditRetur + `) THEN 'LUNAS'
+			WHEN (` + penjualanAlokasiEfektif + `)
+			     + (` + penjualanKreditRetur + `) > 0 THEN 'SEBAGIAN'
 			ELSE 'BELUM'
 		END
-		WHERE id = $1`
+		WHERE p.id = $1`
 
 	if _, err := db.ExecContext(ctx, query, id); err != nil {
 		return fmt.Errorf("recalculate penjualan status_pembayaran: %w", err)
 	}
 
 	return nil
+}
+
+// HasPostedAlokasi reports whether a POSTED payment allocation still points at this
+// nota — the receivable-side mirror of PembelianRepository.HasPostedAlokasi.
+//
+// A POSTED payment counts here regardless of giro status: an uncashed giro reduces
+// no receivable, but it is still paper pointed at this nota, and it would be
+// unexplainable when it clears against a nota that no longer exists to be settled.
+func (r *PenjualanRepository) HasPostedAlokasi(ctx context.Context, db DBTX, idPenjualan int64) (bool, error) {
+	const query = `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pembayaran_alokasi a
+			JOIN penerimaan_pembayaran pp ON pp.id = a.id_penerimaan_pembayaran
+			WHERE a.id_penjualan = $1 AND pp.status = 'POSTED'
+		)`
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, idPenjualan).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check penerimaan_pembayaran alokasi POSTED: %w", err)
+	}
+
+	return exists, nil
+}
+
+// SisaPiutang carries what one nota's receivable position is, read under its own
+// row lock — the receivable-side mirror of repository.SisaUtang.
+type SisaPiutang struct {
+	IDPelanggan        *int64
+	JenisPembayaran    string
+	Status             string
+	Total              string
+	JumlahDialokasikan string
+	NilaiKreditRetur   string
+}
+
+// FindSisaPiutang reads a nota's receivable position.
+//
+// Call it **after** taking the row lock with LockByID, never instead of it. The
+// lock is what makes the answer usable: two payments can otherwise both read the
+// same remaining balance and both allocate against it, and the sum of allocations
+// would quietly exceed what was owed. Holding the nota's row lock forces them to
+// queue, because every path that changes this nota's receivable takes the same
+// lock first.
+func (r *PenjualanRepository) FindSisaPiutang(ctx context.Context, db DBTX, idPenjualan int64) (*SisaPiutang, error) {
+	const query = `
+		SELECT p.id_pelanggan, p.jenis_pembayaran, p.status, p.total::TEXT,
+		       (` + penjualanAlokasiEfektif + `)::TEXT, (` + penjualanKreditRetur + `)::TEXT
+		FROM penjualan p
+		WHERE p.id = $1`
+
+	sisa := new(SisaPiutang)
+
+	err := db.QueryRowContext(ctx, query, idPenjualan).Scan(
+		&sisa.IDPelanggan, &sisa.JenisPembayaran, &sisa.Status, &sisa.Total,
+		&sisa.JumlahDialokasikan, &sisa.NilaiKreditRetur,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return sisa, nil
 }
 
 // Posting closes the document. Called after every kartu_stok row is written, in the
@@ -401,19 +518,22 @@ func (r *PenjualanRepository) FindDetail(ctx context.Context, db DBTX, id int64)
 	return list, nil
 }
 
-// PiutangBerjalan sums the total of every POSTED KREDIT nota for one customer — the
-// running receivable PenjualanUseCase checks against plafon_kredit at posting (isu
-// #10 fase 2).
+// PiutangBerjalan sums the outstanding balance of every POSTED KREDIT nota for one
+// customer — the running receivable PenjualanUseCase checks against plafon_kredit
+// at posting (isu #10 fase 2).
 //
-// It does not yet subtract anything. penerimaan_pembayaran and retur_penjualan are
-// both out of scope for this issue, so every POSTED KREDIT nota's full total counts
-// until one of them exists to reduce it — the same "total for now" reading
-// entity.PiutangPelanggan documents.
+// Since isu #20 this subtracts effective allocations and the (still-zero) retur
+// placeholder from each nota's own total, so a customer who has paid down a nota is
+// no longer charged its full amount against their limit — the ratchet isu #20 was
+// written to remove. Before that fix this summed raw totals with nothing to reduce
+// them, since penerimaan_pembayaran did not exist yet.
 func (r *PenjualanRepository) PiutangBerjalan(ctx context.Context, db DBTX, idPelanggan int64) (string, error) {
 	const query = `
-		SELECT COALESCE(SUM(total), 0)::TEXT
-		FROM penjualan
-		WHERE id_pelanggan = $1 AND status = 'POSTED' AND jenis_pembayaran = 'KREDIT'`
+		SELECT COALESCE(SUM(
+			p.total - (` + penjualanAlokasiEfektif + `) - (` + penjualanKreditRetur + `)
+		), 0)::TEXT
+		FROM penjualan p
+		WHERE p.id_pelanggan = $1 AND p.status = 'POSTED' AND p.jenis_pembayaran = 'KREDIT'`
 
 	var total string
 	if err := db.QueryRowContext(ctx, query, idPelanggan).Scan(&total); err != nil {
@@ -429,8 +549,11 @@ func (r *PenjualanRepository) PiutangBerjalan(ctx context.Context, db DBTX, idPe
 //
 // Only POSTED KREDIT notas: a DRAFT is a typed page and a BATAL one was withdrawn,
 // and a TUNAI nota was never a receivable to begin with — RecalculateStatusPembayaran
-// makes that one LUNAS the moment it posts. sisa_piutang is total for now, the same
-// reading PiutangBerjalan and entity.PiutangPelanggan both document.
+// makes that one LUNAS the moment it posts. Since isu #20, sisa_piutang is the real
+// outstanding balance — total minus effective allocations minus the (still-zero)
+// retur placeholder — rather than the "total for now" figure this returned before
+// penerimaan_pembayaran existed. The response shape itself is unchanged, exactly as
+// isu #20 asks: only what feeds sisa_piutang got real.
 func (r *PenjualanRepository) FindPiutangPelanggan(ctx context.Context, db DBTX, idPelanggan int64, limit, offset int) ([]entity.PiutangPelanggan, int64, error) {
 	const filter = `
 		WHERE p.id_pelanggan = $1 AND p.status = 'POSTED' AND p.jenis_pembayaran = 'KREDIT'`
@@ -447,7 +570,8 @@ func (r *PenjualanRepository) FindPiutangPelanggan(ctx context.Context, db DBTX,
 	}
 
 	const query = `
-		SELECT p.id, p.nomor, p.tanggal, p.total::TEXT, p.total::TEXT
+		SELECT p.id, p.nomor, p.tanggal, p.total::TEXT,
+		       (p.total - (` + penjualanAlokasiEfektif + `) - (` + penjualanKreditRetur + `))::TEXT
 		FROM penjualan p` + filter + `
 		ORDER BY p.tanggal, p.id
 		LIMIT $2 OFFSET $3`

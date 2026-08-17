@@ -479,11 +479,13 @@ func (c *PenjualanUseCase) Posting(ctx context.Context, request *model.PostingPe
 // a nota whose period has since closed can still be voided — into the current
 // period. See PembelianUseCase.Batal for the cost that comes with it.
 //
-// TODO(isu #10, bukan bagian issue ini): sekali retur_penjualan atau alokasi
-// pembayaran ada, pembatalan di sini harus ditolak selama salah satunya masih
-// POSTED/menunjuk nota ini — persis HasPostedRetur di sisi pembelian. Belum ada
-// modul yang menunjuk penjualan hari ini, jadi penjaganya belum bisa ditulis; catat
-// di sini supaya tidak terlewat saat modul itu dibangun.
+// A posted payment allocation has to be voided first — isu #20, closing half of the
+// TODO that used to sit here. The money (or, for an uncashed giro, the paper) is
+// pointed at this nota; cancelling it here would leave that allocation claiming to
+// settle a nota that no longer says it is owed anything. The other half of the
+// original TODO — a POSTED retur_penjualan blocking cancellation the same way
+// HasPostedRetur does on the payable side — stays open: retur_penjualan is still out
+// of scope, and no module points at penjualan that way yet.
 func (c *PenjualanUseCase) Batal(ctx context.Context, request *model.BatalPenjualanRequest) (*model.PenjualanResponse, error) {
 	if err := c.Validate.Struct(request); err != nil {
 		return nil, err
@@ -500,6 +502,17 @@ func (c *PenjualanUseCase) Batal(ctx context.Context, request *model.BatalPenjua
 	penjualan, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusPenjualanPosted)
 	if err != nil {
 		return nil, err
+	}
+
+	// An uncashed giro counts too: it reduces no receivable, but it is still paper
+	// pointed at this nota, and it would be unexplainable when it clears against a
+	// nota that no longer claims to be owed anything.
+	adaPembayaran, err := c.PenjualanRepository.HasPostedAlokasi(ctx, tx, request.ID)
+	if err != nil {
+		return nil, err
+	}
+	if adaPembayaran {
+		return nil, model.Conflict("batalkan penerimaan pembayaran yang dialokasikan ke nota ini lebih dulu")
 	}
 
 	asal, err := c.KartuStokRepository.FindByRef(ctx, tx, entity.RefTablePenjualan, request.ID)
