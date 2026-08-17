@@ -227,8 +227,14 @@ func conflictOnTransisi(err error, message string) error {
 	return err
 }
 
-// nomorDokumen reserves the next number in a series and formats it as
-// PREFIX/YYYY/MM/NNNN.
+// nomorDokumen reserves the next number in a unit's series and formats it —
+// isu #21 fase 1. idUnitKerja nil means the global series (a caller acting
+// under a grant with no unit at all), formatted PREFIX/YYYY/MM/NNNN exactly as
+// every number was before this issue. A real unit is formatted
+// PREFIX/KODE/YYYY/MM/NNNN, and a unit with no kode is refused rather than
+// silently falling back to its numeric id — a document number nobody can read
+// is worse than one delayed until the unit is finished being set up. Checked
+// before Next is ever called, so a missing kode never burns a number.
 //
 // The month comes from the document's own date, not from today, so an invoice dated
 // in July gets a July number however late it is typed in — which is what makes a
@@ -237,15 +243,75 @@ func conflictOnTransisi(err error, message string) error {
 // Shared by every transaction document rather than reimplemented per module: two
 // modules formatting a number two ways is how a numbering scheme quietly stops
 // being one.
-func nomorDokumen(ctx context.Context, tx repository.DBTX, counter *repository.DocumentCounterRepository, prefix string, tanggal time.Time) (string, error) {
+func nomorDokumen(ctx context.Context, tx repository.DBTX, counter *repository.DocumentCounterRepository, prefix string, tanggal time.Time, idUnitKerja *int64, kode *string) (string, error) {
+	if idUnitKerja != nil && kode == nil {
+		return "", model.Invalid(fmt.Sprintf(
+			"unit_kerja (id %d) belum punya kode; lengkapi kode sebelum menerbitkan nomor dokumen di unit ini",
+			*idUnitKerja,
+		))
+	}
+
 	tahun, bulan := tanggal.Year(), int(tanggal.Month())
 
-	urut, err := counter.Next(ctx, tx, prefix, tahun, bulan)
+	urut, err := counter.Next(ctx, tx, prefix, tahun, bulan, idUnitKerja)
 	if err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf("%s/%04d/%02d/%04d", prefix, tahun, bulan, urut), nil
+	if idUnitKerja == nil {
+		return fmt.Sprintf("%s/%04d/%02d/%04d", prefix, tahun, bulan, urut), nil
+	}
+
+	return fmt.Sprintf("%s/%s/%04d/%02d/%04d", prefix, *kode, tahun, bulan, urut), nil
+}
+
+// nomorDokumenUntukRuang resolves the unit_kerja a room belongs to and
+// reserves the next number in that unit's series — the shape most numbered
+// documents use (isu #21 fase 1). The unit is always read off the room the
+// document actually belongs to, never the caller's active unit_kerja, so a
+// number stays traceable to the outlet the goods belong to regardless of who
+// happened to type the document. mutasi passes id_ruang_asal, never
+// id_ruang_tujuan — the same source-only asymmetry fase 5 already applies to
+// validation; penerimaan_susulan and retur_pembelian pass the parent
+// pembelian's id_ruang, since they carry none of their own.
+func nomorDokumenUntukRuang(ctx context.Context, tx repository.DBTX, counter *repository.DocumentCounterRepository, ruang *repository.RuangRepository, unitKerja *repository.UnitKerjaRepository, prefix string, tanggal time.Time, idRuang int64) (string, error) {
+	idUnitKerja, err := ruang.IDUnitKerjaByID(ctx, tx, idRuang)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Let the document's own INSERT answer this with its usual
+			// foreign-key message; an id_ruang this function cannot resolve
+			// a unit for is not this function's failure to explain.
+			return "", model.Invalid("id_ruang tidak ada")
+		}
+
+		return "", err
+	}
+
+	kode, err := unitKerja.KodeByID(ctx, tx, idUnitKerja)
+	if err != nil {
+		return "", err
+	}
+
+	return nomorDokumen(ctx, tx, counter, prefix, tanggal, &idUnitKerja, kode)
+}
+
+// nomorDokumenUntukUnitAktif is nomorDokumenUntukRuang's counterpart for the
+// two documents with no room of their own — pembayaran_utang and
+// penerimaan_pembayaran (isu #21 fase 1). There is no room to read a unit off,
+// so the caller's own active unit_kerja is what the number is keyed to
+// instead; nil (a global grant) falls back to the pre-existing global series,
+// formatted exactly as it always has been.
+func nomorDokumenUntukUnitAktif(ctx context.Context, tx repository.DBTX, counter *repository.DocumentCounterRepository, unitKerja *repository.UnitKerjaRepository, prefix string, tanggal time.Time, aktifIDUnitKerja *int64) (string, error) {
+	if aktifIDUnitKerja == nil {
+		return nomorDokumen(ctx, tx, counter, prefix, tanggal, nil, nil)
+	}
+
+	kode, err := unitKerja.KodeByID(ctx, tx, *aktifIDUnitKerja)
+	if err != nil {
+		return "", err
+	}
+
+	return nomorDokumen(ctx, tx, counter, prefix, tanggal, aktifIDUnitKerja, kode)
 }
 
 // pageMetadata builds the paging block. Call it only after

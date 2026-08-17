@@ -257,7 +257,12 @@ func TestMutasiDitolakSaatRuangTujuanBeku(t *testing.T) {
 	testApp := newApp(t)
 	f, _ := bekuFixture(t, testApp)
 
-	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Cabang"})
+	// Kode is required: cabang becomes the source room of a pembelian and a mutasi
+	// below, and isu #21 fase 1 keys every document number to the issuing unit's
+	// kode.
+	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
+		Kode: ptr("CABANG"), Nama: "Unit Cabang",
+	})
 	if err != nil {
 		t.Fatalf("create unit lain: %v", err)
 	}
@@ -344,7 +349,12 @@ func TestBukaOpnameMenungguPostingYangSedangBerjalan(t *testing.T) {
 
 	// A second, unrelated room under the same actor — pembelianFixture creates a
 	// fixed username, so it cannot be called twice in one test.
-	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Lain"})
+	// Kode is required: ruangLain is the id_ruang of a stok_opname.Create call
+	// below, and isu #21 fase 1 keys every document number to the issuing unit's
+	// kode.
+	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
+		Kode: ptr("LAIN"), Nama: "Unit Lain",
+	})
 	if err != nil {
 		t.Fatalf("create unit lain: %v", err)
 	}

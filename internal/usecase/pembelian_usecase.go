@@ -47,6 +47,11 @@ type PembelianUseCase struct {
 	// trigger; this is only for a message naming the opname that is holding the
 	// room, the same relationship PeriodeRepository already has to periksaPeriode.
 	StokOpnameRepository *repository.StokOpnameRepository
+	// UnitKerjaRepository resolves the kode a document number carries — isu #21
+	// fase 1. The unit itself always comes from id_ruang, never the caller's
+	// active unit_kerja; this is borrowed only for the one column
+	// RuangRepository does not have.
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewPembelianUseCase(
@@ -60,6 +65,7 @@ func NewPembelianUseCase(
 	periodeRepository *repository.PeriodeRepository,
 	ruangRepository *repository.RuangRepository,
 	stokOpnameRepository *repository.StokOpnameRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *PembelianUseCase {
 	return &PembelianUseCase{
 		DB:                   db,
@@ -72,6 +78,7 @@ func NewPembelianUseCase(
 		PeriodeRepository:    periodeRepository,
 		RuangRepository:      ruangRepository,
 		StokOpnameRepository: stokOpnameRepository,
+		UnitKerjaRepository:  unitKerjaRepository,
 	}
 }
 
@@ -119,7 +126,10 @@ func (c *PembelianUseCase) Create(ctx context.Context, request *model.CreatePemb
 		}
 	}
 
-	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixPembelian, tanggal)
+	nomor, err := nomorDokumenUntukRuang(
+		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
+		repository.PrefixPembelian, tanggal, request.IDRuang,
+	)
 	if err != nil {
 		return nil, err
 	}

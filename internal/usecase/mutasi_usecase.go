@@ -59,6 +59,10 @@ type MutasiUseCase struct {
 	RuangRepository   *repository.RuangRepository
 	// StokOpnameRepository is the same narrow borrow, for periksaRuangBeku (isu #15).
 	StokOpnameRepository *repository.StokOpnameRepository
+	// UnitKerjaRepository resolves the kode a document number carries — isu #21
+	// fase 1. Keyed on id_ruang_asal, the same room fase 5 already validates,
+	// never id_ruang_tujuan.
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewMutasiUseCase(
@@ -72,6 +76,7 @@ func NewMutasiUseCase(
 	periodeRepository *repository.PeriodeRepository,
 	ruangRepository *repository.RuangRepository,
 	stokOpnameRepository *repository.StokOpnameRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *MutasiUseCase {
 	return &MutasiUseCase{
 		DB:                   db,
@@ -84,6 +89,7 @@ func NewMutasiUseCase(
 		PeriodeRepository:    periodeRepository,
 		RuangRepository:      ruangRepository,
 		StokOpnameRepository: stokOpnameRepository,
+		UnitKerjaRepository:  unitKerjaRepository,
 	}
 }
 
@@ -124,7 +130,10 @@ func (c *MutasiUseCase) Create(ctx context.Context, request *model.CreateMutasiR
 		return nil, err
 	}
 
-	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixMutasi, tanggal)
+	nomor, err := nomorDokumenUntukRuang(
+		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
+		repository.PrefixMutasi, tanggal, request.IDRuangAsal,
+	)
 	if err != nil {
 		return nil, err
 	}

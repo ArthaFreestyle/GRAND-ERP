@@ -70,7 +70,10 @@ type Penjualan struct {
 	// Not columns of penjualan. Filled by the read queries.
 	NamaRuang     string
 	NamaPelanggan *string
-	Detail        []PenjualanDetail
+	// IDUnitKerjaRuang is IDRuang's own unit_kerja — isu #21 fase 2, the same
+	// read-side scoping fase 6 already gave five other modules.
+	IDUnitKerjaRuang int64
+	Detail           []PenjualanDetail
 }
 
 // PenjualanDetail maps one line: one product, what was billed, and — once posted —

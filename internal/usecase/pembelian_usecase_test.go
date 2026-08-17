@@ -36,7 +36,12 @@ func pembelianFixture(t *testing.T, testApp *app) fixture {
 		t.Fatalf("create actor: %v", err)
 	}
 
-	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Fixture"})
+	// Kode is required for this fixture's unit specifically because isu #21 fase 1
+	// keys every document number to the issuing unit's kode, and pembelianFixture's
+	// room backs almost every transactional test in this package.
+	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
+		Kode: ptr("FIX"), Nama: "Unit Fixture",
+	})
 	if err != nil {
 		t.Fatalf("create unit kerja: %v", err)
 	}
@@ -121,12 +126,14 @@ func TestNomorDokumenBerurutanPerBulan(t *testing.T) {
 	pertama := draftSederhana(t, testApp, f, "10", nil, nil)
 	kedua := draftSederhana(t, testApp, f, "10", nil, nil)
 
-	if pertama.Nomor != "BL/2026/08/0001" {
-		t.Errorf("nomor pertama = %q, want BL/2026/08/0001", pertama.Nomor)
+	// FIX is pembelianFixture's unit kode — isu #21 fase 1 keys the series to
+	// the issuing unit and folds its kode into the number.
+	if pertama.Nomor != "BL/FIX/2026/08/0001" {
+		t.Errorf("nomor pertama = %q, want BL/FIX/2026/08/0001", pertama.Nomor)
 	}
 
-	if kedua.Nomor != "BL/2026/08/0002" {
-		t.Errorf("nomor kedua = %q, want BL/2026/08/0002", kedua.Nomor)
+	if kedua.Nomor != "BL/FIX/2026/08/0002" {
+		t.Errorf("nomor kedua = %q, want BL/FIX/2026/08/0002", kedua.Nomor)
 	}
 
 	juli, err := testApp.pembelian.Create(ctx(), &model.CreatePembelianRequest{
@@ -143,8 +150,8 @@ func TestNomorDokumenBerurutanPerBulan(t *testing.T) {
 		t.Fatalf("create pembelian juli: %v", err)
 	}
 
-	if juli.Nomor != "BL/2026/07/0001" {
-		t.Errorf("nomor juli = %q, want BL/2026/07/0001", juli.Nomor)
+	if juli.Nomor != "BL/FIX/2026/07/0001" {
+		t.Errorf("nomor juli = %q, want BL/FIX/2026/07/0001", juli.Nomor)
 	}
 }
 

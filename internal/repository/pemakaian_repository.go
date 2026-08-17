@@ -31,11 +31,13 @@ const pemakaianColumns = `id, nomor, tanggal, id_ruang, id_pemohon, keperluan, s
 // pemohon.nama_lengkap is nullable (migration 000002 declares it VARCHAR with no
 // NOT NULL) even though id_pemohon itself is required, so the join falls back to
 // username rather than risk scanning NULL into a plain string.
+// r.id_unit_kerja rides along for isu #21 fase 2 (read-path scoping); it costs
+// nothing extra since pemakaianFrom already joins ruang for its name.
 const pemakaianReadColumns = `pm.id, pm.nomor, pm.tanggal, pm.id_ruang, pm.id_pemohon,
 	pm.keperluan, pm.status, pm.disetujui_oleh, pm.ts_disetujui, pm.catatan_persetujuan,
 	pm.total_hpp::TEXT, pm.created_by, pm.created_at, pm.posted_at,
 	pm.dibatalkan_oleh, pm.alasan_batal,
-	r.nama_ruang, COALESCE(pemohon.nama_lengkap, pemohon.username)`
+	r.nama_ruang, COALESCE(pemohon.nama_lengkap, pemohon.username), r.id_unit_kerja`
 
 // pemakaianFrom joins INNER on both: id_ruang and id_pemohon are NOT NULL, so a
 // pemakaian without a room or a requester cannot exist.
@@ -47,14 +49,19 @@ const pemakaianFrom = `
 // pemakaianFilter is shared by the COUNT and the row query. Two copies of a filter
 // eventually diverge and total_item starts lying about the data.
 //
-// Placeholder discipline: the filter owns $1..$6 and pagination follows after it.
+// Placeholder discipline: the filter owns $1..$7 and pagination follows after it.
+//
+// $7 is the active-unit scope (isu #21 fase 2, mirroring mutasiFilter's $7):
+// NULL means unrestricted (a global grant, or no active context), matching
+// periksaRuangUnitAktif's write-side rule.
 const pemakaianFilter = `
 	WHERE ($1 = '' OR pm.nomor ILIKE '%' || $1 || '%' OR pm.keperluan ILIKE '%' || $1 || '%')
 	  AND ($2 = '' OR pm.status = $2)
 	  AND ($3 = 0 OR pm.id_ruang = $3)
 	  AND ($4 = 0 OR pm.id_pemohon = $4)
 	  AND ($5::DATE IS NULL OR pm.tanggal >= $5::DATE)
-	  AND ($6::DATE IS NULL OR pm.tanggal < ($6::DATE + INTERVAL '1 day'))`
+	  AND ($6::DATE IS NULL OR pm.tanggal < ($6::DATE + INTERVAL '1 day'))
+	  AND ($7::BIGINT IS NULL OR r.id_unit_kerja = $7)`
 
 const pemakaianDetailReadColumns = `pd.id, pd.id_pemakaian, pd.id_product, pd.qty_input::TEXT,
 	pd.id_satuan_input, pd.faktor_konversi, pd.qty_dasar, pd.qty_disetujui_dasar,
@@ -236,13 +243,13 @@ func (r *PemakaianRepository) RecalculateTotalHPP(ctx context.Context, db DBTX, 
 // terlamaDulu flips the ordering to oldest first — status=DIAJUKAN with this set is
 // the approval queue, read to be worked through rather than to see the newest, the
 // same choice GET /supplier/{id}/utang makes for its own queue.
-func (r *PemakaianRepository) Search(ctx context.Context, db DBTX, search, status string, idRuang, idPemohon int64, dari, sampai *string, terlamaDulu bool, limit, offset int) ([]entity.Pemakaian, int64, error) {
+func (r *PemakaianRepository) Search(ctx context.Context, db DBTX, search, status string, idRuang, idPemohon int64, dari, sampai *string, aktifIDUnitKerja *int64, terlamaDulu bool, limit, offset int) ([]entity.Pemakaian, int64, error) {
 	search = EscapeLike(search)
 
 	var total int64
 	if err := db.QueryRowContext(
 		ctx, `SELECT COUNT(*) `+pemakaianFrom+pemakaianFilter,
-		search, status, idRuang, idPemohon, dari, sampai,
+		search, status, idRuang, idPemohon, dari, sampai, aktifIDUnitKerja,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count pemakaian: %w", err)
 	}
@@ -262,9 +269,9 @@ func (r *PemakaianRepository) Search(ctx context.Context, db DBTX, search, statu
 
 	query := `SELECT ` + pemakaianReadColumns + pemakaianFrom + pemakaianFilter + `
 		` + urutan + `
-		LIMIT $7 OFFSET $8`
+		LIMIT $8 OFFSET $9`
 
-	rows, err := db.QueryContext(ctx, query, search, status, idRuang, idPemohon, dari, sampai, limit, offset)
+	rows, err := db.QueryContext(ctx, query, search, status, idRuang, idPemohon, dari, sampai, aktifIDUnitKerja, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select pemakaian: %w", err)
 	}
@@ -420,5 +427,6 @@ func scanPemakaian(row rowScanner, pemakaian *entity.Pemakaian) error {
 func scanPemakaianRead(row rowScanner, pemakaian *entity.Pemakaian) error {
 	return row.Scan(append(
 		pemakaianFields(pemakaian), &pemakaian.NamaRuang, &pemakaian.NamaPemohon,
+		&pemakaian.IDUnitKerjaRuang,
 	)...)
 }

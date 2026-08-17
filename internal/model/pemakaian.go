@@ -74,6 +74,11 @@ type PemakaianDetailResponse struct {
 type CreatePemakaianRequest struct {
 	ActorID int64 `json:"-" validate:"required,gt=0"`
 
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the body — isu #21 fase 2. Nil means the active
+	// grant applies everywhere, so nothing is checked.
+	AktifIDUnitKerja *int64 `json:"-"`
+
 	Tanggal   string `json:"tanggal" validate:"required,datetime=2006-01-02"`
 	IDRuang   int64  `json:"id_ruang" validate:"required,gt=0"`
 	IDPemohon int64  `json:"id_pemohon" validate:"required,gt=0"`
@@ -96,6 +101,12 @@ type PemakaianDetailRequest struct {
 
 type GetPemakaianRequest struct {
 	ID int64 `param:"id" validate:"required,gt=0"`
+
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the request — isu #21 fase 2. Nil means
+	// unrestricted, otherwise a document whose id_ruang falls outside this
+	// unit answers 404.
+	AktifIDUnitKerja *int64 `json:"-"`
 }
 
 // ListPemakaianRequest filters the document list.
@@ -112,6 +123,9 @@ type ListPemakaianRequest struct {
 	TanggalDari   *string `query:"tanggal_dari" validate:"omitempty,datetime=2006-01-02"`
 	TanggalSampai *string `query:"tanggal_sampai" validate:"omitempty,datetime=2006-01-02"`
 	TerlamaDulu   bool    `query:"terlama_dulu"`
+
+	// AktifIDUnitKerja, same rule as GetPemakaianRequest — isu #21 fase 2.
+	AktifIDUnitKerja *int64 `query:"-"`
 }
 
 // UpdatePemakaianRequest patches the header of a DRAFT. Every field is a NOT NULL
@@ -120,6 +134,10 @@ type ListPemakaianRequest struct {
 type UpdatePemakaianRequest struct {
 	ID      int64 `json:"-" validate:"required,gt=0"`
 	ActorID int64 `json:"-" validate:"required,gt=0"`
+
+	// AktifIDUnitKerja, same rule as CreatePemakaianRequest: only checked when
+	// id_ruang is actually being changed, and only against the new value.
+	AktifIDUnitKerja *int64 `json:"-"`
 
 	Tanggal   Optional[string] `json:"tanggal" validate:"omitempty,datetime=2006-01-02"`
 	IDRuang   Optional[int64]  `json:"id_ruang" validate:"omitempty,gt=0"`

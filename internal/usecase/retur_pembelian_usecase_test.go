@@ -587,8 +587,10 @@ func TestAlurPersetujuanRetur(t *testing.T) {
 	}
 
 	// Its own series, independent of the purchase's and the follow-up receipt's.
-	if retur.Nomor != "RB/2026/08/0001" {
-		t.Errorf("nomor = %q, want RB/2026/08/0001", retur.Nomor)
+	// FIX is pembelianFixture's unit kode, inherited via the parent purchase's
+	// id_ruang (isu #21 fase 1).
+	if retur.Nomor != "RB/FIX/2026/08/0001" {
+		t.Errorf("nomor = %q, want RB/FIX/2026/08/0001", retur.Nomor)
 	}
 
 	if retur.Status != "DRAFT" {

@@ -513,9 +513,10 @@ func TestAlurPersetujuanSusulan(t *testing.T) {
 		t.Fatalf("create susulan: %v", err)
 	}
 
-	// Its own series, independent of the purchase's.
-	if susulan.Nomor != "PS/2026/08/0001" {
-		t.Errorf("nomor = %q, want PS/2026/08/0001", susulan.Nomor)
+	// Its own series, independent of the purchase's. FIX is pembelianFixture's
+	// unit kode, inherited via the parent purchase's id_ruang (isu #21 fase 1).
+	if susulan.Nomor != "PS/FIX/2026/08/0001" {
+		t.Errorf("nomor = %q, want PS/FIX/2026/08/0001", susulan.Nomor)
 	}
 
 	if susulan.Status != "DRAFT" {

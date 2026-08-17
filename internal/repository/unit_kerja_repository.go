@@ -89,6 +89,21 @@ func (r *UnitKerjaRepository) FindByID(ctx context.Context, db DBTX, id int64) (
 	return unitKerja, nil
 }
 
+// KodeByID returns a unit's kode, without the rest of the row — isu #21 fase 1
+// needs only this to build a document number. Nil means the unit has none yet,
+// which nomorDokumen refuses to build a number against rather than silently
+// falling back to the numeric id.
+func (r *UnitKerjaRepository) KodeByID(ctx context.Context, db DBTX, id int64) (*string, error) {
+	const query = `SELECT kode FROM unit_kerja WHERE id = $1`
+
+	var kode *string
+	if err := db.QueryRowContext(ctx, query, id).Scan(&kode); err != nil {
+		return nil, err
+	}
+
+	return kode, nil
+}
+
 // ExistsByKode matches case-insensitively to mirror unit_kerja_kode_lower_uidx.
 // exceptID skips one row so an update does not collide with itself; pass 0 when
 // creating.

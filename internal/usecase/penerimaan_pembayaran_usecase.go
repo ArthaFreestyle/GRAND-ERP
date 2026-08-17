@@ -41,6 +41,10 @@ type PenerimaanPembayaranUseCase struct {
 	PembayaranRepository *repository.PenerimaanPembayaranRepository
 	PenjualanRepository  *repository.PenjualanRepository
 	CounterRepository    *repository.DocumentCounterRepository
+	// UnitKerjaRepository resolves the kode a document number carries — isu #21
+	// fase 1. This module has no room of its own, so the number is keyed to
+	// the caller's active unit_kerja rather than one read off a document field.
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewPenerimaanPembayaranUseCase(
@@ -50,6 +54,7 @@ func NewPenerimaanPembayaranUseCase(
 	pembayaranRepository *repository.PenerimaanPembayaranRepository,
 	penjualanRepository *repository.PenjualanRepository,
 	counterRepository *repository.DocumentCounterRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *PenerimaanPembayaranUseCase {
 	return &PenerimaanPembayaranUseCase{
 		DB:                   db,
@@ -58,6 +63,7 @@ func NewPenerimaanPembayaranUseCase(
 		PembayaranRepository: pembayaranRepository,
 		PenjualanRepository:  penjualanRepository,
 		CounterRepository:    counterRepository,
+		UnitKerjaRepository:  unitKerjaRepository,
 	}
 }
 
@@ -111,7 +117,10 @@ func (c *PenerimaanPembayaranUseCase) Create(ctx context.Context, request *model
 		_ = tx.Rollback() // no-op once the transaction is committed
 	}()
 
-	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixPenerimaanPembayaran, tanggal)
+	nomor, err := nomorDokumenUntukUnitAktif(
+		ctx, tx, c.CounterRepository, c.UnitKerjaRepository,
+		repository.PrefixPenerimaanPembayaran, tanggal, request.AktifIDUnitKerja,
+	)
 	if err != nil {
 		return nil, err
 	}

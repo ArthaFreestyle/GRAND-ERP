@@ -1,6 +1,7 @@
 package usecase_test
 
 import (
+	"fmt"
 	"testing"
 
 	"Arthafreestyle/ERP/internal/model"
@@ -811,12 +812,23 @@ func TestRoleListIsOrderedAndPaged(t *testing.T) {
 // just role.
 // ---------------------------------------------------------------------------
 
+// createUnitCounter gives every createUnit call its own kode, so a unit built
+// by this helper can always issue a document number — isu #21 fase 1 refuses
+// to build one for a unit with none. A package-level counter rather than one
+// derived from nama: several tests reuse this helper more than once with a
+// name that is descriptive rather than guaranteed unique, and tests in this
+// package never run in parallel, so a plain increment is race-free.
+var createUnitCounter int
+
 // createUnit is a small helper so each of the tests below can build its own
 // unit_kerja without repeating the boilerplate.
 func createUnit(t *testing.T, testApp *app, nama string) int64 {
 	t.Helper()
 
-	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: nama})
+	createUnitCounter++
+	kode := fmt.Sprintf("CU%03d", createUnitCounter)
+
+	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Kode: &kode, Nama: nama})
 	if err != nil {
 		t.Fatalf("create unit kerja %s: %v", nama, err)
 	}
