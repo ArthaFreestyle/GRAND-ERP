@@ -44,6 +44,7 @@ type RouteConfig struct {
 	PenerimaanController *deliveryhttp.PenerimaanPembayaranController
 	StokOpnameController *deliveryhttp.StokOpnameController
 	ProductController    *deliveryhttp.ProductController
+	LaporanController    *deliveryhttp.LaporanController
 	UnitKerjaController  *deliveryhttp.UnitKerjaController
 	RuangController      *deliveryhttp.RuangController
 	SatuanController     *deliveryhttp.SatuanController
@@ -96,7 +97,10 @@ func (c *RouteConfig) setupGuestRoute() {
 //     pembelian, penerimaan-susulan, retur-pembelian, mutasi, and product's
 //     stok-per-ruang read additionally scope by the caller's active unit_kerja —
 //     a room, document, or balance outside it is silently omitted from a list, or
-//     answers 404 on a Get, as if it did not exist. That scoping is enforced in the
+//     answers 404 on a Get, as if it did not exist. Isu #22 carries the same scoping
+//     into product's kartu-stok and stok-minimum reads and into every laporan
+//     endpoint, all list-shaped, so all of them silently omit rather than 404. That
+//     scoping is enforced in the
 //     usecase layer, from the session's active grant, not by a route guard here, so
 //     it does not appear in this route table at all. A caller with a global grant
 //     (nil active unit — the SUPERADMIN shape) is unrestricted, same as always.
@@ -212,6 +216,13 @@ func (c *RouteConfig) setupAuthRoute() {
 	// order here removes any doubt.
 	api.Get("/product", c.ProductController.List)
 	api.Get("/product/harga-jual", c.ProductController.DaftarHargaJual)
+
+	// stok-minimum is isu #22 fase 2, and like harga-jual it is registered ahead of
+	// /product/:id so the literal segment cannot be swallowed by the :id parameter.
+	// It is a read, so it follows the read rule and is open to any authenticated
+	// caller — seeing what needs reordering is not the same as being able to write
+	// a purchase for it.
+	api.Get("/product/stok-minimum", c.ProductController.StokMinimum)
 	api.Get("/product/:id", c.ProductController.Get)
 	api.Post("/product", inventaris, c.ProductController.Create)
 	api.Patch("/product/:id", inventaris, c.ProductController.Update)
@@ -240,6 +251,14 @@ func (c *RouteConfig) setupAuthRoute() {
 	// documents that do carry their own guards.
 	api.Get("/product/:id/stok", c.ProductController.Stok)
 
+	// kartu-stok is isu #22 fase 1, and answers what Stok above cannot: not just the
+	// current balance but how it got there. It follows the same read rule and the
+	// same isu #12 fase 6 scoping every other room-shaped read in this table
+	// carries: a room outside the caller's active unit answers an empty page here,
+	// not 404 — this is a list, and the room itself already answers 404 through the
+	// ordinary "does this room exist at all" check.
+	api.Get("/product/:id/kartu-stok", c.ProductController.KartuStok)
+
 	// pos/product is the POS catalog screen — isu #11 — and a read, so it follows the
 	// same open rule. It is its own path rather than a `view` parameter on
 	// GET /product: the response shape a single screen dictates should be free to
@@ -250,6 +269,15 @@ func (c *RouteConfig) setupAuthRoute() {
 	// the read is open to any authenticated caller — that is enforced in the usecase
 	// and the model, not by a guard here.
 	api.Get("/pos/product", c.ProductController.POS)
+
+	// laporan is isu #22 fase 3: three reports over material that was already
+	// computed and stored somewhere else, so none of them belongs to product,
+	// penjualan, or any other single module's resource. Reads, so open to any
+	// authenticated caller like everything else in this table — a report is not
+	// itself a way to move stock or money, whatever it summarises.
+	api.Get("/laporan/nilai-persediaan", c.LaporanController.NilaiPersediaan)
+	api.Get("/laporan/laba-kotor", c.LaporanController.LabaKotor)
+	api.Get("/laporan/pergerakan", c.LaporanController.Pergerakan)
 
 	// pembelian is the first module whose writes are split by workflow stage rather
 	// than by which data they touch, because posting one is not an edit — it appends

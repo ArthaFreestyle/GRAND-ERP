@@ -212,6 +212,13 @@ func Bootstrap(config *BootstrapConfig) {
 		stokOpnameRepository, kartuStokRepository, counterRepository,
 		periodeRepository, ruangRepository, unitKerjaRepository,
 	)
+	// LaporanUseCase is isu #22 fase 3: three reports belonging to no single
+	// module's resource, so it borrows KartuStokRepository (nilai persediaan,
+	// pergerakan) and PenjualanRepository (laba kotor) the way ProductUseCase
+	// borrows PembelianRepository for riwayat-beli.
+	laporanUseCase := usecase.NewLaporanUseCase(
+		config.DB, config.Log, config.Validate, kartuStokRepository, penjualanRepository,
+	)
 	// DokumenUseCase is the first usecase holding a store that is not the database.
 	// The storage interface is what keeps that fact from spreading: swapping local
 	// disk for S3 changes this line and nothing above it.
@@ -262,6 +269,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pembayaranController := deliveryhttp.NewPembayaranUtangController(config.Log, pembayaranUseCase)
 	penerimaanController := deliveryhttp.NewPenerimaanPembayaranController(config.Log, penerimaanUseCase)
 	stokOpnameController := deliveryhttp.NewStokOpnameController(config.Log, stokOpnameUseCase)
+	laporanController := deliveryhttp.NewLaporanController(config.Log, laporanUseCase)
 	roleController := deliveryhttp.NewRoleController(config.Log, roleUseCase)
 	userController := deliveryhttp.NewUserController(config.Log, userUseCase)
 
@@ -290,6 +298,7 @@ func Bootstrap(config *BootstrapConfig) {
 		PenerimaanController: penerimaanController,
 		StokOpnameController: stokOpnameController,
 		ProductController:    productController,
+		LaporanController:    laporanController,
 		UnitKerjaController:  unitKerjaController,
 		RuangController:      ruangController,
 		SatuanController:     satuanController,

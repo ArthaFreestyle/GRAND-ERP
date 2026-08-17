@@ -325,6 +325,49 @@ func (c *ProductController) POS(ctx fiber.Ctx) error {
 	return ctx.JSON(model.WebResponse[[]model.PosProductResponse]{Data: responses, Paging: paging})
 }
 
+// KartuStok reports one product's movement history in one room, oldest first.
+//
+// The id is bound from the path after the query string, so an id_product smuggled
+// into the query cannot point the answer at a different product than the URL names.
+func (c *ProductController) KartuStok(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	request := new(model.ListKartuStokRequest)
+	if err := ctx.Bind().Query(request); err != nil {
+		return model.Invalid("malformed query parameters")
+	}
+
+	request.IDProduct = id
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
+
+	responses, paging, err := c.UseCase.KartuStok(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[[]model.KartuStokResponse]{Data: responses, Paging: paging})
+}
+
+// StokMinimum lists active products at or below their own stok_minimum.
+func (c *ProductController) StokMinimum(ctx fiber.Ctx) error {
+	request := new(model.ListStokMinimumRequest)
+	if err := ctx.Bind().Query(request); err != nil {
+		return model.Invalid("malformed query parameters")
+	}
+
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
+
+	responses, paging, err := c.UseCase.StokMinimum(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[[]model.StokMinimumResponse]{Data: responses, Paging: paging})
+}
+
 func (c *ProductController) List(ctx fiber.Ctx) error {
 	request := new(model.ListProductRequest)
 	if err := ctx.Bind().Query(request); err != nil {
