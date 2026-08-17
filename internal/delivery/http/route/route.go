@@ -41,6 +41,7 @@ type RouteConfig struct {
 	PemakaianController  *deliveryhttp.PemakaianController
 	PenjualanController  *deliveryhttp.PenjualanController
 	PembayaranController *deliveryhttp.PembayaranUtangController
+	PenerimaanController *deliveryhttp.PenerimaanPembayaranController
 	StokOpnameController *deliveryhttp.StokOpnameController
 	ProductController    *deliveryhttp.ProductController
 	UnitKerjaController  *deliveryhttp.UnitKerjaController
@@ -380,6 +381,22 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/pembayaran-utang/:id/batal", superadmin, c.PembayaranController.Batal)
 	api.Post("/pembayaran-utang/:id/cair", superadmin, c.PembayaranController.Cairkan)
 	api.Post("/pembayaran-utang/:id/tolak-giro", superadmin, c.PembayaranController.TolakGiro)
+
+	// penerimaan-pembayaran is pembayaran-utang's mirror on the receivable side — isu
+	// #20 — money flowing the other way, and the same reasoning behind every guard
+	// here: no stock, no DIAJUKAN, and the two-person control lives in the split
+	// between who prepares the document and who releases the customer's credit
+	// instead of in an extra status. CASHIER prepares; SUPERADMIN posts, voids, and
+	// decides what became of a customer's giro.
+	api.Get("/penerimaan-pembayaran", c.PenerimaanController.List)
+	api.Get("/penerimaan-pembayaran/:id", c.PenerimaanController.Get)
+	api.Post("/penerimaan-pembayaran", cashier, c.PenerimaanController.Create)
+	api.Patch("/penerimaan-pembayaran/:id", cashier, c.PenerimaanController.Update)
+	api.Put("/penerimaan-pembayaran/:id/alokasi", cashier, c.PenerimaanController.ReplaceAlokasi)
+	api.Post("/penerimaan-pembayaran/:id/posting", superadmin, c.PenerimaanController.Posting)
+	api.Post("/penerimaan-pembayaran/:id/batal", superadmin, c.PenerimaanController.Batal)
+	api.Post("/penerimaan-pembayaran/:id/cair", superadmin, c.PenerimaanController.Cairkan)
+	api.Post("/penerimaan-pembayaran/:id/tolak-giro", superadmin, c.PenerimaanController.TolakGiro)
 
 	// stok-opname is the seventh module to write kartu_stok, and the only one that
 	// changes what every OTHER module may do while it is open: a ruang named by a

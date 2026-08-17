@@ -78,6 +78,7 @@ type app struct {
 	pemakaian  *usecase.PemakaianUseCase
 	penjualan  *usecase.PenjualanUseCase
 	pembayaran *usecase.PembayaranUtangUseCase
+	penerimaan *usecase.PenerimaanPembayaranUseCase
 	stokOpname *usecase.StokOpnameUseCase
 	dokumen    *usecase.DokumenUseCase
 	periode    *usecase.PeriodeUseCase
@@ -220,6 +221,10 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate,
 			repository.NewPembayaranUtangRepository(), pembelianRepository, counterRepository,
 		),
+		penerimaan: usecase.NewPenerimaanPembayaranUseCase(
+			testDB, log, validate,
+			repository.NewPenerimaanPembayaranRepository(), penjualanRepository, counterRepository,
+		),
 	}
 }
 
@@ -292,6 +297,11 @@ func truncateMaster(t *testing.T) {
 		// matters more than most: a row left behind here does not fail a later test's
 		// insert, it silently refuses its posting.
 		"periode",
+		// pembayaran_alokasi references penjualan, and penerimaan_pembayaran
+		// references pelanggan and users — isu #20's mirror of
+		// pembayaran_utang_alokasi/pembayaran_utang sitting before pembelian, so
+		// both have to clear before penjualan does.
+		"pembayaran_alokasi", "penerimaan_pembayaran",
 		// penjualan_detail.id_harga_jual references product_harga_jual, and
 		// penjualan_detail.id_product/penjualan.id_ruang/penjualan.id_pelanggan
 		// reference product/ruang/pelanggan, so penjualan has to precede all three

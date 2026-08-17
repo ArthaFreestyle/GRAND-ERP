@@ -9,14 +9,15 @@ import (
 // numbering series a deployment has is readable in one place, and so two modules
 // cannot accidentally share a counter by both typing the same literal.
 const (
-	PrefixPembelian       = "BL"
-	PrefixSusulan         = "PS"
-	PrefixRetur           = "RB"
-	PrefixPembayaranUtang = "PU"
-	PrefixMutasi          = "MT"
-	PrefixPemakaian       = "PM"
-	PrefixPenjualan       = "PJ"
-	PrefixStokOpname      = "SO"
+	PrefixPembelian            = "BL"
+	PrefixSusulan              = "PS"
+	PrefixRetur                = "RB"
+	PrefixPembayaranUtang      = "PU"
+	PrefixMutasi               = "MT"
+	PrefixPemakaian            = "PM"
+	PrefixPenjualan            = "PJ"
+	PrefixStokOpname           = "SO"
+	PrefixPenerimaanPembayaran = "PP"
 )
 
 // DocumentCounterRepository hands out the per-month sequence behind every document
