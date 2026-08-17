@@ -121,7 +121,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pembelianUseCase := usecase.NewPembelianUseCase(
 		config.DB, config.Log, config.Validate,
 		pembelianRepository, productRepository, kartuStokRepository, counterRepository,
-		periodeRepository, ruangRepository, stokOpnameRepository,
+		periodeRepository, ruangRepository, stokOpnameRepository, unitKerjaRepository,
 	)
 	// PenerimaanSusulanUseCase reaches into pembelian on purpose: a follow-up
 	// receipt is defined as the remainder of a purchase, so it reads that document's
@@ -132,6 +132,7 @@ func Bootstrap(config *BootstrapConfig) {
 		config.DB, config.Log, config.Validate,
 		susulanRepository, pembelianRepository, productRepository,
 		kartuStokRepository, counterRepository, periodeRepository, stokOpnameRepository,
+		ruangRepository, unitKerjaRepository,
 	)
 	// ReturPembelianUseCase takes the same repositories as the follow-up receipt
 	// above, and for the same reasons — it is the mirror document. It reads the purchase's lines for
@@ -142,6 +143,7 @@ func Bootstrap(config *BootstrapConfig) {
 		config.DB, config.Log, config.Validate,
 		returRepository, pembelianRepository, productRepository,
 		kartuStokRepository, counterRepository, periodeRepository, stokOpnameRepository,
+		ruangRepository, unitKerjaRepository,
 	)
 	// MutasiUseCase: a transfer points at no parent document, so nothing here reads
 	// or rewrites another module's rows except for narrow reads: product for the
@@ -154,7 +156,7 @@ func Bootstrap(config *BootstrapConfig) {
 	mutasiUseCase := usecase.NewMutasiUseCase(
 		config.DB, config.Log, config.Validate,
 		mutasiRepository, productRepository, kartuStokRepository, counterRepository,
-		periodeRepository, ruangRepository, stokOpnameRepository,
+		periodeRepository, ruangRepository, stokOpnameRepository, unitKerjaRepository,
 	)
 	// PemakaianUseCase has no use for periksaRuangUnitAktif, unlike pembelian and
 	// mutasi: isu #9 does not ask for id_ruang to be validated against the caller's
@@ -166,7 +168,7 @@ func Bootstrap(config *BootstrapConfig) {
 	pemakaianUseCase := usecase.NewPemakaianUseCase(
 		config.DB, config.Log, config.Validate,
 		pemakaianRepository, productRepository, kartuStokRepository, counterRepository,
-		periodeRepository, ruangRepository, stokOpnameRepository,
+		periodeRepository, ruangRepository, stokOpnameRepository, unitKerjaRepository,
 	)
 	// PenjualanUseCase's PelangganRepository is borrowed for exactly one narrow
 	// read — a customer's plafon_kredit and running receivable, checked at Posting
@@ -179,7 +181,7 @@ func Bootstrap(config *BootstrapConfig) {
 		config.DB, config.Log, config.Validate,
 		penjualanRepository, productRepository, pelangganRepository,
 		kartuStokRepository, counterRepository, periodeRepository,
-		ruangRepository, stokOpnameRepository,
+		ruangRepository, stokOpnameRepository, unitKerjaRepository,
 	)
 	// PembayaranUtangUseCase is the first transaction usecase that needs no
 	// KartuStokRepository at all: money moving to a supplier changes no stock. It reaches
@@ -188,7 +190,7 @@ func Bootstrap(config *BootstrapConfig) {
 	// maintain for itself once it is POSTED.
 	pembayaranUseCase := usecase.NewPembayaranUtangUseCase(
 		config.DB, config.Log, config.Validate,
-		pembayaranRepository, pembelianRepository, counterRepository,
+		pembayaranRepository, pembelianRepository, counterRepository, unitKerjaRepository,
 	)
 	// PenerimaanPembayaranUseCase is pembayaran-utang's mirror on the receivable
 	// side (isu #20): it reaches into penjualan to lock each nota it allocates
@@ -197,7 +199,7 @@ func Bootstrap(config *BootstrapConfig) {
 	// PembelianRepository, mirrored onto the receivable side.
 	penerimaanUseCase := usecase.NewPenerimaanPembayaranUseCase(
 		config.DB, config.Log, config.Validate,
-		penerimaanRepository, penjualanRepository, counterRepository,
+		penerimaanRepository, penjualanRepository, counterRepository, unitKerjaRepository,
 	)
 	// StokOpnameUseCase is the seventh module to write kartu_stok, and the only one
 	// whose Posting/Batal need RuangRepository for its exclusive/shared ruang: lock
@@ -208,7 +210,7 @@ func Bootstrap(config *BootstrapConfig) {
 	stokOpnameUseCase := usecase.NewStokOpnameUseCase(
 		config.DB, config.Log, config.Validate,
 		stokOpnameRepository, kartuStokRepository, counterRepository,
-		periodeRepository, ruangRepository,
+		periodeRepository, ruangRepository, unitKerjaRepository,
 	)
 	// DokumenUseCase is the first usecase holding a store that is not the database.
 	// The storage interface is what keeps that fact from spreading: swapping local

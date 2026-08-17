@@ -38,6 +38,7 @@ func (c *PemakaianController) Create(ctx fiber.Ctx) error {
 	}
 
 	request.ActorID = actor
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
 
 	response, err := c.UseCase.Create(ctx.Context(), request)
 	if err != nil {
@@ -53,7 +54,9 @@ func (c *PemakaianController) Get(ctx fiber.Ctx) error {
 		return model.Invalid("id must be an integer")
 	}
 
-	response, err := c.UseCase.Get(ctx.Context(), &model.GetPemakaianRequest{ID: id})
+	response, err := c.UseCase.Get(ctx.Context(), &model.GetPemakaianRequest{
+		ID: id, AktifIDUnitKerja: aktifIDUnitKerja(ctx),
+	})
 	if err != nil {
 		return err
 	}
@@ -68,6 +71,8 @@ func (c *PemakaianController) List(ctx fiber.Ctx) error {
 	if err := ctx.Bind().Query(request); err != nil {
 		return model.Invalid("malformed query parameters")
 	}
+
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
 
 	responses, paging, err := c.UseCase.Search(ctx.Context(), request)
 	if err != nil {
@@ -95,6 +100,7 @@ func (c *PemakaianController) Update(ctx fiber.Ctx) error {
 
 	request.ID = id
 	request.ActorID = actor
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
 
 	response, err := c.UseCase.Update(ctx.Context(), request)
 	if err != nil {

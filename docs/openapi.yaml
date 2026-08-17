@@ -1315,10 +1315,13 @@ paths:
         sekali. Stok bergerak saat posting dan hanya saat posting.
 
 
-        **Nomor dokumen digenerate server** dengan format `BL/2026/08/0001`,
-        mereset tiap bulan mengikuti `tanggal` dokumen — faktur Juli yang baru
-        diketik bulan Agustus tetap dapat nomor Juli. Counter-nya diambil dengan
-        satu `INSERT ... ON CONFLICT DO UPDATE RETURNING` di dalam transaksi
+        **Nomor dokumen digenerate server** dengan format
+        `BL/KODE/2026/08/0001` — `KODE` adalah kode unit_kerja yang menaungi
+        `id_ruang` dokumen ini — mereset tiap bulan mengikuti `tanggal`
+        dokumen — faktur Juli yang baru diketik bulan Agustus tetap dapat
+        nomor Juli. Sebuah unit tanpa kode tidak bisa menerbitkan nomor sama
+        sekali (400). Counter-nya diambil dengan satu
+        `INSERT ... ON CONFLICT DO UPDATE RETURNING` di dalam transaksi
         dokumen, jadi dua request bersamaan antre alih-alih menghasilkan nomor
         kembar. Nomor bisa berlubang kalau transaksinya rollback; itu jauh lebih
         murah daripada dua dokumen bernomor sama.
@@ -6170,7 +6173,7 @@ components:
             Nomor `stok_opname` yang sedang membekukan ruang ini — `null` kalau bebas
             (isu #15). Diambil lewat satu `LEFT JOIN` ke opname berstatus terbuka, bukan
             endpoint terpisah.
-          example: SO/2026/08/0001
+          example: SO/KODE/2026/08/0001
 
     UnitKerja:
       type: object
@@ -6538,7 +6541,7 @@ components:
         nomor:
           type: string
           description: Digenerate server, format `BL/2026/08/0001`, mereset tiap bulan.
-          example: BL/2026/08/0001
+          example: BL/KODE/2026/08/0001
         tanggal: { type: string, format: date-time }
         id_supplier: { type: integer, format: int64 }
         nama_supplier: { type: string }
@@ -6745,7 +6748,7 @@ components:
         id_supplier: { type: integer, format: int64 }
         nama_supplier: { type: string }
         id_pembelian: { type: integer, format: int64 }
-        nomor: { type: string, example: BL/2026/08/0001 }
+        nomor: { type: string, example: BL/KODE/2026/08/0001 }
         tanggal: { type: string, format: date-time }
         no_faktur_supplier: { type: string, nullable: true }
         id_pembelian_detail: { type: integer, format: int64 }
@@ -6817,7 +6820,7 @@ components:
         nomor:
           type: string
           description: Seri sendiri, terpisah dari pembelian.
-          example: PS/2026/08/0001
+          example: PS/KODE/2026/08/0001
         tanggal: { type: string, format: date-time }
         id_pembelian: { type: integer, format: int64 }
         nomor_pembelian: { type: string }
@@ -6934,7 +6937,7 @@ components:
         nomor:
           type: string
           description: Seri sendiri, terpisah dari pembelian dan penerimaan susulan.
-          example: RB/2026/08/0001
+          example: RB/KODE/2026/08/0001
         tanggal: { type: string, format: date-time }
         id_pembelian: { type: integer, format: int64 }
         nomor_pembelian: { type: string }
@@ -7085,7 +7088,7 @@ components:
         nomor:
           type: string
           description: Seri sendiri, terpisah dari dokumen lain.
-          example: MT/2026/08/0001
+          example: MT/KODE/2026/08/0001
         tanggal: { type: string, format: date-time }
         id_ruang_asal: { type: integer, format: int64 }
         nama_ruang_asal: { type: string }
@@ -7179,7 +7182,7 @@ components:
         nomor:
           type: string
           description: Seri sendiri, terpisah dari dokumen lain.
-          example: SO/2026/08/0001
+          example: SO/KODE/2026/08/0001
         id_ruang: { type: integer, format: int64 }
         nama_ruang: { type: string }
         tgl_buka: { type: string, format: date }
@@ -7297,7 +7300,7 @@ components:
         nomor:
           type: string
           description: Seri sendiri, prefix `PM`.
-          example: PM/2026/08/0001
+          example: PM/KODE/2026/08/0001
         tanggal: { type: string, format: date-time }
         id_ruang: { type: integer, format: int64 }
         nama_ruang: { type: string }
@@ -7433,7 +7436,7 @@ components:
         nomor:
           type: string
           description: Seri sendiri, prefix `PJ`.
-          example: PJ/2026/08/0001
+          example: PJ/KODE/2026/08/0001
         tanggal: { type: string, format: date-time }
         id_ruang: { type: integer, format: int64 }
         nama_ruang: { type: string }
@@ -7565,7 +7568,7 @@ components:
         belum ikut menguranginya.
       properties:
         id_penjualan: { type: integer, format: int64 }
-        nomor: { type: string, example: PJ/2026/08/0001 }
+        nomor: { type: string, example: PJ/KODE/2026/08/0001 }
         tanggal: { type: string, format: date-time }
         total: { type: string, example: "150000.00" }
         sisa_piutang: { type: string, example: "150000.00" }
@@ -7627,7 +7630,7 @@ components:
         nomor:
           type: string
           description: Digenerate server, seri `PU` yang terpisah dari `BL`, `PS`, dan `RB`.
-          example: PU/2026/08/0001
+          example: PU/KODE/2026/08/0001
         tanggal: { type: string, format: date-time }
         id_supplier: { type: integer, format: int64 }
         nama_supplier: { type: string }
@@ -7692,7 +7695,7 @@ components:
       properties:
         id: { type: integer, format: int64 }
         id_pembelian: { type: integer, format: int64 }
-        nomor_pembelian: { type: string, example: BL/2026/08/0001 }
+        nomor_pembelian: { type: string, example: BL/KODE/2026/08/0001 }
         no_faktur_supplier: { type: string, nullable: true }
         total_pembelian:
           type: string
@@ -7733,7 +7736,7 @@ components:
         migrasi di belakangnya.
       properties:
         id_pembelian: { type: integer, format: int64 }
-        nomor: { type: string, example: BL/2026/08/0001 }
+        nomor: { type: string, example: BL/KODE/2026/08/0001 }
         tanggal: { type: string, format: date-time }
         no_faktur_supplier: { type: string, nullable: true }
         tanggal_faktur: { type: string, format: date, nullable: true }
@@ -7777,7 +7780,7 @@ components:
           description: >
             Digenerate server, seri `PP` yang terpisah dari `BL`, `PS`, `RB`, `PU`,
             `MT`, `PM`, `PJ`, dan `SO`.
-          example: PP/2026/08/0001
+          example: PP/KODE/2026/08/0001
         tanggal: { type: string, format: date-time }
         id_pelanggan: { type: integer, format: int64 }
         nama_pelanggan: { type: string }
@@ -7842,7 +7845,7 @@ components:
       properties:
         id: { type: integer, format: int64 }
         id_penjualan: { type: integer, format: int64 }
-        nomor_penjualan: { type: string, example: PJ/2026/08/0001 }
+        nomor_penjualan: { type: string, example: PJ/KODE/2026/08/0001 }
         total_penjualan:
           type: string
           description: Keadaan nota sekarang, supaya layar pembayaran bisa menyebut apa yang ditutupnya.

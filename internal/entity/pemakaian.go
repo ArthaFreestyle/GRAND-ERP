@@ -74,7 +74,10 @@ type Pemakaian struct {
 	// Not columns of pemakaian. Filled by the read queries.
 	NamaRuang   string
 	NamaPemohon string
-	Detail      []PemakaianDetail
+	// IDUnitKerjaRuang is IDRuang's own unit_kerja — isu #21 fase 2, the same
+	// read-side scoping fase 6 already gave five other modules.
+	IDUnitKerjaRuang int64
+	Detail           []PemakaianDetail
 }
 
 // PemakaianDetail maps one line: one product, what was asked for, and — once

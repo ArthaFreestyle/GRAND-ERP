@@ -77,6 +77,13 @@ type PembayaranAlokasiResponse struct {
 type CreatePenerimaanPembayaranRequest struct {
 	ActorID int64 `json:"-" validate:"required,gt=0"`
 
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the body — isu #21 fase 1. This module has no
+	// room of its own, so it is what a document number is keyed to instead of
+	// a unit read off id_ruang; nil (a global grant) falls back to the
+	// pre-existing global series.
+	AktifIDUnitKerja *int64 `json:"-"`
+
 	IDPelanggan int64  `json:"id_pelanggan" validate:"required,gt=0"`
 	Tanggal     string `json:"tanggal" validate:"required,datetime=2006-01-02"`
 

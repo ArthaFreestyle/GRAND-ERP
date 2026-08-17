@@ -42,9 +42,15 @@ import (
 //
 // PelangganRepository is borrowed for exactly one narrow read: plafon_kredit and the
 // running receivable behind it, checked at Posting for a KREDIT nota (isu #10 fase
-// 2). It holds no RuangRepository, following pemakaian rather than pembelian and
-// mutasi: isu #10 does not ask for id_ruang to be validated against the caller's
-// active unit_kerja, and this module does not add that scope on its own initiative.
+// 2).
+//
+// isu #10 itself did not ask for id_ruang to be validated against the
+// caller's active unit_kerja, and for a long time this module followed
+// pemakaian in deliberately not adding that scope on its own initiative. isu
+// #21 fase 2 closed that: once a second outlet is really running, an
+// unscoped id_ruang here is an authorization hole, not a missing convenience
+// — a cashier from unit A could otherwise post a nota against unit B's room
+// with nothing to refuse it.
 type PenjualanUseCase struct {
 	DB                  *sql.DB
 	Log                 *logrus.Logger
@@ -55,15 +61,15 @@ type PenjualanUseCase struct {
 	KartuStokRepository *repository.KartuStokRepository
 	CounterRepository   *repository.DocumentCounterRepository
 	PeriodeRepository   *repository.PeriodeRepository
-	// RuangRepository is borrowed only for LockShared — isu #15, the same narrow
-	// addition pemakaian got: penjualan's own Posting already pre-locks balances via
-	// KunciSaldo, so the freeze it must not race against needs the same ruang: lock
-	// taken first. Still no use for periksaRuangUnitAktif here — isu #10 does not
-	// ask for id_ruang to be scoped to the caller's active unit_kerja.
+	// RuangRepository was first borrowed only for LockShared (isu #15);
+	// periksaRuangUnitAktif/IDUnitKerjaByID (isu #21 fase 2) now use it too.
 	RuangRepository *repository.RuangRepository
 	// StokOpnameRepository is the same narrow borrow every kartu_stok writer gets,
 	// for periksaRuangBeku's message.
 	StokOpnameRepository *repository.StokOpnameRepository
+	// UnitKerjaRepository resolves the kode a document number carries — isu #21
+	// fase 1 — read off id_ruang, not the caller's active unit_kerja.
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewPenjualanUseCase(
@@ -78,6 +84,7 @@ func NewPenjualanUseCase(
 	periodeRepository *repository.PeriodeRepository,
 	ruangRepository *repository.RuangRepository,
 	stokOpnameRepository *repository.StokOpnameRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *PenjualanUseCase {
 	return &PenjualanUseCase{
 		DB:                   db,
@@ -91,6 +98,7 @@ func NewPenjualanUseCase(
 		PeriodeRepository:    periodeRepository,
 		RuangRepository:      ruangRepository,
 		StokOpnameRepository: stokOpnameRepository,
+		UnitKerjaRepository:  unitKerjaRepository,
 	}
 }
 
@@ -126,7 +134,14 @@ func (c *PenjualanUseCase) Create(ctx context.Context, request *model.CreatePenj
 		_ = tx.Rollback() // no-op once the transaction is committed
 	}()
 
-	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixPenjualan, tanggal)
+	if err := periksaRuangUnitAktif(ctx, tx, c.RuangRepository, request.AktifIDUnitKerja, request.IDRuang); err != nil {
+		return nil, err
+	}
+
+	nomor, err := nomorDokumenUntukRuang(
+		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
+		repository.PrefixPenjualan, tanggal, request.IDRuang,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -173,7 +188,7 @@ func (c *PenjualanUseCase) Create(ctx context.Context, request *model.CreatePenj
 
 	// Re-read so the response carries the stored rows and their joined names rather
 	// than what was sent.
-	return c.detail(ctx, c.DB, penjualan.ID)
+	return c.detail(ctx, c.DB, penjualan.ID, nil)
 }
 
 func (c *PenjualanUseCase) Get(ctx context.Context, request *model.GetPenjualanRequest) (*model.PenjualanResponse, error) {
@@ -181,7 +196,7 @@ func (c *PenjualanUseCase) Get(ctx context.Context, request *model.GetPenjualanR
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, request.AktifIDUnitKerja)
 }
 
 func (c *PenjualanUseCase) Search(ctx context.Context, request *model.ListPenjualanRequest) ([]model.PenjualanResponse, *model.PageMetadata, error) {
@@ -195,7 +210,7 @@ func (c *PenjualanUseCase) Search(ctx context.Context, request *model.ListPenjua
 		ctx, c.DB,
 		request.Search, request.Status, request.StatusPembayaran, request.JenisPembayaran,
 		request.IDRuang, request.IDPelanggan, request.TanggalDari, request.TanggalSampai,
-		request.Size, request.Offset(),
+		request.AktifIDUnitKerja, request.Size, request.Offset(),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -255,6 +270,15 @@ func (c *PenjualanUseCase) Update(ctx context.Context, request *model.UpdatePenj
 		return nil, model.Invalid("id_pelanggan wajib diisi untuk penjualan KREDIT")
 	}
 
+	// Only when id_ruang is actually moving, and only the new value: a room
+	// once created never changes its unit_kerja (ruang has no PATCH), so a
+	// stored id_ruang the patch leaves untouched was already valid.
+	if patch.IDRuang != nil {
+		if err := periksaRuangUnitAktif(ctx, tx, c.RuangRepository, request.AktifIDUnitKerja, *patch.IDRuang); err != nil {
+			return nil, err
+		}
+	}
+
 	// diskon_nota/pembulatan are validated against the stored subtotal — a header
 	// patch never touches the lines, so the subtotal a patch has to respect is
 	// whatever ReplaceDetail last wrote.
@@ -292,7 +316,7 @@ func (c *PenjualanUseCase) Update(ctx context.Context, request *model.UpdatePenj
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // ReplaceDetail swaps the whole line set of a DRAFT and recomputes subtotal/total
@@ -336,7 +360,7 @@ func (c *PenjualanUseCase) ReplaceDetail(ctx context.Context, request *model.Rep
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Posting moves the goods out, writes HPP from what the ledger actually reported,
@@ -469,7 +493,7 @@ func (c *PenjualanUseCase) Posting(ctx context.Context, request *model.PostingPe
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Batal voids a posted nota by appending a reversing row for every movement it
@@ -575,7 +599,7 @@ func (c *PenjualanUseCase) Batal(ctx context.Context, request *model.BatalPenjua
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // periksaPlafon refuses a KREDIT nota that would push a customer's running
@@ -737,10 +761,20 @@ func (c *PenjualanUseCase) periksaSaldo(ctx context.Context, tx repository.DBTX,
 
 // detail loads a header and its lines. Two queries, independent of how many lines
 // come back.
-func (c *PenjualanUseCase) detail(ctx context.Context, db repository.DBTX, id int64) (*model.PenjualanResponse, error) {
+//
+// aktifIDUnitKerja scopes the read — isu #21 fase 2 — and is threaded as a
+// parameter rather than read from ambient state: Get passes the caller's real
+// active unit, but every write-path call passes nil, since a caller who just
+// acted on a document is by construction allowed to see the response their
+// own action produced.
+func (c *PenjualanUseCase) detail(ctx context.Context, db repository.DBTX, id int64, aktifIDUnitKerja *int64) (*model.PenjualanResponse, error) {
 	penjualan, err := c.PenjualanRepository.FindByID(ctx, db, id)
 	if err != nil {
 		return nil, notFoundOnNoRows(err, "penjualan not found")
+	}
+
+	if diLuarUnitAktif(penjualan.IDUnitKerjaRuang, aktifIDUnitKerja) {
+		return nil, model.NotFound("penjualan not found")
 	}
 
 	// Non-nil even when empty, so the response carries [] rather than dropping the

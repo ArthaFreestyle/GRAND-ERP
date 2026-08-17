@@ -38,6 +38,7 @@ func (c *PenerimaanPembayaranController) Create(ctx fiber.Ctx) error {
 	}
 
 	request.ActorID = actor
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
 
 	response, err := c.UseCase.Create(ctx.Context(), request)
 	if err != nil {

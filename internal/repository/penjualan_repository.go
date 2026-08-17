@@ -28,10 +28,12 @@ const penjualanColumns = `id, nomor, tanggal, id_ruang, id_pelanggan,
 
 // penjualanReadColumns adds the room's name and the customer's, resolved by the
 // joins in penjualanFrom. Fetching either per row would be an N+1.
+// r.id_unit_kerja rides along for isu #21 fase 2 (read-path scoping); it costs
+// nothing extra since penjualanFrom already joins ruang for its name.
 const penjualanReadColumns = `p.id, p.nomor, p.tanggal, p.id_ruang, p.id_pelanggan,
 	p.subtotal::TEXT, p.diskon_nota::TEXT, p.pembulatan::TEXT, p.total::TEXT, p.total_hpp::TEXT,
 	p.jenis_pembayaran, p.status_pembayaran, p.status, p.created_by, p.created_at, p.posted_at,
-	p.dibatalkan_oleh, p.alasan_batal, r.nama_ruang, pel.nama`
+	p.dibatalkan_oleh, p.alasan_batal, r.nama_ruang, pel.nama, r.id_unit_kerja`
 
 // penjualanFrom joins id_ruang INNER — that column is NOT NULL, so a nota without a
 // room cannot exist — and id_pelanggan LEFT: a cash sale legitimately has none.
@@ -91,7 +93,11 @@ const penjualanKreditRetur = `0::NUMERIC(20, 2)`
 // penjualanFilter is shared by the COUNT and the row query. Two copies of a filter
 // eventually diverge and total_item starts lying about the data.
 //
-// Placeholder discipline: the filter owns $1..$8 and pagination follows after it.
+// Placeholder discipline: the filter owns $1..$9 and pagination follows after it.
+//
+// $9 is the active-unit scope (isu #21 fase 2, mirroring mutasiFilter's own
+// unit clause): NULL means unrestricted (a global grant, or no active
+// context), matching periksaRuangUnitAktif's write-side rule.
 const penjualanFilter = `
 	WHERE ($1 = '' OR p.nomor ILIKE '%' || $1 || '%')
 	  AND ($2 = '' OR p.status = $2)
@@ -100,7 +106,8 @@ const penjualanFilter = `
 	  AND ($5 = 0 OR p.id_ruang = $5)
 	  AND ($6 = 0 OR p.id_pelanggan = $6)
 	  AND ($7::DATE IS NULL OR p.tanggal >= $7::DATE)
-	  AND ($8::DATE IS NULL OR p.tanggal < ($8::DATE + INTERVAL '1 day'))`
+	  AND ($8::DATE IS NULL OR p.tanggal < ($8::DATE + INTERVAL '1 day'))
+	  AND ($9::BIGINT IS NULL OR r.id_unit_kerja = $9)`
 
 const penjualanDetailReadColumns = `pd.id, pd.id_penjualan, pd.id_product, pd.qty_input::TEXT,
 	pd.id_satuan_input, pd.faktor_konversi, pd.qty_dasar, pd.id_harga_jual,
@@ -370,13 +377,14 @@ func (r *PenjualanRepository) Batal(ctx context.Context, db DBTX, id, actorID in
 }
 
 // Search returns one page plus the total matching count.
-func (r *PenjualanRepository) Search(ctx context.Context, db DBTX, search, status, statusPembayaran, jenisPembayaran string, idRuang, idPelanggan int64, dari, sampai *string, limit, offset int) ([]entity.Penjualan, int64, error) {
+func (r *PenjualanRepository) Search(ctx context.Context, db DBTX, search, status, statusPembayaran, jenisPembayaran string, idRuang, idPelanggan int64, dari, sampai *string, aktifIDUnitKerja *int64, limit, offset int) ([]entity.Penjualan, int64, error) {
 	search = EscapeLike(search)
 
 	var total int64
 	if err := db.QueryRowContext(
 		ctx, `SELECT COUNT(*) `+penjualanFrom+penjualanFilter,
 		search, status, statusPembayaran, jenisPembayaran, idRuang, idPelanggan, dari, sampai,
+		aktifIDUnitKerja,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count penjualan: %w", err)
 	}
@@ -390,12 +398,12 @@ func (r *PenjualanRepository) Search(ctx context.Context, db DBTX, search, statu
 	// supports it directly.
 	const query = `SELECT ` + penjualanReadColumns + penjualanFrom + penjualanFilter + `
 		ORDER BY p.tanggal DESC, p.id DESC
-		LIMIT $9 OFFSET $10`
+		LIMIT $10 OFFSET $11`
 
 	rows, err := db.QueryContext(
 		ctx, query,
 		search, status, statusPembayaran, jenisPembayaran, idRuang, idPelanggan, dari, sampai,
-		limit, offset,
+		aktifIDUnitKerja, limit, offset,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select penjualan: %w", err)
@@ -625,5 +633,6 @@ func scanPenjualan(row rowScanner, penjualan *entity.Penjualan) error {
 func scanPenjualanRead(row rowScanner, penjualan *entity.Penjualan) error {
 	return row.Scan(append(
 		penjualanFields(penjualan), &penjualan.NamaRuang, &penjualan.NamaPelanggan,
+		&penjualan.IDUnitKerjaRuang,
 	)...)
 }

@@ -92,6 +92,11 @@ type PenjualanDetailResponse struct {
 type CreatePenjualanRequest struct {
 	ActorID int64 `json:"-" validate:"required,gt=0"`
 
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the body — isu #21 fase 2. Nil means the active
+	// grant applies everywhere, so nothing is checked.
+	AktifIDUnitKerja *int64 `json:"-"`
+
 	Tanggal         string `json:"tanggal" validate:"required,datetime=2006-01-02"`
 	IDRuang         int64  `json:"id_ruang" validate:"required,gt=0"`
 	IDPelanggan     *int64 `json:"id_pelanggan" validate:"omitempty,gt=0"`
@@ -126,6 +131,12 @@ type PenjualanDetailRequest struct {
 
 type GetPenjualanRequest struct {
 	ID int64 `param:"id" validate:"required,gt=0"`
+
+	// AktifIDUnitKerja is filled from the session's active grant by the
+	// controller, never from the request — isu #21 fase 2. Nil means
+	// unrestricted, otherwise a document whose id_ruang falls outside this
+	// unit answers 404.
+	AktifIDUnitKerja *int64 `json:"-"`
 }
 
 // UpdatePenjualanRequest patches the header of a DRAFT.
@@ -143,6 +154,10 @@ type GetPenjualanRequest struct {
 type UpdatePenjualanRequest struct {
 	ID      int64 `json:"-" validate:"required,gt=0"`
 	ActorID int64 `json:"-" validate:"required,gt=0"`
+
+	// AktifIDUnitKerja, same rule as CreatePenjualanRequest: only checked when
+	// id_ruang is actually being changed, and only against the new value.
+	AktifIDUnitKerja *int64 `json:"-"`
 
 	Tanggal         Optional[string] `json:"tanggal" validate:"omitempty,datetime=2006-01-02"`
 	IDRuang         Optional[int64]  `json:"id_ruang" validate:"omitempty,gt=0"`
@@ -188,6 +203,9 @@ type ListPenjualanRequest struct {
 	IDPelanggan      int64   `query:"id_pelanggan" validate:"omitempty,gt=0"`
 	TanggalDari      *string `query:"tanggal_dari" validate:"omitempty,datetime=2006-01-02"`
 	TanggalSampai    *string `query:"tanggal_sampai" validate:"omitempty,datetime=2006-01-02"`
+
+	// AktifIDUnitKerja, same rule as GetPenjualanRequest — isu #21 fase 2.
+	AktifIDUnitKerja *int64 `query:"-"`
 }
 
 // PiutangPelangganResponse is one open KREDIT nota: the working list for chasing

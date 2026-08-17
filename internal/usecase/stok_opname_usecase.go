@@ -46,6 +46,9 @@ type StokOpnameUseCase struct {
 	CounterRepository    *repository.DocumentCounterRepository
 	PeriodeRepository    *repository.PeriodeRepository
 	RuangRepository      *repository.RuangRepository
+	// UnitKerjaRepository resolves the kode a document number carries — isu #21
+	// fase 1 — read off id_ruang, not the caller's active unit_kerja.
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewStokOpnameUseCase(
@@ -57,6 +60,7 @@ func NewStokOpnameUseCase(
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
 	ruangRepository *repository.RuangRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *StokOpnameUseCase {
 	return &StokOpnameUseCase{
 		DB:                   db,
@@ -67,6 +71,7 @@ func NewStokOpnameUseCase(
 		CounterRepository:    counterRepository,
 		PeriodeRepository:    periodeRepository,
 		RuangRepository:      ruangRepository,
+		UnitKerjaRepository:  unitKerjaRepository,
 	}
 }
 
@@ -102,7 +107,10 @@ func (c *StokOpnameUseCase) Create(ctx context.Context, request *model.CreateSto
 
 	now := time.Now()
 
-	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixStokOpname, now)
+	nomor, err := nomorDokumenUntukRuang(
+		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
+		repository.PrefixStokOpname, now, request.IDRuang,
+	)
 	if err != nil {
 		return nil, err
 	}

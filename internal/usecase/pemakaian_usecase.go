@@ -31,9 +31,12 @@ import (
 //     while posting records that it actually did, and the two can happen on
 //     different days.
 //
-// It holds no RuangRepository: unlike pembelian and mutasi, isu #9 does not ask for
-// id_ruang to be validated against the caller's active unit_kerja, and this module
-// does not add that scope on its own.
+// isu #9 itself did not ask for id_ruang to be validated against the caller's
+// active unit_kerja, and for a long time this module deliberately did not add
+// that scope on its own initiative. isu #21 fase 2 closed that: once a second
+// outlet is really running, an unscoped id_ruang here is an authorization
+// hole, not a missing convenience — a cashier from unit A could otherwise
+// post a request against unit B's room with nothing to refuse it.
 type PemakaianUseCase struct {
 	DB                  *sql.DB
 	Log                 *logrus.Logger
@@ -43,14 +46,16 @@ type PemakaianUseCase struct {
 	KartuStokRepository *repository.KartuStokRepository
 	CounterRepository   *repository.DocumentCounterRepository
 	PeriodeRepository   *repository.PeriodeRepository
-	// RuangRepository is borrowed only for LockShared — isu #15. pemakaian gained
-	// this once its own Posting became a module that pre-locks balances the freeze
-	// has to be protected around; it still has no use for
-	// periksaRuangUnitAktif/IDUnitKerjaByID, so isu #12 fase 5 remains untouched here.
+	// RuangRepository was first borrowed only for LockShared (isu #15);
+	// periksaRuangUnitAktif/IDUnitKerjaByID (isu #12 fase 5 / isu #21 fase 2)
+	// now use it too.
 	RuangRepository *repository.RuangRepository
 	// StokOpnameRepository is the same narrow borrow every kartu_stok writer gets,
 	// for periksaRuangBeku's message.
 	StokOpnameRepository *repository.StokOpnameRepository
+	// UnitKerjaRepository resolves the kode a document number carries — isu #21
+	// fase 1 — read off id_ruang, not the caller's active unit_kerja.
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewPemakaianUseCase(
@@ -64,6 +69,7 @@ func NewPemakaianUseCase(
 	periodeRepository *repository.PeriodeRepository,
 	ruangRepository *repository.RuangRepository,
 	stokOpnameRepository *repository.StokOpnameRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *PemakaianUseCase {
 	return &PemakaianUseCase{
 		DB:                   db,
@@ -76,6 +82,7 @@ func NewPemakaianUseCase(
 		PeriodeRepository:    periodeRepository,
 		RuangRepository:      ruangRepository,
 		StokOpnameRepository: stokOpnameRepository,
+		UnitKerjaRepository:  unitKerjaRepository,
 	}
 }
 
@@ -101,7 +108,14 @@ func (c *PemakaianUseCase) Create(ctx context.Context, request *model.CreatePema
 		_ = tx.Rollback() // no-op once the transaction is committed
 	}()
 
-	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixPemakaian, tanggal)
+	if err := periksaRuangUnitAktif(ctx, tx, c.RuangRepository, request.AktifIDUnitKerja, request.IDRuang); err != nil {
+		return nil, err
+	}
+
+	nomor, err := nomorDokumenUntukRuang(
+		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
+		repository.PrefixPemakaian, tanggal, request.IDRuang,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +152,7 @@ func (c *PemakaianUseCase) Create(ctx context.Context, request *model.CreatePema
 
 	// Re-read so the response carries the stored rows and their joined names rather
 	// than what was sent.
-	return c.detail(ctx, c.DB, pemakaian.ID)
+	return c.detail(ctx, c.DB, pemakaian.ID, nil)
 }
 
 func (c *PemakaianUseCase) Get(ctx context.Context, request *model.GetPemakaianRequest) (*model.PemakaianResponse, error) {
@@ -146,7 +160,7 @@ func (c *PemakaianUseCase) Get(ctx context.Context, request *model.GetPemakaianR
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, request.AktifIDUnitKerja)
 }
 
 func (c *PemakaianUseCase) Search(ctx context.Context, request *model.ListPemakaianRequest) ([]model.PemakaianResponse, *model.PageMetadata, error) {
@@ -159,8 +173,8 @@ func (c *PemakaianUseCase) Search(ctx context.Context, request *model.ListPemaka
 	list, total, err := c.PemakaianRepository.Search(
 		ctx, c.DB,
 		request.Search, request.Status, request.IDRuang, request.IDPemohon,
-		request.TanggalDari, request.TanggalSampai, request.TerlamaDulu,
-		request.Size, request.Offset(),
+		request.TanggalDari, request.TanggalSampai, request.AktifIDUnitKerja,
+		request.TerlamaDulu, request.Size, request.Offset(),
 	)
 	if err != nil {
 		return nil, nil, err
@@ -220,6 +234,15 @@ func (c *PemakaianUseCase) Update(ctx context.Context, request *model.UpdatePema
 		return nil, err
 	}
 
+	// Only when id_ruang is actually moving, and only the new value: a room
+	// once created never changes its unit_kerja (ruang has no PATCH), so a
+	// stored id_ruang the patch leaves untouched was already valid.
+	if patch.IDRuang != nil {
+		if err := periksaRuangUnitAktif(ctx, tx, c.RuangRepository, request.AktifIDUnitKerja, *patch.IDRuang); err != nil {
+			return nil, err
+		}
+	}
+
 	if err := c.PemakaianRepository.UpdateHeader(ctx, tx, request.ID, patch); err != nil {
 		return nil, invalidOnForeignKey(
 			notFoundOnNoRows(err, "pemakaian not found"),
@@ -231,7 +254,7 @@ func (c *PemakaianUseCase) Update(ctx context.Context, request *model.UpdatePema
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // ReplaceDetail swaps the whole line set of a DRAFT.
@@ -269,7 +292,7 @@ func (c *PemakaianUseCase) ReplaceDetail(ctx context.Context, request *model.Rep
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Ajukan hands a draft to the approver. This is the point the document stops being
@@ -308,7 +331,7 @@ func (c *PemakaianUseCase) Ajukan(ctx context.Context, request *model.AjukanPema
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Setujui approves a submission and decides how much of each line may actually
@@ -398,7 +421,7 @@ func (c *PemakaianUseCase) Setujui(ctx context.Context, request *model.SetujuiPe
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Tolak refuses a submission outright. Unlike pembelian this never returns the
@@ -436,7 +459,7 @@ func (c *PemakaianUseCase) Tolak(ctx context.Context, request *model.TolakPemaka
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Posting records that the approved goods actually left, and writes kartu_stok.
@@ -567,7 +590,7 @@ func (c *PemakaianUseCase) Posting(ctx context.Context, request *model.PostingPe
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // Batal voids a posted request by appending a reversing row for every movement it
@@ -659,7 +682,7 @@ func (c *PemakaianUseCase) Batal(ctx context.Context, request *model.BatalPemaka
 		return nil, err
 	}
 
-	return c.detail(ctx, c.DB, request.ID)
+	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
 // kunciJalurStok takes every balance lock Posting's inserts will need, up front, in
@@ -764,10 +787,20 @@ func (c *PemakaianUseCase) periksaSaldo(ctx context.Context, tx repository.DBTX,
 
 // detail loads a header and its lines. Two queries, independent of how many lines
 // come back.
-func (c *PemakaianUseCase) detail(ctx context.Context, db repository.DBTX, id int64) (*model.PemakaianResponse, error) {
+//
+// aktifIDUnitKerja scopes the read — isu #21 fase 2 — and is threaded as a
+// parameter rather than read from ambient state: Get passes the caller's real
+// active unit, but every write-path call passes nil, since a caller who just
+// acted on a document is by construction allowed to see the response their
+// own action produced.
+func (c *PemakaianUseCase) detail(ctx context.Context, db repository.DBTX, id int64, aktifIDUnitKerja *int64) (*model.PemakaianResponse, error) {
 	pemakaian, err := c.PemakaianRepository.FindByID(ctx, db, id)
 	if err != nil {
 		return nil, notFoundOnNoRows(err, "pemakaian not found")
+	}
+
+	if diLuarUnitAktif(pemakaian.IDUnitKerjaRuang, aktifIDUnitKerja) {
+		return nil, model.NotFound("pemakaian not found")
 	}
 
 	// Non-nil even when empty, so the response carries [] rather than dropping the

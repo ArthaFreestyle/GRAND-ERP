@@ -43,6 +43,12 @@ type ReturPembelianUseCase struct {
 	PeriodeRepository *repository.PeriodeRepository
 	// StokOpnameRepository is the same narrow borrow, for periksaRuangBeku (isu #15).
 	StokOpnameRepository *repository.StokOpnameRepository
+	// RuangRepository and UnitKerjaRepository resolve the kode a document number
+	// carries — isu #21 fase 1. The room is copied from the parent pembelian,
+	// never chosen here, so this needs no periksaRuangUnitAktif of its own —
+	// the parent's own Create already validated it.
+	RuangRepository     *repository.RuangRepository
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewReturPembelianUseCase(
@@ -56,6 +62,8 @@ func NewReturPembelianUseCase(
 	counterRepository *repository.DocumentCounterRepository,
 	periodeRepository *repository.PeriodeRepository,
 	stokOpnameRepository *repository.StokOpnameRepository,
+	ruangRepository *repository.RuangRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *ReturPembelianUseCase {
 	return &ReturPembelianUseCase{
 		DB:                   db,
@@ -68,6 +76,8 @@ func NewReturPembelianUseCase(
 		CounterRepository:    counterRepository,
 		StokOpnameRepository: stokOpnameRepository,
 		PeriodeRepository:    periodeRepository,
+		RuangRepository:      ruangRepository,
+		UnitKerjaRepository:  unitKerjaRepository,
 	}
 }
 
@@ -98,7 +108,10 @@ func (c *ReturPembelianUseCase) Create(ctx context.Context, request *model.Creat
 		return nil, err
 	}
 
-	nomor, err := nomorDokumen(ctx, tx, c.CounterRepository, repository.PrefixRetur, tanggal)
+	nomor, err := nomorDokumenUntukRuang(
+		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
+		repository.PrefixRetur, tanggal, pembelian.IDRuang,
+	)
 	if err != nil {
 		return nil, err
 	}

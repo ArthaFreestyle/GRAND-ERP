@@ -31,7 +31,12 @@ func stokAwalMutasi(t *testing.T, testApp *app, qty string) (*app, mutasiSetup) 
 
 	f := pembelianFixture(t, testApp)
 
-	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Toko Depan"})
+	// Kode is required: several tests move goods back out of tujuan, making it
+	// the source room of a later transfer, and isu #21 fase 1 keys every
+	// document number to the issuing unit's kode.
+	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
+		Kode: ptr("DEPAN"), Nama: "Unit Toko Depan",
+	})
 	if err != nil {
 		t.Fatalf("create unit kerja tujuan: %v", err)
 	}
