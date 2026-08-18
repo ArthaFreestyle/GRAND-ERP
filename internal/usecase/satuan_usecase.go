@@ -58,8 +58,9 @@ func (c *SatuanUseCase) Create(ctx context.Context, request *model.CreateSatuanR
 	}
 
 	satuan := &entity.Satuan{
-		Nama:    request.Nama,
-		IsAktif: true,
+		Nama:      request.Nama,
+		IsAktif:   true,
+		CreatedBy: &request.ActorID,
 	}
 
 	if err := c.SatuanRepository.Create(ctx, tx, satuan); err != nil {
@@ -100,8 +101,10 @@ func (c *SatuanUseCase) Update(ctx context.Context, request *model.UpdateSatuanR
 	}
 
 	patch := repository.SatuanPatch{
-		Nama:    request.Nama.Value,
-		IsAktif: request.IsAktif.Value,
+		Nama:         request.Nama.Value,
+		IsAktif:      request.IsAktif.Value,
+		SetUpdatedBy: true,
+		UpdatedBy:    &request.ActorID,
 	}
 
 	// An empty body would still fire the updated_at trigger, recording a change

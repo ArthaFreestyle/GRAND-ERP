@@ -25,13 +25,13 @@ func TestDocumentCounterDuaUnitTidakBertabrakanDanMulaiDariSatu(t *testing.T) {
 	f := pembelianFixture(t, testApp)
 
 	unitKedua, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
-		Kode: ptr("KEDUA"), Nama: "Unit Kedua Counter",
+		ActorID: f.actor, Kode: ptr("KEDUA"), Nama: "Unit Kedua Counter",
 	})
 	if err != nil {
 		t.Fatalf("create unit kedua: %v", err)
 	}
 	ruangKedua, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
-		NamaRuang: "Gudang Kedua Counter", IDUnitKerja: unitKedua.ID,
+		ActorID: f.actor, NamaRuang: "Gudang Kedua Counter", IDUnitKerja: unitKedua.ID,
 	})
 	if err != nil {
 		t.Fatalf("create ruang kedua: %v", err)
@@ -104,13 +104,13 @@ func TestDocumentCounterUnitTanpaKodeDitolakSaatMenerbitkanNomor(t *testing.T) {
 	f := pembelianFixture(t, testApp)
 
 	unitTanpaKode, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
-		Nama: "Unit Tanpa Kode",
+		ActorID: f.actor, Nama: "Unit Tanpa Kode",
 	})
 	if err != nil {
 		t.Fatalf("create unit tanpa kode: %v", err)
 	}
 	ruangTanpaKode, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
-		NamaRuang: "Gudang Tanpa Kode", IDUnitKerja: unitTanpaKode.ID,
+		ActorID: f.actor, NamaRuang: "Gudang Tanpa Kode", IDUnitKerja: unitTanpaKode.ID,
 	})
 	if err != nil {
 		t.Fatalf("create ruang tanpa kode: %v", err)

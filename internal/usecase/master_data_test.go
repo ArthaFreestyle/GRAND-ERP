@@ -33,14 +33,23 @@ type masterModule struct {
 	table string
 }
 
-func masterModules(a *app) []masterModule {
+func masterModules(t *testing.T, a *app) []masterModule {
+	// isu #23 made Create/Update on every module below require a real ActorID.
+	// A function rather than one id seeded up front: several callers of
+	// masterModules re-run truncateMaster per subtest (wiping users along with
+	// everything else) after this constructor already returned, so an id
+	// captured once here would point at a row already gone by the time a
+	// closure runs. Calling testActor(t) fresh on every use costs a throwaway
+	// row per call, which nothing here minds.
+	actor := func() int64 { return testActor(t) }
+
 	return []masterModule{
 		{
 			name:           "satuan",
 			table:          "satuan",
 			namesAreUnique: true,
 			createNamed: func(nama string) (int64, error) {
-				response, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: nama})
+				response, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor(), Nama: nama})
 				if err != nil {
 					return 0, err
 				}
@@ -72,6 +81,7 @@ func masterModules(a *app) []masterModule {
 			patchAktif: func(id int64, aktif bool) (string, error) {
 				response, err := a.satuan.Update(ctx(), &model.UpdateSatuanRequest{
 					ID:      id,
+					ActorID: actor(),
 					IsAktif: model.Optional[bool]{Present: true, Value: &aktif},
 				})
 				if err != nil {
@@ -86,7 +96,7 @@ func masterModules(a *app) []masterModule {
 			table:          "ekspedisi",
 			namesAreUnique: true,
 			createNamed: func(nama string) (int64, error) {
-				response, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{Nama: nama})
+				response, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{ActorID: actor(), Nama: nama})
 				if err != nil {
 					return 0, err
 				}
@@ -118,6 +128,7 @@ func masterModules(a *app) []masterModule {
 			patchAktif: func(id int64, aktif bool) (string, error) {
 				response, err := a.ekspedisi.Update(ctx(), &model.UpdateEkspedisiRequest{
 					ID:      id,
+					ActorID: actor(),
 					IsAktif: model.Optional[bool]{Present: true, Value: &aktif},
 				})
 				if err != nil {
@@ -131,7 +142,7 @@ func masterModules(a *app) []masterModule {
 			name:  "supplier",
 			table: "supplier",
 			createNamed: func(nama string) (int64, error) {
-				response, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: nama})
+				response, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: actor(), Nama: nama})
 				if err != nil {
 					return 0, err
 				}
@@ -163,6 +174,7 @@ func masterModules(a *app) []masterModule {
 			patchAktif: func(id int64, aktif bool) (string, error) {
 				response, err := a.supplier.Update(ctx(), &model.UpdateSupplierRequest{
 					ID:      id,
+					ActorID: actor(),
 					IsAktif: model.Optional[bool]{Present: true, Value: &aktif},
 				})
 				if err != nil {
@@ -176,7 +188,7 @@ func masterModules(a *app) []masterModule {
 			name:  "pelanggan",
 			table: "pelanggan",
 			createNamed: func(nama string) (int64, error) {
-				response, err := a.pelanggan.Create(ctx(), &model.CreatePelangganRequest{Nama: nama})
+				response, err := a.pelanggan.Create(ctx(), &model.CreatePelangganRequest{ActorID: actor(), Nama: nama})
 				if err != nil {
 					return 0, err
 				}
@@ -208,6 +220,7 @@ func masterModules(a *app) []masterModule {
 			patchAktif: func(id int64, aktif bool) (string, error) {
 				response, err := a.pelanggan.Update(ctx(), &model.UpdatePelangganRequest{
 					ID:      id,
+					ActorID: actor(),
 					IsAktif: model.Optional[bool]{Present: true, Value: &aktif},
 				})
 				if err != nil {
@@ -222,7 +235,7 @@ func masterModules(a *app) []masterModule {
 			table:          "unit_kerja",
 			namesAreUnique: false,
 			createNamed: func(nama string) (int64, error) {
-				response, err := a.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: nama})
+				response, err := a.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: actor(), Nama: nama})
 				if err != nil {
 					return 0, err
 				}
@@ -254,6 +267,7 @@ func masterModules(a *app) []masterModule {
 			patchAktif: func(id int64, aktif bool) (string, error) {
 				response, err := a.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{
 					ID:      id,
+					ActorID: actor(),
 					IsAktif: model.Optional[bool]{Present: true, Value: &aktif},
 				})
 				if err != nil {
@@ -264,8 +278,11 @@ func masterModules(a *app) []masterModule {
 			},
 		},
 		{
-			// ruang has no PATCH endpoint, but it is included because the two bugs
-			// fixed in section 1 of the issue live in its Search.
+			// ruang is included because the two bugs fixed in section 1 of isu #2
+			// live in its Search. patchAktif is left nil even though isu #23 gave
+			// ruang a PATCH: that endpoint's own retirement guards (stock, freeze)
+			// need fixtures this generic harness has no way to build, and get their
+			// own coverage in ruang_patch_test.go instead.
 			//
 			// Every ruang needs an id_unit_kerja since isu #12 fase 2, and
 			// truncateMaster wipes unit_kerja along with ruang between subtests, so a
@@ -273,12 +290,13 @@ func masterModules(a *app) []masterModule {
 			name:  "ruang",
 			table: "ruang",
 			createNamed: func(nama string) (int64, error) {
-				unit, err := a.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit " + nama})
+				unit, err := a.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: actor(), Nama: "Unit " + nama})
 				if err != nil {
 					return 0, err
 				}
 
 				response, err := a.ruang.Create(ctx(), &model.CreateRuangRequest{
+					ActorID:     actor(),
 					NamaRuang:   nama,
 					IDUnitKerja: unit.ID,
 				})
@@ -317,7 +335,7 @@ func masterModules(a *app) []masterModule {
 // TestListEmptyIsJSONArray guards the response shape: a nil slice marshals to
 // null, which forces every client to special-case "no data".
 func TestListEmptyIsJSONArray(t *testing.T) {
-	for _, module := range masterModules(newApp(t)) {
+	for _, module := range masterModules(t, newApp(t)) {
 		t.Run(module.name, func(t *testing.T) {
 			_, _, total, data, err := module.list("", 1, 20)
 			if err != nil {
@@ -344,7 +362,7 @@ func TestListEmptyIsJSONArray(t *testing.T) {
 // turn the filter into "match anything" and make a name containing a literal %
 // unfindable.
 func TestSearchTreatsWildcardsAsText(t *testing.T) {
-	for _, module := range masterModules(newApp(t)) {
+	for _, module := range masterModules(t, newApp(t)) {
 		t.Run(module.name, func(t *testing.T) {
 			truncateMaster(t)
 
@@ -394,7 +412,7 @@ func TestSearchTreatsWildcardsAsText(t *testing.T) {
 // TestPaginationIsStableWithDuplicateNames covers bug 1: ordering by a non-unique
 // column lets a row appear on two pages while another is never returned.
 func TestPaginationIsStableWithDuplicateNames(t *testing.T) {
-	for _, module := range masterModules(newApp(t)) {
+	for _, module := range masterModules(t, newApp(t)) {
 		t.Run(module.name, func(t *testing.T) {
 			truncateMaster(t)
 
@@ -476,7 +494,7 @@ func TestPaginationIsStableWithDuplicateNames(t *testing.T) {
 
 // TestGetUnknownIDIsNotFound pins the 404, not a 500 and not an empty 200.
 func TestGetUnknownIDIsNotFound(t *testing.T) {
-	for _, module := range masterModules(newApp(t)) {
+	for _, module := range masterModules(t, newApp(t)) {
 		t.Run(module.name, func(t *testing.T) {
 			// Nothing was created, so any id is absent.
 			assertKind(t, module.get(999_999), model.KindNotFound)
@@ -487,7 +505,7 @@ func TestGetUnknownIDIsNotFound(t *testing.T) {
 // TestPatchLeavesAbsentFieldsAlone is the core PATCH promise: a field missing
 // from the body is not touched.
 func TestPatchLeavesAbsentFieldsAlone(t *testing.T) {
-	for _, module := range masterModules(newApp(t)) {
+	for _, module := range masterModules(t, newApp(t)) {
 		if module.patchAktif == nil {
 			continue
 		}

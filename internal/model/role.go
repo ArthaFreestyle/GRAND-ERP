@@ -46,8 +46,14 @@ type RoleRef struct {
 
 // Nama is unique case-insensitively (role_nama_lower_uidx), so "Cashier" and
 // "CASHIER" collide.
+//
+// ActorID is filled from the session by the controller, never from the body —
+// the id comes from the verified token, never from anything a caller could set
+// to someone else's. POST /api/v1/role is SUPERADMIN-only, so created_by is
+// always present.
 type CreateRoleRequest struct {
-	Nama string `json:"nama" validate:"required,max=64"`
+	ActorID int64  `json:"-" validate:"required,gt=0"`
+	Nama    string `json:"nama" validate:"required,max=64"`
 }
 
 type GetRoleRequest struct {
@@ -62,6 +68,7 @@ type GetRoleRequest struct {
 // in the database can enforce that, so it stays a documented rule.
 type UpdateRoleRequest struct {
 	ID      int64            `json:"-" validate:"required,gt=0"`
+	ActorID int64            `json:"-" validate:"required,gt=0"`
 	Nama    Optional[string] `json:"nama" validate:"omitempty,max=64"`
 	IsAktif Optional[bool]   `json:"is_aktif"`
 }

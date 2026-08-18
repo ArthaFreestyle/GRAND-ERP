@@ -39,6 +39,7 @@ func dokumenFixture(t *testing.T, testApp *app) int64 {
 	t.Helper()
 
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		ActorID:  testActor(t),
 		Username: "petugas_unggah",
 		Password: "rahasia123",
 	})

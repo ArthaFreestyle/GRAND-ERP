@@ -341,6 +341,40 @@ func (r *KartuStokRepository) SaldoRuang(ctx context.Context, db DBTX, idRuang i
 	return list, nil
 }
 
+// HasSaldoPositif reports whether any product still has a positive balance in
+// this room — isu #23 fase 3, the guard behind retiring a ruang.
+//
+// A retired room is not emptied by is_aktif = false: the inventory value report
+// deliberately does not filter on is_aktif (see "Bacaan atas kartu_stok" —
+// laporan/nilai-persediaan), because a retired room still holding stock still
+// holds its value. Allowing the retirement anyway would leave goods that appear
+// on no room list yet still sit on the balance sheet. The remedy is a mutasi or
+// a pemakaian that actually empties the room first.
+//
+// Mirrors the same DISTINCT ON (id_barang) ... ORDER BY id DESC reading
+// SaldoRuang takes: the latest kartu_stok row per product in this room is its
+// current balance, and a product with no row here has never held stock in it at
+// all.
+func (r *KartuStokRepository) HasSaldoPositif(ctx context.Context, db DBTX, idRuang int64) (bool, error) {
+	const query = `
+		SELECT EXISTS (
+			SELECT 1 FROM (
+				SELECT DISTINCT ON (id_barang) stok_akhir
+				FROM kartu_stok
+				WHERE id_ruang = $1
+				ORDER BY id_barang, id DESC
+			) saldo
+			WHERE saldo.stok_akhir > 0
+		)`
+
+	var exists bool
+	if err := db.QueryRowContext(ctx, query, idRuang).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check saldo positif ruang: %w", err)
+	}
+
+	return exists, nil
+}
+
 // KunciSaldo takes the balance locks for a whole document up front, in one canonical
 // order, and must be called inside a transaction.
 //

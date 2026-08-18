@@ -14,8 +14,13 @@ type SatuanResponse struct {
 
 // Nama is unique case-insensitively (satuan_nama_lower_uidx), so "Pcs" and
 // "PCS" collide.
+//
+// ActorID is filled from the session by the controller, never from the body —
+// the id comes from the verified token, never from anything a caller could set
+// to someone else's.
 type CreateSatuanRequest struct {
-	Nama string `json:"nama" validate:"required,max=64"`
+	ActorID int64  `json:"-" validate:"required,gt=0"`
+	Nama    string `json:"nama" validate:"required,max=64"`
 }
 
 type GetSatuanRequest struct {
@@ -29,6 +34,7 @@ type GetSatuanRequest struct {
 // Optional tags must lead with omitempty; see config.NewValidator.
 type UpdateSatuanRequest struct {
 	ID      int64            `json:"-" validate:"required,gt=0"`
+	ActorID int64            `json:"-" validate:"required,gt=0"`
 	Nama    Optional[string] `json:"nama" validate:"omitempty,max=64"`
 	IsAktif Optional[bool]   `json:"is_aktif"`
 }

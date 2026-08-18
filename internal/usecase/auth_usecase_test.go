@@ -21,6 +21,7 @@ func loginAs(t *testing.T, a *app, username string, grants []model.GrantRequest)
 	t.Helper()
 
 	if _, err := a.user.Create(ctx(), &model.CreateUserRequest{
+		ActorID:  testActor(t),
 		Username: username,
 		Password: testPassword,
 		Grants:   grants,
@@ -129,6 +130,7 @@ func TestLoginWithManyGrantsHasNoActiveContext(t *testing.T) {
 // list, and must not become the active context.
 func TestLoginExcludesGrantWithRetiredRole(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, a)
 
 	// The grant is created while INVENTARIS is still active — Create's own
@@ -136,6 +138,7 @@ func TestLoginExcludesGrantWithRetiredRole(t *testing.T) {
 	// outright — and only retired afterwards, so what Login excludes is a
 	// grant that was valid when it was made.
 	if _, err := a.user.Create(ctx(), &model.CreateUserRequest{
+		ActorID: actor,
 		Username: "role_pensiun",
 		Password: testPassword,
 		Grants: []model.GrantRequest{
@@ -147,6 +150,7 @@ func TestLoginExcludesGrantWithRetiredRole(t *testing.T) {
 	}
 
 	if _, err := a.role.Update(ctx(), &model.UpdateRoleRequest{
+		ActorID: actor,
 		ID:      roles["INVENTARIS"],
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {
@@ -171,12 +175,14 @@ func TestLoginExcludesGrantWithRetiredRole(t *testing.T) {
 // scoped to a unit that is no longer active is not usable either.
 func TestLoginExcludesGrantWithRetiredUnitKerja(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, a)
 	unit := createUnit(t, a, "Unit Pensiun Login")
 
 	// Same ordering constraint as the retired-role test: the grant is created
 	// while the unit is still active, then retired afterwards.
 	if _, err := a.user.Create(ctx(), &model.CreateUserRequest{
+		ActorID: actor,
 		Username: "unit_pensiun_login",
 		Password: testPassword,
 		Grants: []model.GrantRequest{
@@ -188,6 +194,7 @@ func TestLoginExcludesGrantWithRetiredUnitKerja(t *testing.T) {
 	}
 
 	if _, err := a.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{
+		ActorID: actor,
 		ID:      unit,
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {
@@ -275,6 +282,7 @@ func TestSwitchContextSelectsTheNamedGrant(t *testing.T) {
 // not a way to borrow someone else's authority by guessing an id.
 func TestSwitchContextRejectsGrantOfAnotherUser(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, a)
 
 	owner := loginAs(t, a, "pemilik_grant", []model.GrantRequest{
@@ -282,6 +290,7 @@ func TestSwitchContextRejectsGrantOfAnotherUser(t *testing.T) {
 	})
 
 	if _, err := a.user.Create(ctx(), &model.CreateUserRequest{
+		ActorID: actor,
 		Username: "bukan_pemilik",
 		Password: testPassword,
 	}); err != nil {
@@ -311,6 +320,7 @@ func TestSwitchContextRejectsGrantOfAnotherUser(t *testing.T) {
 // trusted.
 func TestSwitchContextRejectsGrantWithRoleRetiredSinceLogin(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, a)
 
 	login := loginAs(t, a, "role_dicabut_setelah_login", []model.GrantRequest{
@@ -334,6 +344,7 @@ func TestSwitchContextRejectsGrantWithRoleRetiredSinceLogin(t *testing.T) {
 	}
 
 	if _, err := a.role.Update(ctx(), &model.UpdateRoleRequest{
+		ActorID: actor,
 		ID:      roles["INVENTARIS"],
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {
@@ -348,6 +359,7 @@ func TestSwitchContextRejectsGrantWithRoleRetiredSinceLogin(t *testing.T) {
 // The same re-check, for a unit_kerja retired after login rather than a role.
 func TestSwitchContextRejectsGrantWithUnitRetiredSinceLogin(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, a)
 	unit := createUnit(t, a, "Unit Dicabut Setelah Login")
 
@@ -372,6 +384,7 @@ func TestSwitchContextRejectsGrantWithUnitRetiredSinceLogin(t *testing.T) {
 	}
 
 	if _, err := a.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{
+		ActorID: actor,
 		ID:      unit,
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {

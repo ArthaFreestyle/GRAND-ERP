@@ -18,7 +18,8 @@ func NewRuangRepository() *RuangRepository {
 // ruangReadColumns adds the unit's name, resolved by the join in ruangFrom, and
 // the nomor of whichever stok_opname is currently freezing the room (isu #15;
 // nil when free). Fetching either per row instead would be an N+1.
-const ruangReadColumns = `r.id, r.kode, r.nama_ruang, r.is_aktif, r.id_unit_kerja, uk.nama, so.nomor`
+const ruangReadColumns = `r.id, r.kode, r.nama_ruang, r.is_aktif, r.id_unit_kerja,
+	r.created_at, r.created_by, r.updated_at, r.updated_by, uk.nama, so.nomor`
 
 // ruangFrom joins unit_kerja INNER, not LEFT: id_unit_kerja is NOT NULL since
 // migration 000019, so every ruang row has one, and an INNER join costs
@@ -35,13 +36,13 @@ const ruangFrom = `
 
 func (r *RuangRepository) Create(ctx context.Context, db DBTX, ruang *entity.Ruang) error {
 	const query = `
-		INSERT INTO ruang (kode, nama_ruang, is_aktif, id_unit_kerja)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id`
+		INSERT INTO ruang (kode, nama_ruang, is_aktif, id_unit_kerja, created_by)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, created_at, created_by, updated_at, updated_by`
 
 	err := db.QueryRowContext(
-		ctx, query, ruang.Kode, ruang.NamaRuang, ruang.IsAktif, ruang.IDUnitKerja,
-	).Scan(&ruang.ID)
+		ctx, query, ruang.Kode, ruang.NamaRuang, ruang.IsAktif, ruang.IDUnitKerja, ruang.CreatedBy,
+	).Scan(&ruang.ID, &ruang.CreatedAt, &ruang.CreatedBy, &ruang.UpdatedAt, &ruang.UpdatedBy)
 	if err != nil {
 		return fmt.Errorf("insert ruang: %w", err)
 	}
@@ -57,8 +58,72 @@ func (r *RuangRepository) FindByID(ctx context.Context, db DBTX, id int64) (*ent
 	ruang := new(entity.Ruang)
 
 	err := db.QueryRowContext(ctx, query, id).Scan(
-		&ruang.ID, &ruang.Kode, &ruang.NamaRuang, &ruang.IsAktif,
-		&ruang.IDUnitKerja, &ruang.NamaUnitKerja, &ruang.NomorOpnameBeku,
+		&ruang.ID, &ruang.Kode, &ruang.NamaRuang, &ruang.IsAktif, &ruang.IDUnitKerja,
+		&ruang.CreatedAt, &ruang.CreatedBy, &ruang.UpdatedAt, &ruang.UpdatedBy,
+		&ruang.NamaUnitKerja, &ruang.NomorOpnameBeku,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return ruang, nil
+}
+
+// RuangPatch carries a partial update for PATCH /api/v1/ruang/{id} — isu #23
+// fase 2. Every nullable column gets a Set flag answering "was this key in the
+// JSON body at all?", the same shape SupplierPatch uses.
+//
+// IDUnitKerja is deliberately absent: kartu_stok is partitioned by
+// (id_barang, id_ruang), and isu #12 fase 6's read scoping reads it straight
+// off ruang.id_unit_kerja. Moving a ruang to another unit would carry its whole
+// history and balance across with it, with no kartu_stok row ever changing —
+// the old unit's reports would lose stock that was really there, and the new
+// one would gain stock that never arrived through any document. A ruang that
+// truly changed unit is retired and re-created; goods that physically moved
+// are a mutasi into a room the destination unit owns.
+type RuangPatch struct {
+	SetKode      bool
+	Kode         *string
+	NamaRuang    *string // NOT NULL: changeable, never clearable, so no flag
+	IsAktif      *bool   // NOT NULL: changeable, never clearable, so no flag
+	SetUpdatedBy bool
+	UpdatedBy    *int64
+}
+
+// Update applies a patch and returns the stored row. RETURNING saves a second
+// SELECT and avoids reading back another transaction's write; sql.ErrNoRows means
+// the id does not exist, so there is no separate existence check — that would be
+// two queries and still racy.
+//
+// The RETURNING list carries only ruang's own columns — NamaUnitKerja and
+// NomorOpnameBeku need the join FindByID and Search use, and an UPDATE cannot
+// join. The usecase re-reads through FindByID when it needs either, the same
+// way Create does for NamaUnitKerja.
+func (r *RuangRepository) Update(ctx context.Context, db DBTX, id int64, patch RuangPatch) (*entity.Ruang, error) {
+	// COALESCE is right for NOT NULL columns only. On the nullable kode column it
+	// would turn `"kode": null` into a no-op, so presence is passed as its own
+	// argument. updated_at is left to the ruang_set_updated_at trigger.
+	const query = `
+		UPDATE ruang SET
+			kode       = CASE WHEN $2::BOOLEAN THEN $3 ELSE kode END,
+			nama_ruang = COALESCE($4, nama_ruang),
+			is_aktif   = COALESCE($5, is_aktif),
+			updated_by = CASE WHEN $6::BOOLEAN THEN $7 ELSE updated_by END
+		WHERE id = $1
+		RETURNING id, kode, nama_ruang, is_aktif, id_unit_kerja,
+			created_at, created_by, updated_at, updated_by`
+
+	ruang := new(entity.Ruang)
+
+	err := db.QueryRowContext(
+		ctx, query, id,
+		patch.SetKode, patch.Kode,
+		patch.NamaRuang,
+		patch.IsAktif,
+		patch.SetUpdatedBy, patch.UpdatedBy,
+	).Scan(
+		&ruang.ID, &ruang.Kode, &ruang.NamaRuang, &ruang.IsAktif, &ruang.IDUnitKerja,
+		&ruang.CreatedAt, &ruang.CreatedBy, &ruang.UpdatedAt, &ruang.UpdatedBy,
 	)
 	if err != nil {
 		return nil, err
@@ -201,8 +266,9 @@ func (r *RuangRepository) Search(ctx context.Context, db DBTX, search string, is
 		var ruang entity.Ruang
 
 		if err := rows.Scan(
-			&ruang.ID, &ruang.Kode, &ruang.NamaRuang, &ruang.IsAktif,
-			&ruang.IDUnitKerja, &ruang.NamaUnitKerja, &ruang.NomorOpnameBeku,
+			&ruang.ID, &ruang.Kode, &ruang.NamaRuang, &ruang.IsAktif, &ruang.IDUnitKerja,
+			&ruang.CreatedAt, &ruang.CreatedBy, &ruang.UpdatedAt, &ruang.UpdatedBy,
+			&ruang.NamaUnitKerja, &ruang.NomorOpnameBeku,
 		); err != nil {
 			return nil, 0, fmt.Errorf("scan ruang: %w", err)
 		}

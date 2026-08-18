@@ -27,6 +27,13 @@ func (c *RoleController) Create(ctx fiber.Ctx) error {
 		return model.Invalid("malformed request body")
 	}
 
+	actor, err := actorID(ctx)
+	if err != nil {
+		return err
+	}
+
+	request.ActorID = actor
+
 	response, err := c.UseCase.Create(ctx.Context(), request)
 	if err != nil {
 		return err
@@ -62,7 +69,13 @@ func (c *RoleController) Update(ctx fiber.Ctx) error {
 		return model.Invalid("malformed request body")
 	}
 
+	actor, err := actorID(ctx)
+	if err != nil {
+		return err
+	}
+
 	request.ID = id
+	request.ActorID = actor
 
 	response, err := c.UseCase.Update(ctx.Context(), request)
 	if err != nil {

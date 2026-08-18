@@ -90,7 +90,7 @@ func (c *PelangganUseCase) Create(ctx context.Context, request *model.CreatePela
 		// Left nil when absent: no credit limit, which is not a limit of zero.
 		PlafonKredit: request.PlafonKredit,
 		IsAktif:      true,
-		// created_by stays NULL until the auth module can supply the actor.
+		CreatedBy:    &request.ActorID,
 	}
 
 	if err := c.PelangganRepository.Create(ctx, tx, pelanggan); err != nil {
@@ -148,6 +148,8 @@ func (c *PelangganUseCase) Update(ctx context.Context, request *model.UpdatePela
 		SetPlafonKredit: request.PlafonKredit.Present,
 		PlafonKredit:    request.PlafonKredit.Value,
 		IsAktif:         request.IsAktif.Value,
+		SetUpdatedBy:    true,
+		UpdatedBy:       &request.ActorID,
 	}
 
 	// An empty body would still fire the updated_at trigger, recording a change

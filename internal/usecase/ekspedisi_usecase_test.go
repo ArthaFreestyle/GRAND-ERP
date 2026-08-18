@@ -11,8 +11,10 @@ import (
 // does — case-insensitively, like every other master code.
 func TestEkspedisiDuplicateNamaIsConflict(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
 	if _, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{
+		ActorID: actor,
 		Nama:    "JNE",
 		Telepon: ptr("021-100"),
 	}); err != nil {
@@ -20,15 +22,17 @@ func TestEkspedisiDuplicateNamaIsConflict(t *testing.T) {
 	}
 
 	for _, nama := range []string{"JNE", "jne"} {
-		_, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{Nama: nama})
+		_, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{ActorID: actor, Nama: nama})
 		assertKind(t, err, model.KindConflict)
 	}
 }
 
 func TestEkspedisiPatchClearsTelepon(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
 	created, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{
+		ActorID: actor,
 		Nama:    "Tiki",
 		Telepon: ptr("021-200"),
 	})
@@ -37,7 +41,7 @@ func TestEkspedisiPatchClearsTelepon(t *testing.T) {
 	}
 
 	// Absent key: the number stays.
-	patched := patchEkspedisi(t, a, created.ID, `{"nama":"TIKI Pusat"}`)
+	patched := patchEkspedisi(t, a, created.ID, actor, `{"nama":"TIKI Pusat"}`)
 	if patched.Telepon == nil || *patched.Telepon != "021-200" {
 		t.Fatalf("telepon = %v after a body that omitted it, want 021-200", patched.Telepon)
 	}
@@ -47,7 +51,7 @@ func TestEkspedisiPatchClearsTelepon(t *testing.T) {
 	}
 
 	// Explicit null: the number goes.
-	patched = patchEkspedisi(t, a, created.ID, `{"telepon":null}`)
+	patched = patchEkspedisi(t, a, created.ID, actor, `{"telepon":null}`)
 	if patched.Telepon != nil {
 		t.Fatalf("telepon = %q after an explicit null, want null", *patched.Telepon)
 	}
@@ -64,13 +68,14 @@ func TestEkspedisiPatchClearsTelepon(t *testing.T) {
 
 func TestEkspedisiPatchRejectsNullNama(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	created, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{Nama: "SiCepat"})
+	created, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{ActorID: actor, Nama: "SiCepat"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	_, err = a.ekspedisi.Update(ctx(), decodeEkspedisiPatch(t, created.ID, `{"nama":null}`))
+	_, err = a.ekspedisi.Update(ctx(), decodeEkspedisiPatch(t, created.ID, actor, `{"nama":null}`))
 	assertKind(t, err, model.KindInvalid)
 }
 
@@ -78,8 +83,10 @@ func TestEkspedisiPatchRejectsNullNama(t *testing.T) {
 // both.
 func TestEkspedisiSearchMatchesTelepon(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
 	if _, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{
+		ActorID: actor,
 		Nama:    "Pos Indonesia",
 		Telepon: ptr("021-300"),
 	}); err != nil {
@@ -87,6 +94,7 @@ func TestEkspedisiSearchMatchesTelepon(t *testing.T) {
 	}
 
 	if _, err := a.ekspedisi.Create(ctx(), &model.CreateEkspedisiRequest{
+		ActorID: actor,
 		Nama:    "Wahana",
 		Telepon: ptr("021-400"),
 	}); err != nil {
@@ -107,7 +115,7 @@ func TestEkspedisiSearchMatchesTelepon(t *testing.T) {
 	}
 }
 
-func decodeEkspedisiPatch(t *testing.T, id int64, body string) *model.UpdateEkspedisiRequest {
+func decodeEkspedisiPatch(t *testing.T, id, actor int64, body string) *model.UpdateEkspedisiRequest {
 	t.Helper()
 
 	request := new(model.UpdateEkspedisiRequest)
@@ -116,14 +124,15 @@ func decodeEkspedisiPatch(t *testing.T, id int64, body string) *model.UpdateEksp
 	}
 
 	request.ID = id
+	request.ActorID = actor
 
 	return request
 }
 
-func patchEkspedisi(t *testing.T, a *app, id int64, body string) *model.EkspedisiResponse {
+func patchEkspedisi(t *testing.T, a *app, id, actor int64, body string) *model.EkspedisiResponse {
 	t.Helper()
 
-	response, err := a.ekspedisi.Update(ctx(), decodeEkspedisiPatch(t, id, body))
+	response, err := a.ekspedisi.Update(ctx(), decodeEkspedisiPatch(t, id, actor, body))
 	if err != nil {
 		t.Fatalf("patch %s: %v", body, err)
 	}

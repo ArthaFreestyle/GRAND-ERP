@@ -474,7 +474,7 @@ func TestAlokasiMenolakNotaYangTidakBolehDiterima(t *testing.T) {
 		t.Fatalf("create draft penjualan: %v", err)
 	}
 
-	pelangganLain, err := testApp.pelanggan.Create(ctx(), &model.CreatePelangganRequest{Nama: "Toko Lain"})
+	pelangganLain, err := testApp.pelanggan.Create(ctx(), &model.CreatePelangganRequest{ActorID: s.actor, Nama: "Toko Lain"})
 	if err != nil {
 		t.Fatalf("create pelanggan: %v", err)
 	}
@@ -962,6 +962,7 @@ func TestPelangganYangSudahLunasBisaMemakaiPlafonLagi(t *testing.T) {
 
 	if _, err := testApp.pelanggan.Update(ctx(), &model.UpdatePelangganRequest{
 		ID:           s.pelanggan,
+		ActorID:      s.actor,
 		PlafonKredit: model.Optional[string]{Present: true, Value: ptr("1500000")},
 	}); err != nil {
 		t.Fatalf("set plafon_kredit: %v", err)

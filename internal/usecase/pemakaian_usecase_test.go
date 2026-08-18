@@ -30,7 +30,7 @@ func buatUserPolos(t *testing.T, testApp *app, username string) int64 {
 	t.Helper()
 
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
-		Username: username, Password: "rahasia123",
+		ActorID: testActor(t), Username: username, Password: "rahasia123",
 	})
 	if err != nil {
 		t.Fatalf("create user %s: %v", username, err)

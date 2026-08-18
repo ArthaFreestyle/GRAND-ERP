@@ -9,17 +9,20 @@ import (
 
 func TestSupplierDuplicateKodeIsConflict(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
 	if _, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{
-		Kode: ptr("SUP-01"),
-		Nama: "Supplier Satu",
+		ActorID: actor,
+		Kode:    ptr("SUP-01"),
+		Nama:    "Supplier Satu",
 	}); err != nil {
 		t.Fatalf("create first: %v", err)
 	}
 
 	_, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{
-		Kode: ptr("SUP-01"),
-		Nama: "Supplier Dua",
+		ActorID: actor,
+		Kode:    ptr("SUP-01"),
+		Nama:    "Supplier Dua",
 	})
 	assertKind(t, err, model.KindConflict)
 }
@@ -28,17 +31,20 @@ func TestSupplierDuplicateKodeIsConflict(t *testing.T) {
 // same code rather than two suppliers an operator cannot tell apart.
 func TestSupplierDuplicateKodeIgnoresCase(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
 	if _, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{
-		Kode: ptr("SUP-01"),
-		Nama: "Supplier Satu",
+		ActorID: actor,
+		Kode:    ptr("SUP-01"),
+		Nama:    "Supplier Satu",
 	}); err != nil {
 		t.Fatalf("create first: %v", err)
 	}
 
 	_, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{
-		Kode: ptr("sup-01"),
-		Nama: "Supplier Dua",
+		ActorID: actor,
+		Kode:    ptr("sup-01"),
+		Nama:    "Supplier Dua",
 	})
 	assertKind(t, err, model.KindConflict)
 }
@@ -47,9 +53,10 @@ func TestSupplierDuplicateKodeIgnoresCase(t *testing.T) {
 // code at all. Rejecting the second one would be wrong.
 func TestSupplierManyNullKodeAreAllowed(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
 	for i, nama := range []string{"Tanpa Kode A", "Tanpa Kode B", "Tanpa Kode C"} {
-		response, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: nama})
+		response, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: actor, Nama: nama})
 		if err != nil {
 			t.Fatalf("create %d: %v", i, err)
 		}
@@ -74,8 +81,10 @@ func TestSupplierManyNullKodeAreAllowed(t *testing.T) {
 // test covers the same path the Fiber binder takes.
 func TestSupplierPatchDistinguishesNullFromAbsent(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
 	created, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{
+		ActorID: actor,
 		Kode:    ptr("SUP-09"),
 		Nama:    "Supplier Sembilan",
 		Telepon: ptr("0800-1111"),
@@ -86,7 +95,7 @@ func TestSupplierPatchDistinguishesNullFromAbsent(t *testing.T) {
 	}
 
 	// Body without telepon: the number must survive.
-	patched := patchSupplier(t, a, created.ID, `{"alamat":"Jl. Baru 2"}`)
+	patched := patchSupplier(t, a, created.ID, actor, `{"alamat":"Jl. Baru 2"}`)
 
 	if patched.Telepon == nil || *patched.Telepon != "0800-1111" {
 		t.Errorf("telepon = %v after a body that omitted it, want 0800-1111", patched.Telepon)
@@ -98,7 +107,7 @@ func TestSupplierPatchDistinguishesNullFromAbsent(t *testing.T) {
 
 	// Body with telepon: null — the number must be cleared. This is what COALESCE
 	// would silently refuse to do.
-	patched = patchSupplier(t, a, created.ID, `{"telepon":null}`)
+	patched = patchSupplier(t, a, created.ID, actor, `{"telepon":null}`)
 
 	if patched.Telepon != nil {
 		t.Errorf("telepon = %v after an explicit null, want nil", *patched.Telepon)
@@ -124,13 +133,14 @@ func TestSupplierPatchDistinguishesNullFromAbsent(t *testing.T) {
 // would reach the database and surface as a 500.
 func TestSupplierPatchRejectsNullOnNotNullColumn(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	created, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: "Supplier Nama"})
+	created, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: actor, Nama: "Supplier Nama"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	request := decodeSupplierPatch(t, created.ID, `{"nama":null}`)
+	request := decodeSupplierPatch(t, created.ID, actor, `{"nama":null}`)
 
 	_, err = a.supplier.Update(ctx(), request)
 	assertKind(t, err, model.KindInvalid)
@@ -138,8 +148,9 @@ func TestSupplierPatchRejectsNullOnNotNullColumn(t *testing.T) {
 
 func TestSupplierPatchUnknownIDIsNotFound(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	request := decodeSupplierPatch(t, 999_999, `{"nama":"Tidak Ada"}`)
+	request := decodeSupplierPatch(t, 999_999, actor, `{"nama":"Tidak Ada"}`)
 
 	_, err := a.supplier.Update(ctx(), request)
 	assertKind(t, err, model.KindNotFound)
@@ -149,39 +160,47 @@ func TestSupplierPatchUnknownIDIsNotFound(t *testing.T) {
 // must not collide with the row's own code either.
 func TestSupplierPatchKodeConflicts(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
 	if _, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{
-		Kode: ptr("SUP-A"),
-		Nama: "Supplier A",
+		ActorID: actor,
+		Kode:    ptr("SUP-A"),
+		Nama:    "Supplier A",
 	}); err != nil {
 		t.Fatalf("create first: %v", err)
 	}
 
 	second, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{
-		Kode: ptr("SUP-B"),
-		Nama: "Supplier B",
+		ActorID: actor,
+		Kode:    ptr("SUP-B"),
+		Nama:    "Supplier B",
 	})
 	if err != nil {
 		t.Fatalf("create second: %v", err)
 	}
 
-	_, err = a.supplier.Update(ctx(), decodeSupplierPatch(t, second.ID, `{"kode":"SUP-A"}`))
+	_, err = a.supplier.Update(ctx(), decodeSupplierPatch(t, second.ID, actor, `{"kode":"SUP-A"}`))
 	assertKind(t, err, model.KindConflict)
 
 	// Re-sending its own code is not a conflict: exceptID skips the row itself.
-	patched := patchSupplier(t, a, second.ID, `{"kode":"SUP-B"}`)
+	patched := patchSupplier(t, a, second.ID, actor, `{"kode":"SUP-B"}`)
 	if patched.Kode == nil || *patched.Kode != "SUP-B" {
 		t.Errorf("kode = %v, want SUP-B", patched.Kode)
 	}
 }
 
-// created_by is nullable and stays NULL until auth exists, so the LEFT JOIN must
-// still return the row — an INNER JOIN would hide it.
+// created_by is nullable, and the join must still surface a row that has none —
+// an INNER JOIN would hide it. isu #23 fase 2 made SupplierUseCase.Create always
+// fill created_by from the caller's token, so the only way left to produce a row
+// with no creator is the same way the pre-auth data in a real database got
+// there: a row written directly, bypassing the usecase entirely.
 func TestSupplierListKeepsRowsWithoutCreator(t *testing.T) {
 	a := newApp(t)
 
-	if _, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: "Tanpa Pembuat"}); err != nil {
-		t.Fatalf("create: %v", err)
+	if _, err := testDB.ExecContext(ctx(),
+		`INSERT INTO supplier (nama, is_aktif) VALUES ($1, true)`, "Tanpa Pembuat",
+	); err != nil {
+		t.Fatalf("seed supplier without creator: %v", err)
 	}
 
 	responses, paging, err := a.supplier.Search(ctx(), &model.ListSupplierRequest{})
@@ -204,19 +223,20 @@ func TestSupplierListKeepsRowsWithoutCreator(t *testing.T) {
 
 func TestSupplierIsAktifFilter(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	active, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: "Masih Aktif"})
+	active, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: actor, Nama: "Masih Aktif"})
 	if err != nil {
 		t.Fatalf("create active: %v", err)
 	}
 
-	retired, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: "Sudah Pensiun"})
+	retired, err := a.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: actor, Nama: "Sudah Pensiun"})
 	if err != nil {
 		t.Fatalf("create retired: %v", err)
 	}
 
 	// No DELETE endpoint exists by design; retiring is what takes its place.
-	if _, err := a.supplier.Update(ctx(), decodeSupplierPatch(t, retired.ID, `{"is_aktif":false}`)); err != nil {
+	if _, err := a.supplier.Update(ctx(), decodeSupplierPatch(t, retired.ID, actor, `{"is_aktif":false}`)); err != nil {
 		t.Fatalf("retire: %v", err)
 	}
 
@@ -235,8 +255,9 @@ func TestSupplierIsAktifFilter(t *testing.T) {
 }
 
 // decodeSupplierPatch builds the request the way the controller does: decode the
-// body, then set ID from the path. A body cannot choose which row is written.
-func decodeSupplierPatch(t *testing.T, id int64, body string) *model.UpdateSupplierRequest {
+// body, then set ID and ActorID the way the controller sets them from the path
+// and the session rather than the body.
+func decodeSupplierPatch(t *testing.T, id, actor int64, body string) *model.UpdateSupplierRequest {
 	t.Helper()
 
 	request := new(model.UpdateSupplierRequest)
@@ -245,14 +266,15 @@ func decodeSupplierPatch(t *testing.T, id int64, body string) *model.UpdateSuppl
 	}
 
 	request.ID = id
+	request.ActorID = actor
 
 	return request
 }
 
-func patchSupplier(t *testing.T, a *app, id int64, body string) *model.SupplierResponse {
+func patchSupplier(t *testing.T, a *app, id, actor int64, body string) *model.SupplierResponse {
 	t.Helper()
 
-	response, err := a.supplier.Update(ctx(), decodeSupplierPatch(t, id, body))
+	response, err := a.supplier.Update(ctx(), decodeSupplierPatch(t, id, actor, body))
 	if err != nil {
 		t.Fatalf("patch %s: %v", body, err)
 	}

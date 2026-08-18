@@ -199,11 +199,14 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Patch("/unit-kerja/:id", inventaris, c.UnitKerjaController.Update)
 
 	// ruang.id_unit_kerja is required and validated active at create time (isu
-	// #12 fase 2), but ruang still has no PATCH, so a room cannot change unit
-	// through the API yet.
+	// #12 fase 2). PATCH (isu #23 fase 2) covers kode, nama_ruang, and is_aktif
+	// only — id_unit_kerja stays out of the DTO entirely, see
+	// UpdateRuangRequest for why moving a room between units is refused
+	// outright rather than validated.
 	api.Get("/ruang", c.RuangController.List)
 	api.Get("/ruang/:id", c.RuangController.Get)
 	api.Post("/ruang", inventaris, c.RuangController.Create)
+	api.Patch("/ruang/:id", inventaris, c.RuangController.Update)
 
 	// product writes sit with INVENTARIS: it is goods master data. Selling prices are
 	// grouped here too rather than with CASHIER, because product_harga_jual only feeds

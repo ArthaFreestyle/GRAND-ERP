@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -156,7 +157,7 @@ func newApp(t *testing.T) *app {
 			testDB, log, validate, repository.NewPelangganRepository(), penjualanRepository,
 		),
 		ruang: usecase.NewRuangUseCase(
-			testDB, log, validate, ruangRepository, unitKerjaRepository,
+			testDB, log, validate, ruangRepository, unitKerjaRepository, kartuStokRepository,
 		),
 		unitKerja: usecase.NewUnitKerjaUseCase(
 			testDB, log, validate, unitKerjaRepository,
@@ -324,7 +325,7 @@ func truncateMaster(t *testing.T) {
 		// user_role.id_unit_kerja references unit_kerja too (isu #12 fase 3), so
 		// user_role now has to precede unit_kerja as well as users and role —
 		// unit_kerja.created_by references users, so it has to go before that.
-		"ruang", "user_role", "unit_kerja", "users", "role",
+		"ruang", "user_role", "role", "unit_kerja", "users",
 	} {
 		if _, err := testDB.Exec("DELETE FROM " + table); err != nil {
 			t.Fatalf("clear %s: %v", table, err)
@@ -335,3 +336,32 @@ func truncateMaster(t *testing.T) {
 func ctx() context.Context { return context.Background() }
 
 func ptr[T any](v T) *T { return &v }
+
+// testActorSeq gives every testActor call a unique username without a
+// database round trip to check for one first.
+var testActorSeq int64
+
+// testActor seeds a real users row directly via SQL, bypassing UserUseCase —
+// the same way db/seeder_postgres/004_superadmin.sql bootstraps the very
+// first user in production, because creating one through the usecase needs
+// an actor id that does not exist yet. isu #23 fase 2 made every master-data
+// Create/Update require a real ActorID; this is what every fixture that needs
+// one calls, once, and then reuses.
+func testActor(t *testing.T) int64 {
+	t.Helper()
+
+	n := atomic.AddInt64(&testActorSeq, 1)
+
+	var id int64
+	err := testDB.QueryRowContext(ctx(), `
+		INSERT INTO users (username, password, is_aktif)
+		VALUES ($1, 'x', true)
+		RETURNING id`,
+		fmt.Sprintf("test_actor_%d_%d", time.Now().UnixNano(), n),
+	).Scan(&id)
+	if err != nil {
+		t.Fatalf("seed test actor: %v", err)
+	}
+
+	return id
+}

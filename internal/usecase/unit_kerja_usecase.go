@@ -62,10 +62,10 @@ func (c *UnitKerjaUseCase) Create(ctx context.Context, request *model.CreateUnit
 	}
 
 	unitKerja := &entity.UnitKerja{
-		Kode:    request.Kode,
-		Nama:    request.Nama,
-		IsAktif: true,
-		// created_by stays NULL until the caller can supply the actor.
+		Kode:      request.Kode,
+		Nama:      request.Nama,
+		IsAktif:   true,
+		CreatedBy: &request.ActorID,
 	}
 
 	if err := c.UnitKerjaRepository.Create(ctx, tx, unitKerja); err != nil {
@@ -107,10 +107,12 @@ func (c *UnitKerjaUseCase) Update(ctx context.Context, request *model.UpdateUnit
 	}
 
 	patch := repository.UnitKerjaPatch{
-		SetKode: request.Kode.Present,
-		Kode:    request.Kode.Value,
-		Nama:    request.Nama.Value,
-		IsAktif: request.IsAktif.Value,
+		SetKode:      request.Kode.Present,
+		Kode:         request.Kode.Value,
+		Nama:         request.Nama.Value,
+		IsAktif:      request.IsAktif.Value,
+		SetUpdatedBy: true,
+		UpdatedBy:    &request.ActorID,
 	}
 
 	// An empty body would still fire the updated_at trigger, recording a change

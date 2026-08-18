@@ -5375,8 +5375,9 @@ paths:
       description: >
         `id_unit_kerja` wajib dan divalidasi menunjuk unit kerja yang aktif
         (isu #12 fase 2) — ruang tanpa unit adalah ruang yang tidak bisa
-        diputuskan siapa berhak memakainya. `ruang` masih tidak punya PATCH,
-        jadi unitnya tidak bisa diganti lewat API ini.
+        diputuskan siapa berhak memakainya. `PATCH /api/v1/ruang/{id}` (isu #23
+        fase 2) tidak menyentuh `id_unit_kerja` sama sekali, jadi unitnya tidak
+        bisa diganti lewat API ini setelah dibuat.
       requestBody:
         required: true
         content:
@@ -5431,6 +5432,53 @@ paths:
                 properties:
                   data: { $ref: "#/components/schemas/Ruang" }
         "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [ruang]
+      summary: Update ruang
+      operationId: updateRuang
+      description: >
+        Isu #23 fase 2. Field yang tidak dikirim tidak diubah. `id_unit_kerja`
+        sengaja tidak ada di body ini — lihat deskripsi `POST /api/v1/ruang`.
+        Mempensiunkan (`is_aktif: false`) ditolak **409** kalau ruangnya masih
+        memegang barang (ada `(barang, ruang)` dengan `stok_akhir > 0`; kosongkan
+        dulu dengan `mutasi` atau `pemakaian`) atau sedang dibekukan `stok_opname`
+        terbuka (isu #15) — pesannya menyebut nomor opname yang menahan, sama
+        seperti `nomor_opname_beku` pada `Ruang`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                kode:
+                  type: string
+                  maxLength: 32
+                  nullable: true
+                  description: Unik tanpa memperhatikan huruf besar-kecil. `null` mengosongkannya.
+                  example: "GD-UTM"
+                nama_ruang: { type: string, maxLength: 255, example: "Gudang Utama" }
+                is_aktif:
+                  type: boolean
+                  description: >
+                    Pensiunkan ruang yang salah ketik dengan `false` — ditolak
+                    kalau masih bersaldo atau sedang diopname.
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Ruang" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
 
   /api/v1/satuan:
     get:
@@ -6412,6 +6460,10 @@ components:
         nama_unit_kerja:
           type: string
           description: Diambil sekalian lewat JOIN ke unit_kerja, bukan query terpisah.
+        created_at: { type: string, format: date-time }
+        created_by: { type: integer, format: int64, nullable: true }
+        updated_at: { type: string, format: date-time }
+        updated_by: { type: integer, format: int64, nullable: true }
         nomor_opname_beku:
           type: string
           nullable: true

@@ -1,17 +1,27 @@
 package entity
 
+import "time"
+
 // Ruang maps the ruang table — lokasi penyimpanan yang jadi partisi saldo di
 // kartu_stok. Entities carry no JSON tags and no framework imports; they never
 // leave the usecase layer.
 //
 // IDUnitKerja is NOT NULL since migration 000019 (isu #12 fase 2): a ruang
 // with no unit_kerja is a ruang nobody can decide is theirs to use.
+//
+// created_at/created_by/updated_at/updated_by arrived in migration 000026 —
+// isu #23 fase 1. ruang was the only master table 000009 skipped; this closes
+// that gap the same shape satuan, ekspedisi, supplier, and pelanggan already have.
 type Ruang struct {
 	ID          int64
 	Kode        *string
 	NamaRuang   string
 	IsAktif     bool
 	IDUnitKerja int64
+	CreatedAt   time.Time
+	CreatedBy   *int64
+	UpdatedAt   time.Time
+	UpdatedBy   *int64
 
 	// NamaUnitKerja is not a column of ruang. It comes from a JOIN on
 	// unit_kerja and is only filled by the read queries — resolving it per row

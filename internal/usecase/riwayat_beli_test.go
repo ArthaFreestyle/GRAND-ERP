@@ -40,7 +40,7 @@ func beliPosted(t *testing.T, testApp *app, f fixture, idSupplier int64, tanggal
 func supplierBaru(t *testing.T, testApp *app, nama string) int64 {
 	t.Helper()
 
-	supplier, err := testApp.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: nama})
+	supplier, err := testApp.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: testActor(t), Nama: nama})
 	if err != nil {
 		t.Fatalf("create supplier %s: %v", nama, err)
 	}
