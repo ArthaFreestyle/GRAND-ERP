@@ -16,9 +16,10 @@ func seedRoles(t *testing.T, testApp *app) map[string]int64 {
 	t.Helper()
 
 	ids := make(map[string]int64, 3)
+	actor := testActor(t)
 
 	for _, nama := range []string{"SUPERADMIN", "CASHIER", "INVENTARIS"} {
-		role, err := testApp.role.Create(ctx(), &model.CreateRoleRequest{Nama: nama})
+		role, err := testApp.role.Create(ctx(), &model.CreateRoleRequest{ActorID: actor, Nama: nama})
 		if err != nil {
 			t.Fatalf("create role %s: %v", nama, err)
 		}
@@ -68,9 +69,10 @@ func equalStrings(a, b []string) bool {
 // The requirement in one test: one user, several roles at once.
 func TestUserHoldsManyRoles(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "kasir_gudang",
 		Password: "rahasia123",
 		Grants:   grants(roles["CASHIER"], roles["INVENTARIS"]),
@@ -103,10 +105,11 @@ func TestUserHoldsManyRoles(t *testing.T) {
 // would have hinted at it, which is why the check lives here and not in a comment.
 func TestManyUsersShareTheSameRole(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
 	for _, username := range []string{"kasir_satu", "kasir_dua", "kasir_tiga"} {
-		user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 			Username: username,
 			Password: "rahasia123",
 			Grants:   grants(roles["CASHIER"]),
@@ -142,10 +145,11 @@ func TestManyUsersShareTheSameRole(t *testing.T) {
 // enforced by the type — what needs checking is the column.
 func TestUserPasswordIsHashedAndNeverReturned(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
 	const plaintext = "rahasia123"
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "budi",
 		Password: plaintext,
 	})
@@ -167,7 +171,7 @@ func TestUserPasswordIsHashedAndNeverReturned(t *testing.T) {
 	}
 
 	// A patched password is hashed on the same path.
-	if _, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	if _, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:       user.ID,
 		Password: model.Optional[string]{Present: true, Value: ptr("password_baru")},
 	}); err != nil {
@@ -187,9 +191,10 @@ func TestUserPasswordIsHashedAndNeverReturned(t *testing.T) {
 // have to stay distinguishable: absent, [], and a list.
 func TestUserPatchReplacesRoleSet(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "siti",
 		Password: "rahasia123",
 		Grants:   grants(roles["CASHIER"]),
@@ -199,7 +204,7 @@ func TestUserPatchReplacesRoleSet(t *testing.T) {
 	}
 
 	// Absent grants: a patch touching another field leaves the grants alone.
-	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:          user.ID,
 		NamaLengkap: model.Optional[string]{Present: true, Value: ptr("Siti Aminah")},
 	})
@@ -214,7 +219,7 @@ func TestUserPatchReplacesRoleSet(t *testing.T) {
 	// A list replaces the whole set: CASHIER goes away, the two named arrive.
 	replaced := grants(roles["SUPERADMIN"], roles["INVENTARIS"])
 
-	patched, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	patched, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:     user.ID,
 		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &replaced},
 	})
@@ -229,7 +234,7 @@ func TestUserPatchReplacesRoleSet(t *testing.T) {
 	// An empty array revokes everything, and serialises as [] rather than null.
 	empty := []model.GrantRequest{}
 
-	patched, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	patched, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:     user.ID,
 		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &empty},
 	})
@@ -249,8 +254,9 @@ func TestUserPatchReplacesRoleSet(t *testing.T) {
 // An explicit null is not a third way to say "no grants" — [] already says it.
 func TestUserPatchRejectsNullGrants(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "joko",
 		Password: "rahasia123",
 	})
@@ -258,7 +264,7 @@ func TestUserPatchRejectsNullGrants(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	_, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	_, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:     user.ID,
 		Grants: model.Optional[[]model.GrantRequest]{Present: true}, // present, Value nil = null
 	})
@@ -270,9 +276,10 @@ func TestUserPatchRejectsNullGrants(t *testing.T) {
 // change to the user: updated_at has to move, and an unknown id still has to 404.
 func TestUserRolesOnlyPatchBumpsUpdatedAt(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "dewi",
 		Password: "rahasia123",
 	})
@@ -282,7 +289,7 @@ func TestUserRolesOnlyPatchBumpsUpdatedAt(t *testing.T) {
 
 	granted := grants(roles["INVENTARIS"])
 
-	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:     user.ID,
 		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &granted},
 	})
@@ -299,7 +306,7 @@ func TestUserRolesOnlyPatchBumpsUpdatedAt(t *testing.T) {
 	}
 
 	// Same shape of patch against an id that does not exist.
-	_, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	_, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:     user.ID + 10_000,
 		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &granted},
 	})
@@ -311,9 +318,10 @@ func TestUserRolesOnlyPatchBumpsUpdatedAt(t *testing.T) {
 // the record of when the grant actually started.
 func TestUserRoleGrantTimestampSurvivesReplace(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "agus",
 		Password: "rahasia123",
 		Grants:   grants(roles["CASHIER"]),
@@ -341,7 +349,7 @@ func TestUserRoleGrantTimestampSurvivesReplace(t *testing.T) {
 	// CASHIER stays, INVENTARIS is added.
 	replaced := grants(roles["CASHIER"], roles["INVENTARIS"])
 
-	if _, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	if _, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:     user.ID,
 		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &replaced},
 	}); err != nil {
@@ -357,9 +365,10 @@ func TestUserRoleGrantTimestampSurvivesReplace(t *testing.T) {
 // and it must not trip the count check that validates the ids.
 func TestUserDuplicateGrantsAreCollapsed(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "rina",
 		Password: "rahasia123",
 		Grants:   grants(roles["CASHIER"], roles["CASHIER"], roles["CASHIER"]),
@@ -375,9 +384,10 @@ func TestUserDuplicateGrantsAreCollapsed(t *testing.T) {
 
 func TestUserUnknownRoleIDIsInvalid(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "hendra",
 		Password: "rahasia123",
 		Grants:   grants(roles["CASHIER"], roles["CASHIER"]+10_000),
@@ -402,16 +412,17 @@ func TestUserUnknownRoleIDIsInvalid(t *testing.T) {
 // exists, it is just inactive — so it is the usecase's check that has to.
 func TestUserCannotBeGrantedRetiredRole(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	if _, err := testApp.role.Update(ctx(), &model.UpdateRoleRequest{
+	if _, err := testApp.role.Update(ctx(), &model.UpdateRoleRequest{ActorID: actor, 
 		ID:      roles["INVENTARIS"],
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {
 		t.Fatalf("retire role: %v", err)
 	}
 
-	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "wawan",
 		Password: "rahasia123",
 		Grants:   grants(roles["INVENTARIS"]),
@@ -425,9 +436,10 @@ func TestUserCannotBeGrantedRetiredRole(t *testing.T) {
 // what stops it from looking live.
 func TestRetiringRoleKeepsExistingGrantVisible(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "tono",
 		Password: "rahasia123",
 		Grants:   grants(roles["CASHIER"]),
@@ -436,7 +448,7 @@ func TestRetiringRoleKeepsExistingGrantVisible(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	if _, err := testApp.role.Update(ctx(), &model.UpdateRoleRequest{
+	if _, err := testApp.role.Update(ctx(), &model.UpdateRoleRequest{ActorID: actor, 
 		ID:      roles["CASHIER"],
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {
@@ -459,15 +471,16 @@ func TestRetiringRoleKeepsExistingGrantVisible(t *testing.T) {
 
 func TestUserDuplicateUsernameIgnoresCase(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "Bambang",
 		Password: "rahasia123",
 	}); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
 
-	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "bambang",
 		Password: "rahasia123",
 	})
@@ -479,9 +492,10 @@ func TestUserDuplicateUsernameIgnoresCase(t *testing.T) {
 // users may have none — the same property the nullable master kode relies on.
 func TestManyUsersWithoutEmailAreAllowed(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
 	for _, username := range []string{"a_user", "b_user", "c_user"} {
-		if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 			Username: username,
 			Password: "rahasia123",
 		}); err != nil {
@@ -490,7 +504,7 @@ func TestManyUsersWithoutEmailAreAllowed(t *testing.T) {
 	}
 
 	// And a duplicate email, when supplied, still collides case-insensitively.
-	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "d_user",
 		Email:    ptr("Kantor@Example.com"),
 		Password: "rahasia123",
@@ -498,7 +512,7 @@ func TestManyUsersWithoutEmailAreAllowed(t *testing.T) {
 		t.Fatalf("create with email: %v", err)
 	}
 
-	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "e_user",
 		Email:    ptr("kantor@example.com"),
 		Password: "rahasia123",
@@ -511,8 +525,9 @@ func TestManyUsersWithoutEmailAreAllowed(t *testing.T) {
 // Optional exists rather than a plain pointer.
 func TestUserEmailCanBeCleared(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "eko",
 		Email:    ptr("salah@example.com"),
 		Password: "rahasia123",
@@ -521,7 +536,7 @@ func TestUserEmailCanBeCleared(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:    user.ID,
 		Email: model.Optional[string]{Present: true}, // explicit null
 	})
@@ -538,9 +553,10 @@ func TestUserEmailCanBeCleared(t *testing.T) {
 // role and quietly return the same user several times on one page.
 func TestUserListDoesNotDuplicateUsersWithManyRoles(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "serba_bisa",
 		Password: "rahasia123",
 		Grants:   grants(roles["SUPERADMIN"], roles["CASHIER"], roles["INVENTARIS"]),
@@ -548,7 +564,10 @@ func TestUserListDoesNotDuplicateUsersWithManyRoles(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	list, paging, err := testApp.user.Search(ctx(), &model.ListUserRequest{})
+	// Scoped to this user's own username: an unfiltered list also carries the
+	// throwaway actor testActor seeded above, and that row is not what this
+	// test is about.
+	list, paging, err := testApp.user.Search(ctx(), &model.ListUserRequest{Search: "serba_bisa"})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -570,8 +589,9 @@ func TestUserListDoesNotDuplicateUsersWithManyRoles(t *testing.T) {
 // roles.length on every row without a nil check.
 func TestUserWithoutRolesHasEmptyArray(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "belum_punya_role",
 		Password: "rahasia123",
 	})
@@ -583,7 +603,10 @@ func TestUserWithoutRolesHasEmptyArray(t *testing.T) {
 		t.Error("Roles is nil on create; it must be an empty slice")
 	}
 
-	list, _, err := testApp.user.Search(ctx(), &model.ListUserRequest{})
+	// Scoped to this user's own username: an unfiltered list also carries the
+	// throwaway actor testActor seeded above, and that row is not what this
+	// test is about.
+	list, _, err := testApp.user.Search(ctx(), &model.ListUserRequest{Search: "belum_punya_role"})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -599,8 +622,9 @@ func TestUserWithoutRolesHasEmptyArray(t *testing.T) {
 
 func TestUserPatchWithNoFieldsIsInvalid(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "kosong",
 		Password: "rahasia123",
 	})
@@ -608,15 +632,16 @@ func TestUserPatchWithNoFieldsIsInvalid(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	_, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{ID: user.ID})
+	_, err = testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, ID: user.ID})
 
 	assertKind(t, err, model.KindInvalid)
 }
 
 func TestUserPatchRejectsNullOnNotNullColumns(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "wajib_isi",
 		Password: "rahasia123",
 	})
@@ -630,21 +655,21 @@ func TestUserPatchRejectsNullOnNotNullColumns(t *testing.T) {
 	}{
 		{
 			name: "username",
-			request: &model.UpdateUserRequest{
+			request: &model.UpdateUserRequest{ActorID: actor, 
 				ID:       user.ID,
 				Username: model.Optional[string]{Present: true},
 			},
 		},
 		{
 			name: "password",
-			request: &model.UpdateUserRequest{
+			request: &model.UpdateUserRequest{ActorID: actor, 
 				ID:       user.ID,
 				Password: model.Optional[string]{Present: true},
 			},
 		},
 		{
 			name: "is_aktif",
-			request: &model.UpdateUserRequest{
+			request: &model.UpdateUserRequest{ActorID: actor, 
 				ID:      user.ID,
 				IsAktif: model.Optional[bool]{Present: true},
 			},
@@ -664,8 +689,9 @@ func TestUserPatchRejectsNullOnNotNullColumns(t *testing.T) {
 // created_by column in the schema.
 func TestUserCanBeRetiredAndFiltered(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "mantan_pegawai",
 		Password: "rahasia123",
 	})
@@ -673,20 +699,25 @@ func TestUserCanBeRetiredAndFiltered(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	if _, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	if _, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:      user.ID,
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {
 		t.Fatalf("retire user: %v", err)
 	}
 
+	// The throwaway actor testActor seeded above is itself an active user, so the
+	// is_aktif=true page is not expected to be empty — only to not contain the
+	// user this test just retired.
 	active, _, err := testApp.user.Search(ctx(), &model.ListUserRequest{IsAktif: ptr(true)})
 	if err != nil {
 		t.Fatalf("search active: %v", err)
 	}
 
-	if len(active) != 0 {
-		t.Errorf("retired user still appears under is_aktif=true: %d rows", len(active))
+	for _, row := range active {
+		if row.ID == user.ID {
+			t.Errorf("retired user still appears under is_aktif=true")
+		}
 	}
 
 	retired, _, err := testApp.user.Search(ctx(), &model.ListUserRequest{IsAktif: ptr(false)})
@@ -703,8 +734,9 @@ func TestUserCanBeRetiredAndFiltered(t *testing.T) {
 // EscapeLike — a user searching for "100%" must not match everything.
 func TestUserSearchMatchesNamaLengkapAndEscapesWildcards(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username:    "operator1",
 		NamaLengkap: ptr("Budi Santoso"),
 		Password:    "rahasia123",
@@ -712,7 +744,7 @@ func TestUserSearchMatchesNamaLengkapAndEscapesWildcards(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	if _, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username:    "operator2",
 		NamaLengkap: ptr("Diskon 100% Tunai"),
 		Password:    "rahasia123",
@@ -742,12 +774,13 @@ func TestUserSearchMatchesNamaLengkapAndEscapesWildcards(t *testing.T) {
 
 func TestRoleDuplicateNamaIgnoresCase(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 
-	if _, err := testApp.role.Create(ctx(), &model.CreateRoleRequest{Nama: "CASHIER"}); err != nil {
+	if _, err := testApp.role.Create(ctx(), &model.CreateRoleRequest{ActorID: actor, Nama: "CASHIER"}); err != nil {
 		t.Fatalf("create role: %v", err)
 	}
 
-	_, err := testApp.role.Create(ctx(), &model.CreateRoleRequest{Nama: "cashier"})
+	_, err := testApp.role.Create(ctx(), &model.CreateRoleRequest{ActorID: actor, Nama: "cashier"})
 
 	assertKind(t, err, model.KindConflict)
 }
@@ -762,9 +795,10 @@ func TestRoleGetUnknownIDIsNotFound(t *testing.T) {
 
 func TestRolePatchWithNoFieldsIsInvalid(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	_, err := testApp.role.Update(ctx(), &model.UpdateRoleRequest{ID: roles["CASHIER"]})
+	_, err := testApp.role.Update(ctx(), &model.UpdateRoleRequest{ActorID: actor, ID: roles["CASHIER"]})
 
 	assertKind(t, err, model.KindInvalid)
 }
@@ -828,7 +862,7 @@ func createUnit(t *testing.T, testApp *app, nama string) int64 {
 	createUnitCounter++
 	kode := fmt.Sprintf("CU%03d", createUnitCounter)
 
-	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Kode: &kode, Nama: nama})
+	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: testActor(t), Kode: &kode, Nama: nama})
 	if err != nil {
 		t.Fatalf("create unit kerja %s: %v", nama, err)
 	}
@@ -840,11 +874,12 @@ func createUnit(t *testing.T, testApp *app, nama string) int64 {
 // grants — not a duplicate to collapse and not a conflict to reject.
 func TestUserHoldsSameRoleInTwoUnits(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 	outletA := createUnit(t, testApp, "Outlet A")
 	outletB := createUnit(t, testApp, "Outlet B")
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "budi_dua_outlet",
 		Password: "rahasia123",
 		Grants: []model.GrantRequest{
@@ -881,9 +916,10 @@ func TestUserHoldsSameRoleInTwoUnits(t *testing.T) {
 // id_unit_kerja, not as some sentinel value.
 func TestUserGlobalGrantHasNilUnitKerja(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "admin_kedua",
 		Password: "rahasia123",
 		Grants:   []model.GrantRequest{{IDRole: roles["SUPERADMIN"]}},
@@ -906,17 +942,18 @@ func TestUserGlobalGrantHasNilUnitKerja(t *testing.T) {
 // a live one.
 func TestUserCannotBeGrantedRetiredUnitKerja(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 	unit := createUnit(t, testApp, "Unit Pensiun")
 
-	if _, err := testApp.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{
+	if _, err := testApp.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{ActorID: actor, 
 		ID:      unit,
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {
 		t.Fatalf("retire unit: %v", err)
 	}
 
-	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "grant_unit_mati",
 		Password: "rahasia123",
 		Grants:   []model.GrantRequest{{IDRole: roles["INVENTARIS"], IDUnitKerja: &unit}},
@@ -928,11 +965,12 @@ func TestUserCannotBeGrantedRetiredUnitKerja(t *testing.T) {
 // An unknown unit_kerja id is rejected the same way an unknown role id is.
 func TestUserUnknownUnitKerjaIDIsInvalid(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
 	unknown := int64(999_999)
 
-	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	_, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "unit_tidak_ada",
 		Password: "rahasia123",
 		Grants:   []model.GrantRequest{{IDRole: roles["INVENTARIS"], IDUnitKerja: &unknown}},
@@ -949,9 +987,10 @@ func TestUserUnknownUnitKerjaIDIsInvalid(t *testing.T) {
 // nothing could prove it should go.
 func TestUserRevokingGlobalGrantActuallyDeletesIt(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "cabut_global",
 		Password: "rahasia123",
 		Grants:   []model.GrantRequest{{IDRole: roles["SUPERADMIN"]}},
@@ -962,7 +1001,7 @@ func TestUserRevokingGlobalGrantActuallyDeletesIt(t *testing.T) {
 
 	empty := []model.GrantRequest{}
 
-	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:     user.ID,
 		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &empty},
 	})
@@ -991,11 +1030,12 @@ func TestUserRevokingGlobalGrantActuallyDeletesIt(t *testing.T) {
 // (kept, deleted, inserted) correctly under the NULL-safe diff.
 func TestUserReplaceGrantsMixesGlobalAndScoped(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 	outletA := createUnit(t, testApp, "Mixed Outlet A")
 	outletB := createUnit(t, testApp, "Mixed Outlet B")
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "campuran",
 		Password: "rahasia123",
 		Grants: []model.GrantRequest{
@@ -1012,7 +1052,7 @@ func TestUserReplaceGrantsMixesGlobalAndScoped(t *testing.T) {
 		{IDRole: roles["INVENTARIS"], IDUnitKerja: &outletB}, // new
 	}
 
-	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{
+	patched, err := testApp.user.Update(ctx(), &model.UpdateUserRequest{ActorID: actor, 
 		ID:     user.ID,
 		Grants: model.Optional[[]model.GrantRequest]{Present: true, Value: &replaced},
 	})
@@ -1052,10 +1092,11 @@ func TestUserReplaceGrantsMixesGlobalAndScoped(t *testing.T) {
 // still needs to be visible so an operator can remove it.
 func TestRetiringUnitKerjaKeepsExistingGrantVisible(t *testing.T) {
 	testApp := newApp(t)
+	actor := testActor(t)
 	roles := seedRoles(t, testApp)
 	unit := createUnit(t, testApp, "Unit Akan Pensiun")
 
-	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{ActorID: actor, 
 		Username: "grant_unit_pensiun",
 		Password: "rahasia123",
 		Grants:   []model.GrantRequest{{IDRole: roles["INVENTARIS"], IDUnitKerja: &unit}},
@@ -1064,7 +1105,7 @@ func TestRetiringUnitKerjaKeepsExistingGrantVisible(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 
-	if _, err := testApp.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{
+	if _, err := testApp.unitKerja.Update(ctx(), &model.UpdateUnitKerjaRequest{ActorID: actor, 
 		ID:      unit,
 		IsAktif: model.Optional[bool]{Present: true, Value: ptr(false)},
 	}); err != nil {

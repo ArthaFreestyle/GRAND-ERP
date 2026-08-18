@@ -15,7 +15,12 @@ type EkspedisiResponse struct {
 
 // Nama is unique case-insensitively since migration 000009
 // (ekspedisi_nama_lower_uidx).
+//
+// ActorID is filled from the session by the controller, never from the body —
+// the id comes from the verified token, never from anything a caller could set
+// to someone else's.
 type CreateEkspedisiRequest struct {
+	ActorID int64   `json:"-" validate:"required,gt=0"`
 	Nama    string  `json:"nama" validate:"required,max=255"`
 	Telepon *string `json:"telepon" validate:"omitempty,max=32"`
 }
@@ -31,6 +36,7 @@ type GetEkspedisiRequest struct {
 // mistaken for "field not sent".
 type UpdateEkspedisiRequest struct {
 	ID      int64            `json:"-" validate:"required,gt=0"`
+	ActorID int64            `json:"-" validate:"required,gt=0"`
 	Nama    Optional[string] `json:"nama" validate:"omitempty,max=255"`
 	Telepon Optional[string] `json:"telepon" validate:"omitempty,max=32"`
 	IsAktif Optional[bool]   `json:"is_aktif"`

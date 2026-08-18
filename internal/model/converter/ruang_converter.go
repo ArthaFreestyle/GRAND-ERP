@@ -16,6 +16,11 @@ func RuangToResponse(ruang *entity.Ruang) *model.RuangResponse {
 		IDUnitKerja:   ruang.IDUnitKerja,
 		NamaUnitKerja: ruang.NamaUnitKerja,
 
+		CreatedAt: ruang.CreatedAt,
+		CreatedBy: ruang.CreatedBy,
+		UpdatedAt: ruang.UpdatedAt,
+		UpdatedBy: ruang.UpdatedBy,
+
 		NomorOpnameBeku: ruang.NomorOpnameBeku,
 	}
 }

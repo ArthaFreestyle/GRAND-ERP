@@ -11,34 +11,36 @@ import (
 // Pcs are the same unit, not two.
 func TestSatuanDuplicateNamaIsConflict(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	if _, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "PCS"}); err != nil {
+	if _, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor, Nama: "PCS"}); err != nil {
 		t.Fatalf("create first: %v", err)
 	}
 
 	for _, nama := range []string{"PCS", "Pcs", "pcs"} {
-		_, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: nama})
+		_, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor, Nama: nama})
 		assertKind(t, err, model.KindConflict)
 	}
 }
 
 func TestSatuanRenameToExistingNamaIsConflict(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	if _, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "BOX"}); err != nil {
+	if _, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor, Nama: "BOX"}); err != nil {
 		t.Fatalf("create first: %v", err)
 	}
 
-	second, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "KARTON"})
+	second, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor, Nama: "KARTON"})
 	if err != nil {
 		t.Fatalf("create second: %v", err)
 	}
 
-	_, err = a.satuan.Update(ctx(), decodeSatuanPatch(t, second.ID, `{"nama":"box"}`))
+	_, err = a.satuan.Update(ctx(), decodeSatuanPatch(t, second.ID, actor, `{"nama":"box"}`))
 	assertKind(t, err, model.KindConflict)
 
 	// Renaming to its own name must be accepted — exceptID skips the row itself.
-	renamed, err := a.satuan.Update(ctx(), decodeSatuanPatch(t, second.ID, `{"nama":"KARTON"}`))
+	renamed, err := a.satuan.Update(ctx(), decodeSatuanPatch(t, second.ID, actor, `{"nama":"KARTON"}`))
 	if err != nil {
 		t.Fatalf("rename to itself: %v", err)
 	}
@@ -52,13 +54,14 @@ func TestSatuanRenameToExistingNamaIsConflict(t *testing.T) {
 // deleted, because product_satuan and every *_detail reference it.
 func TestSatuanCanBeRetiredAndFiltered(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	kept, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "LUSIN"})
+	kept, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor, Nama: "LUSIN"})
 	if err != nil {
 		t.Fatalf("create kept: %v", err)
 	}
 
-	typo, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "LUSNI"})
+	typo, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor, Nama: "LUSNI"})
 	if err != nil {
 		t.Fatalf("create typo: %v", err)
 	}
@@ -67,7 +70,7 @@ func TestSatuanCanBeRetiredAndFiltered(t *testing.T) {
 		t.Error("is_aktif = false on create, want true")
 	}
 
-	retired, err := a.satuan.Update(ctx(), decodeSatuanPatch(t, typo.ID, `{"is_aktif":false}`))
+	retired, err := a.satuan.Update(ctx(), decodeSatuanPatch(t, typo.ID, actor, `{"is_aktif":false}`))
 	if err != nil {
 		t.Fatalf("retire: %v", err)
 	}
@@ -93,13 +96,14 @@ func TestSatuanCanBeRetiredAndFiltered(t *testing.T) {
 // Decision 4 added updated_at, maintained by the trigger rather than by Go.
 func TestSatuanUpdateBumpsUpdatedAt(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	created, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "RIM"})
+	created, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor, Nama: "RIM"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	updated, err := a.satuan.Update(ctx(), decodeSatuanPatch(t, created.ID, `{"nama":"REAM"}`))
+	updated, err := a.satuan.Update(ctx(), decodeSatuanPatch(t, created.ID, actor, `{"nama":"REAM"}`))
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -113,17 +117,18 @@ func TestSatuanUpdateBumpsUpdatedAt(t *testing.T) {
 // that never happened.
 func TestSatuanPatchWithNoFieldsIsInvalid(t *testing.T) {
 	a := newApp(t)
+	actor := testActor(t)
 
-	created, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "SAK"})
+	created, err := a.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: actor, Nama: "SAK"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	_, err = a.satuan.Update(ctx(), decodeSatuanPatch(t, created.ID, `{}`))
+	_, err = a.satuan.Update(ctx(), decodeSatuanPatch(t, created.ID, actor, `{}`))
 	assertKind(t, err, model.KindInvalid)
 }
 
-func decodeSatuanPatch(t *testing.T, id int64, body string) *model.UpdateSatuanRequest {
+func decodeSatuanPatch(t *testing.T, id, actor int64, body string) *model.UpdateSatuanRequest {
 	t.Helper()
 
 	request := new(model.UpdateSatuanRequest)
@@ -132,6 +137,7 @@ func decodeSatuanPatch(t *testing.T, id int64, body string) *model.UpdateSatuanR
 	}
 
 	request.ID = id
+	request.ActorID = actor
 
 	return request
 }

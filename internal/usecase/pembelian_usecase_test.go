@@ -28,7 +28,10 @@ type fixture struct {
 func pembelianFixture(t *testing.T, testApp *app) fixture {
 	t.Helper()
 
+	bootstrap := testActor(t)
+
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		ActorID:  bootstrap,
 		Username: "petugas_terima",
 		Password: "rahasia123",
 	})
@@ -40,13 +43,14 @@ func pembelianFixture(t *testing.T, testApp *app) fixture {
 	// keys every document number to the issuing unit's kode, and pembelianFixture's
 	// room backs almost every transactional test in this package.
 	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
-		Kode: ptr("FIX"), Nama: "Unit Fixture",
+		ActorID: user.ID, Kode: ptr("FIX"), Nama: "Unit Fixture",
 	})
 	if err != nil {
 		t.Fatalf("create unit kerja: %v", err)
 	}
 
 	ruang, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		ActorID:     user.ID,
 		NamaRuang:   "Gudang Utama",
 		IDUnitKerja: unit.ID,
 	})
@@ -54,17 +58,17 @@ func pembelianFixture(t *testing.T, testApp *app) fixture {
 		t.Fatalf("create ruang: %v", err)
 	}
 
-	supplier, err := testApp.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: "PT Sumber"})
+	supplier, err := testApp.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: user.ID, Nama: "PT Sumber"})
 	if err != nil {
 		t.Fatalf("create supplier: %v", err)
 	}
 
-	pcs, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "PCS"})
+	pcs, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: user.ID, Nama: "PCS"})
 	if err != nil {
 		t.Fatalf("create satuan PCS: %v", err)
 	}
 
-	dus, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "DUS"})
+	dus, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: user.ID, Nama: "DUS"})
 	if err != nil {
 		t.Fatalf("create satuan DUS: %v", err)
 	}
@@ -187,7 +191,7 @@ func TestKonversiSatuanDanFaktorSnapshot(t *testing.T) {
 	}
 
 	// Not registered on this product: PCS and DUS are, a third unit is not.
-	lain, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "PALLET"})
+	lain, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: f.actor, Nama: "PALLET"})
 	if err != nil {
 		t.Fatalf("create satuan: %v", err)
 	}
@@ -578,7 +582,7 @@ func TestNoFakturSupplierUnikPerSupplier(t *testing.T) {
 	assertKind(t, err, model.KindConflict)
 
 	// Another supplier may well use the same numbering.
-	lain, err := testApp.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: "CV Lain"})
+	lain, err := testApp.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: f.actor, Nama: "CV Lain"})
 	if err != nil {
 		t.Fatalf("create supplier lain: %v", err)
 	}

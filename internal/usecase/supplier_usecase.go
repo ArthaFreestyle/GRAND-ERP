@@ -69,13 +69,13 @@ func (c *SupplierUseCase) Create(ctx context.Context, request *model.CreateSuppl
 	}
 
 	supplier := &entity.Supplier{
-		Kode:    request.Kode,
-		Nama:    request.Nama,
-		Telepon: request.Telepon,
-		Alamat:  request.Alamat,
-		NPWP:    request.NPWP,
-		IsAktif: true,
-		// created_by stays NULL until the auth module can supply the actor.
+		Kode:      request.Kode,
+		Nama:      request.Nama,
+		Telepon:   request.Telepon,
+		Alamat:    request.Alamat,
+		NPWP:      request.NPWP,
+		IsAktif:   true,
+		CreatedBy: &request.ActorID,
 	}
 
 	if err := c.SupplierRepository.Create(ctx, tx, supplier); err != nil {
@@ -117,16 +117,18 @@ func (c *SupplierUseCase) Update(ctx context.Context, request *model.UpdateSuppl
 	}
 
 	patch := repository.SupplierPatch{
-		SetKode:    request.Kode.Present,
-		Kode:       request.Kode.Value,
-		Nama:       request.Nama.Value,
-		SetTelepon: request.Telepon.Present,
-		Telepon:    request.Telepon.Value,
-		SetAlamat:  request.Alamat.Present,
-		Alamat:     request.Alamat.Value,
-		SetNPWP:    request.NPWP.Present,
-		NPWP:       request.NPWP.Value,
-		IsAktif:    request.IsAktif.Value,
+		SetKode:      request.Kode.Present,
+		Kode:         request.Kode.Value,
+		Nama:         request.Nama.Value,
+		SetTelepon:   request.Telepon.Present,
+		Telepon:      request.Telepon.Value,
+		SetAlamat:    request.Alamat.Present,
+		Alamat:       request.Alamat.Value,
+		SetNPWP:      request.NPWP.Present,
+		NPWP:         request.NPWP.Value,
+		IsAktif:      request.IsAktif.Value,
+		SetUpdatedBy: true,
+		UpdatedBy:    &request.ActorID,
 	}
 
 	// An empty body would still fire the updated_at trigger, recording a change

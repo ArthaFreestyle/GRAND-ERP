@@ -97,6 +97,7 @@ func mutasiScopeFixture(t *testing.T, testApp *app) (f fixture, unitTujuan, tuju
 	f = pembelianFixture(t, testApp)
 	unitTujuan = createUnit(t, testApp, "Unit Tujuan Mutasi Scope")
 	room, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		ActorID:     f.actor,
 		NamaRuang:   "Toko Tujuan Scope",
 		IDUnitKerja: unitTujuan,
 	})
@@ -186,6 +187,7 @@ func TestMutasiUpdateRejectsMovingSourceRuangOutsideActiveUnit(t *testing.T) {
 
 	unitLain := createUnit(t, testApp, "Unit Lain Mutasi Patch")
 	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		ActorID:     f.actor,
 		NamaRuang:   "Gudang Lain Patch",
 		IDUnitKerja: unitLain,
 	})

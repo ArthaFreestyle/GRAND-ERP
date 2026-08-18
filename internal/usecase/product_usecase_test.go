@@ -12,7 +12,10 @@ import (
 func productFixture(t *testing.T, testApp *app) (actorID, pcs, box int64) {
 	t.Helper()
 
+	bootstrap := testActor(t)
+
 	user, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		ActorID:  bootstrap,
 		Username: "petugas_gudang",
 		Password: "rahasia123",
 	})
@@ -20,12 +23,12 @@ func productFixture(t *testing.T, testApp *app) (actorID, pcs, box int64) {
 		t.Fatalf("create actor: %v", err)
 	}
 
-	satuanPCS, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "PCS"})
+	satuanPCS, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: user.ID, Nama: "PCS"})
 	if err != nil {
 		t.Fatalf("create satuan PCS: %v", err)
 	}
 
-	satuanBOX, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{Nama: "BOX"})
+	satuanBOX, err := testApp.satuan.Create(ctx(), &model.CreateSatuanRequest{ActorID: user.ID, Nama: "BOX"})
 	if err != nil {
 		t.Fatalf("create satuan BOX: %v", err)
 	}

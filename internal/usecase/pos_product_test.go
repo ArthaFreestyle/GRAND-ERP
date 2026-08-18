@@ -19,13 +19,15 @@ import (
 func posRuangFixture(t *testing.T, testApp *app) int64 {
 	t.Helper()
 
-	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit POS"})
+	actor := testActor(t)
+
+	unit, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: actor, Nama: "Unit POS"})
 	if err != nil {
 		t.Fatalf("create unit kerja: %v", err)
 	}
 
 	ruang, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
-		NamaRuang: "Kasir", IDUnitKerja: unit.ID,
+		ActorID: actor, NamaRuang: "Kasir", IDUnitKerja: unit.ID,
 	})
 	if err != nil {
 		t.Fatalf("create ruang: %v", err)
@@ -184,7 +186,7 @@ func TestPOSStokMilikRuangYangDiminta(t *testing.T) {
 	f := pembelianFixture(t, testApp)
 
 	ruangKedua, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
-		NamaRuang: "Gudang Kedua", IDUnitKerja: f.unitKerja,
+		ActorID: f.actor, NamaRuang: "Gudang Kedua", IDUnitKerja: f.unitKerja,
 	})
 	if err != nil {
 		t.Fatalf("create ruang kedua: %v", err)

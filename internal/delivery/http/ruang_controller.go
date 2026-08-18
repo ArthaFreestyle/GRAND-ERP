@@ -27,12 +27,49 @@ func (c *RuangController) Create(ctx fiber.Ctx) error {
 		return model.Invalid("malformed request body")
 	}
 
+	// Bound first, then overwritten: a body carrying its own actor cannot pick one.
+	actor, err := actorID(ctx)
+	if err != nil {
+		return err
+	}
+
+	request.ActorID = actor
+
 	response, err := c.UseCase.Create(ctx.Context(), request)
 	if err != nil {
 		return err
 	}
 
 	return ctx.Status(fiber.StatusCreated).JSON(model.WebResponse[*model.RuangResponse]{Data: response})
+}
+
+// Update binds the body first and only then overwrites ID and ActorID, so a body
+// that smuggles in either cannot change which row is written or who is recorded.
+func (c *RuangController) Update(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	request := new(model.UpdateRuangRequest)
+	if err := ctx.Bind().Body(request); err != nil {
+		return model.Invalid("malformed request body")
+	}
+
+	actor, err := actorID(ctx)
+	if err != nil {
+		return err
+	}
+
+	request.ID = id
+	request.ActorID = actor
+
+	response, err := c.UseCase.Update(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.RuangResponse]{Data: response})
 }
 
 func (c *RuangController) Get(ctx fiber.Ctx) error {

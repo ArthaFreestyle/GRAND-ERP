@@ -600,7 +600,7 @@ func TestAlokasiMenolakFakturYangTidakBolehDibayar(t *testing.T) {
 
 	draft := draftSederhana(t, testApp, f, "10", nil, nil)
 
-	supplierLain, err := testApp.supplier.Create(ctx(), &model.CreateSupplierRequest{Nama: "PT Lain"})
+	supplierLain, err := testApp.supplier.Create(ctx(), &model.CreateSupplierRequest{ActorID: f.actor, Nama: "PT Lain"})
 	if err != nil {
 		t.Fatalf("create supplier: %v", err)
 	}

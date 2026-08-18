@@ -121,6 +121,7 @@ func TestTutupBukaDanTutupLagiMenyimpanKeduaJejak(t *testing.T) {
 	// and without a name filled in the join below would answer NULL for a reason that
 	// has nothing to do with the join being right.
 	penutup, err := testApp.user.Create(ctx(), &model.CreateUserRequest{
+		ActorID:     testActor(t),
 		Username:    "kepala_toko",
 		Password:    "rahasia123",
 		NamaLengkap: ptr("Bu Ratna"),

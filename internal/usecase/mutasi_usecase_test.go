@@ -35,7 +35,7 @@ func stokAwalMutasi(t *testing.T, testApp *app, qty string) (*app, mutasiSetup) 
 	// the source room of a later transfer, and isu #21 fase 1 keys every
 	// document number to the issuing unit's kode.
 	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
-		Kode: ptr("DEPAN"), Nama: "Unit Toko Depan",
+		ActorID: f.actor, Kode: ptr("DEPAN"), Nama: "Unit Toko Depan",
 	})
 	if err != nil {
 		t.Fatalf("create unit kerja tujuan: %v", err)
@@ -44,6 +44,7 @@ func stokAwalMutasi(t *testing.T, testApp *app, qty string) (*app, mutasiSetup) 
 	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
 	// gets its own unit_kerja rather than reusing the fixture's.
 	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		ActorID:     f.actor,
 		NamaRuang:   "Toko Depan",
 		IDUnitKerja: unitTujuan.ID,
 	})
@@ -177,7 +178,7 @@ func TestMutasiKekalMeskiHargaPokokTidakBulat(t *testing.T) {
 	testApp := newApp(t)
 	f := pembelianFixture(t, testApp)
 
-	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Toko Depan"})
+	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: f.actor, Nama: "Unit Toko Depan"})
 	if err != nil {
 		t.Fatalf("create unit kerja tujuan: %v", err)
 	}
@@ -185,6 +186,7 @@ func TestMutasiKekalMeskiHargaPokokTidakBulat(t *testing.T) {
 	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
 	// gets its own unit_kerja rather than reusing the fixture's.
 	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		ActorID:     f.actor,
 		NamaRuang:   "Toko Depan",
 		IDUnitKerja: unitTujuan.ID,
 	})
@@ -377,7 +379,7 @@ func TestBatalMutasiPeriodeTutupMasukPeriodeBerjalan(t *testing.T) {
 	testApp := newApp(t)
 	f := pembelianFixture(t, testApp)
 
-	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Toko Depan"})
+	unitTujuan, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: f.actor, Nama: "Unit Toko Depan"})
 	if err != nil {
 		t.Fatalf("create unit kerja tujuan: %v", err)
 	}
@@ -385,6 +387,7 @@ func TestBatalMutasiPeriodeTutupMasukPeriodeBerjalan(t *testing.T) {
 	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
 	// gets its own unit_kerja rather than reusing the fixture's.
 	tujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		ActorID:     f.actor,
 		NamaRuang:   "Toko Depan",
 		IDUnitKerja: unitTujuan.ID,
 	})

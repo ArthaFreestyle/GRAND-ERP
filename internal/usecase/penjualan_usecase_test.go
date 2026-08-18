@@ -41,7 +41,7 @@ func stokAwalPenjualan(t *testing.T, testApp *app, qty string) (*app, penjualanS
 
 	ajukanDanPosting(t, testApp, f, beli.ID)
 
-	pelanggan, err := testApp.pelanggan.Create(ctx(), &model.CreatePelangganRequest{Nama: "Toko Maju"})
+	pelanggan, err := testApp.pelanggan.Create(ctx(), &model.CreatePelangganRequest{ActorID: f.actor, Nama: "Toko Maju"})
 	if err != nil {
 		t.Fatalf("create pelanggan: %v", err)
 	}
@@ -484,6 +484,7 @@ func TestPenjualanPlafonKreditTerlampauiDitolak(t *testing.T) {
 
 	if _, err := testApp.pelanggan.Update(ctx(), &model.UpdatePelangganRequest{
 		ID:           s.pelanggan,
+		ActorID:      s.actor,
 		PlafonKredit: model.Optional[string]{Present: true, Value: ptr("100000")},
 	}); err != nil {
 		t.Fatalf("set plafon_kredit: %v", err)

@@ -22,7 +22,12 @@ type SupplierResponse struct {
 // Kode is optional. When present it is unique case-insensitively
 // (supplier_kode_lower_uidx); several suppliers may share kode = NULL, because
 // a PostgreSQL unique index does not constrain NULLs.
+//
+// ActorID is filled from the session by the controller, never from the body —
+// the id comes from the verified token, never from anything a caller could set
+// to someone else's.
 type CreateSupplierRequest struct {
+	ActorID int64   `json:"-" validate:"required,gt=0"`
 	Kode    *string `json:"kode" validate:"omitempty,max=32"`
 	Nama    string  `json:"nama" validate:"required,max=255"`
 	Telepon *string `json:"telepon" validate:"omitempty,max=32"`
@@ -43,6 +48,7 @@ type GetSupplierRequest struct {
 // see config.NewValidator.
 type UpdateSupplierRequest struct {
 	ID      int64            `json:"-" validate:"required,gt=0"`
+	ActorID int64            `json:"-" validate:"required,gt=0"`
 	Kode    Optional[string] `json:"kode" validate:"omitempty,max=32"`
 	Nama    Optional[string] `json:"nama" validate:"omitempty,max=255"`
 	Telepon Optional[string] `json:"telepon" validate:"omitempty,max=32"`

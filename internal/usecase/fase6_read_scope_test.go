@@ -70,7 +70,7 @@ func TestRuangListOnlyShowsActiveUnitRooms(t *testing.T) {
 	f := pembelianFixture(t, testApp)
 
 	unitLain := createUnit(t, testApp, "Unit Lain Ruang List")
-	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Gudang Lain", IDUnitKerja: unitLain,
 	})
 	if err != nil {
@@ -146,7 +146,7 @@ func TestPembelianListOnlyShowsActiveUnitDocuments(t *testing.T) {
 	inside := draftSederhana(t, testApp, f, "10", nil, nil)
 
 	unitLain := createUnit(t, testApp, "Unit Lain Pembelian List")
-	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Gudang Lain Pembelian", IDUnitKerja: unitLain,
 	})
 	if err != nil {
@@ -507,7 +507,7 @@ func TestPemakaianUpdateRejectsMovingRuangOutsideActiveUnit(t *testing.T) {
 	}
 
 	unitLain := createUnit(t, testApp, "Unit Lain Pemakaian Update")
-	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Gudang Lain Pemakaian Update", IDUnitKerja: unitLain,
 	})
 	if err != nil {
@@ -579,7 +579,7 @@ func TestPemakaianListOnlyShowsActiveUnitDocuments(t *testing.T) {
 	}
 
 	unitLain := createUnit(t, testApp, "Unit Lain Pemakaian List")
-	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Gudang Lain Pemakaian List", IDUnitKerja: unitLain,
 	})
 	if err != nil {
@@ -700,7 +700,7 @@ func TestPenjualanUpdateRejectsMovingRuangOutsideActiveUnit(t *testing.T) {
 	}
 
 	unitLain := createUnit(t, testApp, "Unit Lain Penjualan Update")
-	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Gudang Lain Penjualan Update", IDUnitKerja: unitLain,
 	})
 	if err != nil {
@@ -769,7 +769,7 @@ func TestPenjualanListOnlyShowsActiveUnitDocuments(t *testing.T) {
 	}
 
 	unitLain := createUnit(t, testApp, "Unit Lain Penjualan List")
-	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Gudang Lain Penjualan List", IDUnitKerja: unitLain,
 	})
 	if err != nil {

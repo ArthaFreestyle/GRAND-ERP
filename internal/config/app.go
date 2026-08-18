@@ -60,9 +60,11 @@ func Bootstrap(config *BootstrapConfig) {
 	)
 	// RuangUseCase borrows UnitKerjaRepository to validate id_unit_kerja is an
 	// active unit before writing (isu #12 fase 2) — the same reasoning
-	// UserUseCase applies to role_ids via RoleRepository.
+	// UserUseCase applies to role_ids via RoleRepository. It borrows
+	// KartuStokRepository too, for exactly one read: whether a room being
+	// retired still holds stock (isu #23 fase 3).
 	ruangUseCase := usecase.NewRuangUseCase(
-		config.DB, config.Log, config.Validate, ruangRepository, unitKerjaRepository,
+		config.DB, config.Log, config.Validate, ruangRepository, unitKerjaRepository, kartuStokRepository,
 	)
 	satuanUseCase := usecase.NewSatuanUseCase(
 		config.DB, config.Log, config.Validate, satuanRepository,

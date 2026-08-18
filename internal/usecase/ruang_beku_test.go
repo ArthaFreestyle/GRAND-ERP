@@ -91,11 +91,11 @@ func TestPostingEnamModulKeRuangBekuDitolak409(t *testing.T) {
 
 	// mutasi: out of the frozen room into a spare one. No DIAJUKAN to reach —
 	// DRAFT is enough to post from.
-	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{Nama: "Unit Tujuan Mutasi"})
+	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: f.actor, Nama: "Unit Tujuan Mutasi"})
 	if err != nil {
 		t.Fatalf("create unit lain: %v", err)
 	}
-	ruangTujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangTujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Tujuan Mutasi", IDUnitKerja: unitLain.ID,
 	})
 	if err != nil {
@@ -202,7 +202,7 @@ func TestPembekuanRadiusSatuRuangDanHanyaMenahanPosting(t *testing.T) {
 	f, _ := bekuFixture(t, testApp)
 
 	// A second room in the SAME unit, stocked independently.
-	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Toko Sebelah", IDUnitKerja: f.unitKerja,
 	})
 	if err != nil {
@@ -260,13 +260,13 @@ func TestMutasiDitolakSaatRuangTujuanBeku(t *testing.T) {
 	// Kode is required: cabang becomes the source room of a pembelian and a mutasi
 	// below, and isu #21 fase 1 keys every document number to the issuing unit's
 	// kode.
-	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
+	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: f.actor, 
 		Kode: ptr("CABANG"), Nama: "Unit Cabang",
 	})
 	if err != nil {
 		t.Fatalf("create unit lain: %v", err)
 	}
-	cabang, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	cabang, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Cabang", IDUnitKerja: unitLain.ID,
 	})
 	if err != nil {
@@ -352,13 +352,13 @@ func TestBukaOpnameMenungguPostingYangSedangBerjalan(t *testing.T) {
 	// Kode is required: ruangLain is the id_ruang of a stok_opname.Create call
 	// below, and isu #21 fase 1 keys every document number to the issuing unit's
 	// kode.
-	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{
+	unitLain, err := testApp.unitKerja.Create(ctx(), &model.CreateUnitKerjaRequest{ActorID: f.actor, 
 		Kode: ptr("LAIN"), Nama: "Unit Lain",
 	})
 	if err != nil {
 		t.Fatalf("create unit lain: %v", err)
 	}
-	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Ruang Lain", IDUnitKerja: unitLain.ID,
 	})
 	if err != nil {

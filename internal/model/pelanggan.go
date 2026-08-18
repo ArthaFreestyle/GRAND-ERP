@@ -28,7 +28,12 @@ type PelangganResponse struct {
 //
 // PlafonKredit is a string so no float ever touches money. Omitting it, or
 // sending null, means unlimited credit.
+//
+// ActorID is filled from the session by the controller, never from the body —
+// the id comes from the verified token, never from anything a caller could set
+// to someone else's.
 type CreatePelangganRequest struct {
+	ActorID      int64   `json:"-" validate:"required,gt=0"`
 	Kode         *string `json:"kode" validate:"omitempty,max=32"`
 	Nama         string  `json:"nama" validate:"required,max=255"`
 	Telepon      *string `json:"telepon" validate:"omitempty,max=32"`
@@ -48,6 +53,7 @@ type GetPelangganRequest struct {
 // limit entirely, which a plain pointer could not express.
 type UpdatePelangganRequest struct {
 	ID           int64            `json:"-" validate:"required,gt=0"`
+	ActorID      int64            `json:"-" validate:"required,gt=0"`
 	Kode         Optional[string] `json:"kode" validate:"omitempty,max=32"`
 	Nama         Optional[string] `json:"nama" validate:"omitempty,max=255"`
 	Telepon      Optional[string] `json:"telepon" validate:"omitempty,max=32"`

@@ -43,7 +43,15 @@ type GrantRequest struct {
 // roles later. Unknown or retired role or unit ids are rejected rather than
 // skipped. A (id_role, id_unit_kerja) pair repeated in the body plainly means
 // "grant that once" and is collapsed rather than rejected.
+//
+// ActorID is filled from the session by the controller, never from the body —
+// the id comes from the verified token, never from anything a caller could set
+// to someone else's. POST /api/v1/user is SUPERADMIN-only, so created_by is
+// always present — except db/seeder_postgres/004_superadmin.sql's own row,
+// written straight to the database with no caller at all, which stays NULL
+// forever. That is correct and not worked around.
 type CreateUserRequest struct {
+	ActorID     int64          `json:"-" validate:"required,gt=0"`
 	Username    string         `json:"username" validate:"required,max=64"`
 	Email       *string        `json:"email" validate:"omitempty,email,max=255"`
 	Password    string         `json:"password" validate:"required,min=8,max=72"`
@@ -69,6 +77,7 @@ type GetUserRequest struct {
 // second spelling of the same thing.
 type UpdateUserRequest struct {
 	ID          int64                    `json:"-" validate:"required,gt=0"`
+	ActorID     int64                    `json:"-" validate:"required,gt=0"`
 	Username    Optional[string]         `json:"username" validate:"omitempty,max=64"`
 	Email       Optional[string]         `json:"email" validate:"omitempty,email,max=255"`
 	Password    Optional[string]         `json:"password" validate:"omitempty,min=8,max=72"`

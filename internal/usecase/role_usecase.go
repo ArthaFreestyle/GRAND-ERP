@@ -58,9 +58,9 @@ func (c *RoleUseCase) Create(ctx context.Context, request *model.CreateRoleReque
 	}
 
 	role := &entity.Role{
-		Nama:    request.Nama,
-		IsAktif: true,
-		// created_by stays NULL until the auth module can supply the actor.
+		Nama:      request.Nama,
+		IsAktif:   true,
+		CreatedBy: &request.ActorID,
 	}
 
 	if err := c.RoleRepository.Create(ctx, tx, role); err != nil {
@@ -101,8 +101,10 @@ func (c *RoleUseCase) Update(ctx context.Context, request *model.UpdateRoleReque
 	}
 
 	patch := repository.RolePatch{
-		Nama:    request.Nama.Value,
-		IsAktif: request.IsAktif.Value,
+		Nama:         request.Nama.Value,
+		IsAktif:      request.IsAktif.Value,
+		SetUpdatedBy: true,
+		UpdatedBy:    &request.ActorID,
 	}
 
 	// An empty body would still fire the updated_at trigger, recording a change

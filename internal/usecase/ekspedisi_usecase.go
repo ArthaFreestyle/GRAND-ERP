@@ -58,9 +58,10 @@ func (c *EkspedisiUseCase) Create(ctx context.Context, request *model.CreateEksp
 	}
 
 	ekspedisi := &entity.Ekspedisi{
-		Nama:    request.Nama,
-		Telepon: request.Telepon,
-		IsAktif: true,
+		Nama:      request.Nama,
+		Telepon:   request.Telepon,
+		IsAktif:   true,
+		CreatedBy: &request.ActorID,
 	}
 
 	if err := c.EkspedisiRepository.Create(ctx, tx, ekspedisi); err != nil {
@@ -101,10 +102,12 @@ func (c *EkspedisiUseCase) Update(ctx context.Context, request *model.UpdateEksp
 	}
 
 	patch := repository.EkspedisiPatch{
-		Nama:       request.Nama.Value,
-		SetTelepon: request.Telepon.Present,
-		Telepon:    request.Telepon.Value,
-		IsAktif:    request.IsAktif.Value,
+		Nama:         request.Nama.Value,
+		SetTelepon:   request.Telepon.Present,
+		Telepon:      request.Telepon.Value,
+		IsAktif:      request.IsAktif.Value,
+		SetUpdatedBy: true,
+		UpdatedBy:    &request.ActorID,
 	}
 
 	// An empty body would still fire the updated_at trigger, recording a change

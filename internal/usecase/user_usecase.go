@@ -105,7 +105,7 @@ func (c *UserUseCase) Create(ctx context.Context, request *model.CreateUserReque
 		Password:    hash,
 		NamaLengkap: request.NamaLengkap,
 		IsAktif:     true,
-		// created_by stays NULL until the auth module can supply the actor.
+		CreatedBy:   &request.ActorID,
 	}
 
 	if err := c.UserRepository.Create(ctx, tx, user); err != nil {
@@ -176,6 +176,8 @@ func (c *UserUseCase) Update(ctx context.Context, request *model.UpdateUserReque
 		SetNamaLengkap: request.NamaLengkap.Present,
 		NamaLengkap:    request.NamaLengkap.Value,
 		IsAktif:        request.IsAktif.Value,
+		SetUpdatedBy:   true,
+		UpdatedBy:      &request.ActorID,
 	}
 
 	// The stored column is a hash, so a new password is hashed before it ever

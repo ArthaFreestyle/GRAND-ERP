@@ -30,7 +30,7 @@ func TestNilaiPersediaanJumlahkanBarisTerakhirDanRuangPensiun(t *testing.T) {
 	// retired after it held stock" just as well for this query, which only ever
 	// reads is_aktif, never when it changed.
 	retired, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
-		NamaRuang: "Gudang Pensiun", IDUnitKerja: f.unitKerja,
+		ActorID: f.actor, NamaRuang: "Gudang Pensiun", IDUnitKerja: f.unitKerja,
 	})
 	if err != nil {
 		t.Fatalf("create ruang: %v", err)
