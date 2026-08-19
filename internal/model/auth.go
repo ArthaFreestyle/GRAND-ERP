@@ -54,13 +54,53 @@ type SwitchContextRequest struct {
 // switch-context before doing anything else — Aktif is nil exactly when it
 // must. SwitchContext returns the same shape, since it is really "issue a
 // token" answered a second time with a chosen context.
+//
+// RefreshToken is populated by Login and Refresh (isu #24 fase 2) but never by
+// SwitchContext, which mints an access token only, same as before that issue —
+// omitempty keeps SwitchContext's response byte-identical to what it always
+// returned.
 type LoginResponse struct {
-	Token     string         `json:"token"`
-	TokenType string         `json:"token_type"`
-	ExpiresAt time.Time      `json:"expires_at"`
-	User      *UserResponse  `json:"user"`
-	Grants    []Grant        `json:"grants"`
-	Aktif     *ActiveContext `json:"aktif"`
+	Token        string         `json:"token"`
+	TokenType    string         `json:"token_type"`
+	ExpiresAt    time.Time      `json:"expires_at"`
+	RefreshToken string         `json:"refresh_token,omitempty"`
+	User         *UserResponse  `json:"user"`
+	Grants       []Grant        `json:"grants"`
+	Aktif        *ActiveContext `json:"aktif"`
+}
+
+// ChangePasswordRequest is POST /api/v1/auth/me/password's body — isu #24
+// fase 1. There is no ActorID field: the target is always the caller's own
+// session (session.UserID, passed as AuthUseCase.ChangePassword's own
+// parameter the same way SwitchContext takes userID), never something the
+// body could redirect elsewhere.
+//
+// PasswordLama is required even though the caller is already authenticated —
+// a stolen access token must not be able to lock the real owner out of their
+// own account by changing the password out from under them.
+type ChangePasswordRequest struct {
+	PasswordLama string `json:"password_lama" validate:"required,max=72"`
+	PasswordBaru string `json:"password_baru" validate:"required,min=8,max=72"`
+}
+
+// RefreshTokenRequest is POST /api/v1/auth/refresh's body — isu #24 fase 2.
+type RefreshTokenRequest struct {
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+
+// LogoutRequest is POST /api/v1/auth/logout's body. Same shape as
+// RefreshTokenRequest but kept as its own type: the two actions diverge (one
+// mints a new pair, the other only deletes), and a shared type would make
+// that divergence a coincidence rather than a fact the compiler enforces.
+type LogoutRequest struct {
+	RefreshToken string `json:"refresh_token" validate:"required"`
+}
+
+// LogoutResponse is deliberately not empty — every action endpoint in this
+// API returns something, so a client that logs the response body of every
+// call never has to special-case this one.
+type LogoutResponse struct {
+	Message string `json:"message"`
 }
 
 // SessionResponse is what GET /api/v1/auth/me returns: the caller exactly as the

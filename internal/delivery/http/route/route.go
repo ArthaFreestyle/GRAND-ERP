@@ -80,6 +80,13 @@ func (c *RouteConfig) setupGuestRoute() {
 	}
 
 	c.App.Post("/api/v1/auth/login", c.AuthController.Login)
+
+	// refresh and logout (isu #24 fase 2) both take the refresh token itself as
+	// their credential, in the body, so neither needs a bearer access token —
+	// refresh exists specifically for when the access token has already
+	// expired, and logout must work even then too.
+	c.App.Post("/api/v1/auth/refresh", c.AuthController.Refresh)
+	c.App.Post("/api/v1/auth/logout", c.AuthController.Logout)
 }
 
 // setupAuthRoute holds everything behind a bearer token.
@@ -138,6 +145,11 @@ func (c *RouteConfig) setupAuthRoute() {
 	// Session.HasRole answering false when Aktif is nil, not a route-table
 	// special case. Nothing below this line changed for fase 4.
 	api.Post("/auth/switch-context", c.AuthController.SwitchContext)
+
+	// me/password (isu #24 fase 1) carries no role guard either, for the same
+	// reason: securing your own account cannot wait on having chosen an active
+	// context first.
+	api.Post("/auth/me/password", c.AuthController.ChangePassword)
 
 	// Guard first, controller last. Fiber v3's signature is
 	// Get(path, handler, handlers...) and the chain runs in the order given, so the

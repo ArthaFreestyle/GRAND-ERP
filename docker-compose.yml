@@ -161,7 +161,12 @@ services:
       # jalan di mesin sendiri — ganti lewat .env sebelum dipakai di tempat lain,
       # karena siapa pun yang tahu kunci ini bisa membuat token SUPERADMIN.
       JWT_SECRET: ${JWT_SECRET:-dev-only-secret-ganti-sebelum-dipakai-di-luar}
-      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-60}
+      JWT_TTL_MINUTES: ${JWT_TTL_MINUTES:-15}
+      # isu #24: the refresh token, not this one, is now what actually bounds a
+      # session — it lives in Redis and can be revoked outright. 43200 minutes
+      # (30 days) is how long an untouched one survives before its holder must
+      # log in again.
+      JWT_REFRESH_TTL_MINUTES: ${JWT_REFRESH_TTL_MINUTES:-43200}
       DATABASE_HOST: postgres
       DATABASE_PORT: 5432
       DATABASE_USERNAME: ${POSTGRES_USER:-postgres}

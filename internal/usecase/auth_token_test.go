@@ -22,8 +22,9 @@ func newAuth(t *testing.T, ttl time.Duration) *AuthUseCase {
 	log := logrus.New()
 	log.SetLevel(logrus.PanicLevel)
 
-	// nil DB: Authenticate and issue never touch it.
-	return NewAuthUseCase(nil, log, nil, nil, testSecret, ttl, "grand-erp")
+	// nil DB and nil repositories: this file only exercises issue/Authenticate,
+	// which touch neither the database nor Redis.
+	return NewAuthUseCase(nil, log, nil, nil, nil, nil, testSecret, ttl, time.Hour, "grand-erp", 5, time.Minute)
 }
 
 func testUser() *entity.User {
@@ -147,8 +148,8 @@ func TestExpiredTokenIsRejected(t *testing.T) {
 // The signature is the only thing standing between a caller and any identity they
 // care to claim.
 func TestTokenSignedWithAnotherSecretIsRejected(t *testing.T) {
-	forger := NewAuthUseCase(nil, logrus.New(), nil, nil,
-		"ffffffffffffffffffffffffffffffff", time.Hour, "grand-erp")
+	forger := NewAuthUseCase(nil, logrus.New(), nil, nil, nil, nil,
+		"ffffffffffffffffffffffffffffffff", time.Hour, time.Hour, "grand-erp", 5, time.Minute)
 
 	token, _, err := forger.issue(&entity.User{
 		ID:       1,
@@ -193,7 +194,7 @@ func TestAlgNoneTokenIsRejected(t *testing.T) {
 
 // A token minted for another service must not open this one, even with the same key.
 func TestTokenFromAnotherIssuerIsRejected(t *testing.T) {
-	other := NewAuthUseCase(nil, logrus.New(), nil, nil, testSecret, time.Hour, "layanan-lain")
+	other := NewAuthUseCase(nil, logrus.New(), nil, nil, nil, nil, testSecret, time.Hour, time.Hour, "layanan-lain", 5, time.Minute)
 
 	token, _, err := other.issue(testUser(), nil)
 	if err != nil {

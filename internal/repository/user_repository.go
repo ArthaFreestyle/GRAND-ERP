@@ -135,6 +135,31 @@ func (r *UserRepository) FindByUsernameWithPassword(ctx context.Context, db DBTX
 	return user, nil
 }
 
+// FindByIDWithPassword is FindByUsernameWithPassword's counterpart keyed by
+// id — isu #24 fase 1's self-service password change authenticates the
+// caller by session (already know the id), not by username. Same rule as its
+// sibling: returned regardless of is_aktif, and the bcrypt hash it carries
+// must never reach a response.
+func (r *UserRepository) FindByIDWithPassword(ctx context.Context, db DBTX, id int64) (*entity.User, error) {
+	const query = `
+		SELECT id, username, email, password, nama_lengkap, is_aktif,
+		       created_at, created_by, updated_at, updated_by
+		FROM users
+		WHERE id = $1`
+
+	user := new(entity.User)
+
+	err := db.QueryRowContext(ctx, query, id).Scan(
+		&user.ID, &user.Username, &user.Email, &user.Password, &user.NamaLengkap,
+		&user.IsAktif, &user.CreatedAt, &user.CreatedBy, &user.UpdatedAt, &user.UpdatedBy,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
 // ExistsByUsername matches case-insensitively to mirror users_username_lower_uidx.
 // exceptID skips one row so an update does not collide with itself; pass 0 when
 // creating.

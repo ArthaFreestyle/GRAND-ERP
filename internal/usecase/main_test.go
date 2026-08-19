@@ -15,6 +15,7 @@ import (
 
 	// Registers the "pgx" driver with database/sql.
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 )
 
@@ -32,31 +33,57 @@ import (
 // on a machine with no database.
 const dsnEnv = "TEST_DATABASE_URL"
 
+// redisAddrEnv gates Redis the same way dsnEnv gates PostgreSQL. AuthUseCase
+// now hard-requires Redis for Login itself (isu #24 — refresh tokens and
+// login throttling), which is not a new category of dependency: the running
+// app already refuses to boot without Redis (config.NewRedis Fatals on a
+// failed ping), this just extends that same requirement into the test
+// harness. Point it at the Redis docker-compose.yml already brings up on
+// 6379 — a DIFFERENT db index than a developer's own default (0) is not
+// required, since newApp only ever touches its own refresh:*/login_throttle:*
+// keys and cleans them up itself; see flushAuthKeys.
+const redisAddrEnv = "TEST_REDIS_ADDR"
+
 var testDB *sql.DB
+var testRedis *redis.Client
 
 func TestMain(m *testing.M) {
 	dsn := os.Getenv(dsnEnv)
-	if dsn == "" {
-		// Nothing to connect to; every test skips itself via requireDB.
-		os.Exit(m.Run())
+	if dsn != "" {
+		db, err := sql.Open("pgx", dsn)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "open %s: %v\n", dsnEnv, err)
+			os.Exit(1)
+		}
+
+		if err := db.Ping(); err != nil {
+			fmt.Fprintf(os.Stderr, "ping %s: %v\n", dsnEnv, err)
+			os.Exit(1)
+		}
+
+		testDB = db
 	}
 
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "open %s: %v\n", dsnEnv, err)
-		os.Exit(1)
+	if addr := os.Getenv(redisAddrEnv); addr != "" {
+		client := redis.NewClient(&redis.Options{Addr: addr})
+
+		if err := client.Ping(context.Background()).Err(); err != nil {
+			fmt.Fprintf(os.Stderr, "ping %s: %v\n", redisAddrEnv, err)
+			os.Exit(1)
+		}
+
+		testRedis = client
 	}
 
-	if err := db.Ping(); err != nil {
-		fmt.Fprintf(os.Stderr, "ping %s: %v\n", dsnEnv, err)
-		os.Exit(1)
-	}
-
-	testDB = db
-
+	// Nothing to connect to; every test skips itself via requireDB/requireRedis.
 	code := m.Run()
 
-	_ = db.Close()
+	if testDB != nil {
+		_ = testDB.Close()
+	}
+	if testRedis != nil {
+		_ = testRedis.Close()
+	}
 
 	os.Exit(code)
 }
@@ -101,9 +128,17 @@ const (
 	// testAuthSecret only needs to satisfy NewAuthConfig's 32-character
 	// minimum; nothing signed with it is ever meant to verify against a real
 	// deployment's key.
-	testAuthSecret = "test-only-secret-not-for-prod-32"
-	testAuthTTL    = time.Hour
-	testAuthIssuer = "grand-erp-test"
+	testAuthSecret     = "test-only-secret-not-for-prod-32"
+	testAuthTTL        = time.Hour
+	testAuthRefreshTTL = time.Hour
+	testAuthIssuer     = "grand-erp-test"
+
+	// Generous on purpose: these tests log in far more often than any real
+	// attacker's pacing, and a tight limit would make ordinary test traffic
+	// trip the same throttle the rate-limiting tests exist to exercise
+	// deliberately.
+	testMaxLoginAttempts    = 1000
+	testLoginThrottleWindow = time.Minute
 )
 
 // newApp wires the same graph config.Bootstrap does, minus Fiber, and empties the
@@ -111,7 +146,9 @@ const (
 func newApp(t *testing.T) *app {
 	t.Helper()
 	requireDB(t)
+	requireRedis(t)
 	truncateMaster(t)
+	flushAuthKeys(t)
 
 	log := logrus.New()
 	log.SetLevel(logrus.PanicLevel) // keep expected-error tests quiet
@@ -171,12 +208,16 @@ func newApp(t *testing.T) *app {
 		),
 		user: usecase.NewUserUseCase(
 			testDB, log, validate, userRepository, roleRepository, unitKerjaRepository,
+			repository.NewRefreshTokenRepository(testRedis),
 		),
 		periode: usecase.NewPeriodeUseCase(
 			testDB, log, validate, periodeRepository,
 		),
 		auth: usecase.NewAuthUseCase(
-			testDB, log, validate, userRepository, testAuthSecret, testAuthTTL, testAuthIssuer,
+			testDB, log, validate, userRepository,
+			repository.NewRefreshTokenRepository(testRedis), repository.NewLoginThrottleRepository(testRedis),
+			testAuthSecret, testAuthTTL, testAuthRefreshTTL, testAuthIssuer,
+			testMaxLoginAttempts, testLoginThrottleWindow,
 		),
 		pembelian: usecase.NewPembelianUseCase(
 			testDB, log, validate,
@@ -240,6 +281,46 @@ func requireDB(t *testing.T) {
 
 	if testDB == nil {
 		t.Skipf("%s is not set; skipping database-backed test", dsnEnv)
+	}
+}
+
+func requireRedis(t *testing.T) {
+	t.Helper()
+
+	if testRedis == nil {
+		t.Skipf("%s is not set; skipping Redis-backed test", redisAddrEnv)
+	}
+}
+
+// flushAuthKeys is truncateMaster's Redis counterpart: every key isu #24
+// writes lives under one of these two prefixes, so a targeted SCAN+DEL clears
+// exactly what a previous test left behind without touching anything else
+// that might live on the same Redis instance — deliberately not FLUSHDB,
+// which would be safe against the scratch database this is meant to run
+// against but not against a developer accidentally pointing TEST_REDIS_ADDR
+// at a real one.
+func flushAuthKeys(t *testing.T) {
+	t.Helper()
+
+	for _, pattern := range []string{"refresh:*", "login_throttle:*"} {
+		iter := testRedis.Scan(ctx(), 0, pattern, 0).Iterator()
+
+		var keys []string
+		for iter.Next(ctx()) {
+			keys = append(keys, iter.Val())
+		}
+
+		if err := iter.Err(); err != nil {
+			t.Fatalf("scan %s: %v", pattern, err)
+		}
+
+		if len(keys) == 0 {
+			continue
+		}
+
+		if err := testRedis.Del(ctx(), keys...).Err(); err != nil {
+			t.Fatalf("flush %s: %v", pattern, err)
+		}
 	}
 }
 
