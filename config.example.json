@@ -32,6 +32,12 @@
   "captcha": {
     "ttl_seconds": 300
   },
+  "throttle": {
+    "login": {
+      "max_attempts": 5,
+      "window_minutes": 15
+    }
+  },
   "dokumen": {
     "storage_path": "./data/dokumen",
     "max_size_mb": 10,
@@ -40,7 +46,8 @@
   },
   "jwt": {
     "secret": "",
-    "ttl_minutes": 60,
+    "ttl_minutes": 15,
+    "refresh_ttl_minutes": 43200,
     "issuer": "grand-erp"
   }
 }

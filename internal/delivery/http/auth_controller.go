@@ -29,12 +29,71 @@ func (c *AuthController) Login(ctx fiber.Ctx) error {
 		return model.Invalid("malformed request body")
 	}
 
-	response, err := c.UseCase.Login(ctx.Context(), request)
+	response, err := c.UseCase.Login(ctx.Context(), ctx.IP(), request)
 	if err != nil {
 		return err
 	}
 
 	return ctx.JSON(model.WebResponse[*model.LoginResponse]{Data: response})
+}
+
+// ChangePassword is isu #24 fase 1: any authenticated caller may change their
+// own password, no role guard — the same tier as Me and SwitchContext. It
+// binds the body as-is; there is no ActorID field to overwrite, because the
+// target is always session.UserID, never something the body could redirect.
+func (c *AuthController) ChangePassword(ctx fiber.Ctx) error {
+	session, ok := middleware.SessionFrom(ctx)
+	if !ok {
+		return model.Unauthorized("authentication required")
+	}
+
+	request := new(model.ChangePasswordRequest)
+	if err := ctx.Bind().Body(request); err != nil {
+		return model.Invalid("malformed request body")
+	}
+
+	response, err := c.UseCase.ChangePassword(ctx.Context(), session.UserID, request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.UserResponse]{Data: response})
+}
+
+// Refresh exchanges a refresh token for a new access/refresh pair — isu #24
+// fase 2. No session required: refresh exists precisely for the case where
+// the access token has already expired, so requiring a valid one here would
+// defeat the endpoint's own purpose.
+func (c *AuthController) Refresh(ctx fiber.Ctx) error {
+	request := new(model.RefreshTokenRequest)
+	if err := ctx.Bind().Body(request); err != nil {
+		return model.Invalid("malformed request body")
+	}
+
+	response, err := c.UseCase.Refresh(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.LoginResponse]{Data: response})
+}
+
+// Logout revokes a refresh token — isu #24 fase 2. Same shape as Refresh: no
+// session required, the refresh token itself is the credential this action
+// needs.
+func (c *AuthController) Logout(ctx fiber.Ctx) error {
+	request := new(model.LogoutRequest)
+	if err := ctx.Bind().Body(request); err != nil {
+		return model.Invalid("malformed request body")
+	}
+
+	if err := c.UseCase.Logout(ctx.Context(), request); err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.LogoutResponse]{
+		Data: &model.LogoutResponse{Message: "logged out"},
+	})
 }
 
 // Me returns the caller as the token describes them.

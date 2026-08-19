@@ -73,8 +73,12 @@ info:
     `LEFT JOIN` supaya produk yang belum punya harga tetap muncul.
 
 
-    Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`. Ambil
-    tokennya dari endpoint itu lalu kirim sebagai `Authorization: Bearer <token>`.
+    Seluruh `/api/v1` butuh bearer token, kecuali `POST /api/v1/auth/login`,
+    `POST /api/v1/auth/refresh`, dan `POST /api/v1/auth/logout` — dua yang
+    terakhir (isu #24) memang ada untuk kasus access token-nya sudah
+    kedaluwarsa, dan refresh token yang dikirim di body sudah jadi
+    kredensialnya sendiri. Ambil access token dari `/auth/login` atau
+    `/auth/refresh` lalu kirim sebagai `Authorization: Bearer <token>`.
 
 
     Otorisasi memakai nama role. Membaca terbuka untuk siapa pun yang sudah login —
@@ -395,6 +399,154 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/me/password:
+    post:
+      tags: [auth]
+      summary: Ganti password akun sendiri
+      operationId: changeOwnPassword
+      description: >
+        Isu #24 fase 1. Terbuka untuk setiap pemanggil terautentikasi, tanpa
+        role guard — sama seperti `auth/me` dan `switch-context`. Sesi tanpa
+        konteks aktif (`aktif: null`) tetap boleh memanggilnya; orang yang
+        belum memilih peran tetap berhak mengamankan akunnya sendiri.
+
+
+        `password_lama` wajib diverifikasi walaupun pemanggilnya sudah
+        terautentikasi — token yang dicuri tidak boleh bisa mengunci
+        pemiliknya keluar dari akunnya sendiri. Salah menjawab pesan yang
+        sama dengan `POST /auth/login`, `username or password is wrong`,
+        tidak dibedakan dari sebab lain.
+
+
+        Ini adalah aksi yang berbeda dari `PATCH /user/{id}` milik
+        `SUPERADMIN`: yang itu mereset password orang lain dan tidak butuh
+        `password_lama`, karena atasan memang tidak tahu password
+        bawahannya. Sasaran endpoint ini selalu akun pemanggil sendiri —
+        tidak ada field body yang bisa menggantinya.
+
+
+        **Mencabut sesi (isu #24 fase 3).** Sukses di sini menghapus seluruh
+        refresh token yang dipegang user — setiap sesi lain (device lain,
+        browser lain) kehilangan akses saat access token-nya kedaluwarsa
+        (`jwt.ttl_minutes`, default 15 menit), bukan seketika.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password_lama, password_baru]
+              properties:
+                password_lama: { type: string, format: password, maxLength: 72 }
+                password_baru:
+                  type: string
+                  format: password
+                  minLength: 8
+                  maxLength: 72
+      responses:
+        "200":
+          description: Password berhasil diganti
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: Tukar refresh token dengan sepasang token baru
+      operationId: refresh
+      security: []
+      description: >
+        Isu #24 fase 2. Tidak butuh bearer token — endpoint ini ada justru
+        untuk kasus access token-nya sudah kedaluwarsa, jadi mensyaratkan
+        salah satu di sini akan menggagalkan tujuannya sendiri. Refresh
+        token itu sendiri adalah kredensial yang dipakai.
+
+
+        **Dirotasi setiap dipakai.** Refresh token yang dikirim dihapus
+        secara atomik sebelum apa pun lainnya terjadi — dipakai ulang
+        (replay), baik oleh device lain yang balapan dengan rotasi yang sah
+        maupun oleh penyerang yang mencegatnya, selalu ditolak dengan pesan
+        yang sama dengan token yang memang sudah kedaluwarsa.
+
+
+        Konteks aktif token lama dibaca ulang dari database, bukan
+        dipercaya dari catatan yang tersimpan — kalau grant itu sudah
+        dicabut atau dipensiunkan sejak refresh token diterbitkan, access
+        token baru diterbitkan tanpa konteks aktif (sama seperti login
+        dengan grant yang ambigu), dan pemanggil harus `switch-context`
+        lagi.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: Sepasang token baru
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/LoginResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: Cabut satu refresh token
+      operationId: logout
+      security: []
+      description: >
+        Isu #24 fase 2. Tidak butuh bearer token, sama seperti
+        `POST /auth/refresh` — refresh token yang dikirim adalah satu-satunya
+        kredensial yang dibutuhkan.
+
+
+        Menjawab sukses baik refresh token-nya masih hidup maupun sudah
+        kedaluwarsa/terpakai: keduanya sudah mencapai keadaan yang memang
+        dituju logout, dan menjadikan yang kedua sebagai error akan memberi
+        cara memeriksa apakah suatu nilai token pernah sah.
+
+
+        **Access token yang sudah terlanjur terbit tidak ikut tercabut** —
+        itu tetap sah sampai kedaluwarsa (`jwt.ttl_minutes`). Yang dicabut
+        di sini murni kemampuan menukarnya dengan yang baru lewat
+        `POST /auth/refresh`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: Refresh token tercabut (atau sudah tidak hidup sebelumnya)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      message: { type: string, example: logged out }
+        "400": { $ref: "#/components/responses/ValidationError" }
 
   /health:
     get:
@@ -6622,8 +6774,20 @@ components:
           format: date-time
           description: >
             Waktu absolut, bukan durasi, supaya klien tidak perlu menebak kapan
-            responsnya diterima. Ini juga batas satu-satunya token ini bisa
-            dicabut — lihat catatan "aktif" di bawah.
+            responsnya diterima. Access token ini sendiri tidak bisa dicabut —
+            isu #24 — jadi ini juga batas jendela sisa setelah sesi dicabut
+            lewat logout, ganti password, is_aktif=false, atau seluruh grant
+            dicabut.
+        refresh_token:
+          type: string
+          nullable: true
+          description: >
+            Hanya diisi oleh `POST /auth/login` dan `POST /auth/refresh` —
+            isu #24 fase 2. `POST /auth/switch-context` menerbitkan access
+            token baru tanpa refresh token, persis seperti sebelum isu #24.
+            Kirim ke `POST /auth/refresh` untuk menukar sepasang token baru,
+            atau ke `POST /auth/logout` untuk mencabutnya. Sekali pakai:
+            dipakai ulang (misalnya setelah `refresh`) akan ditolak.
         user: { $ref: "#/components/schemas/User" }
         grants:
           type: array

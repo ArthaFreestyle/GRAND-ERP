@@ -23,12 +23,13 @@ import (
 // and are still active, and those questions belong to their own modules' SQL,
 // not to a second copy of it here.
 type UserUseCase struct {
-	DB                  *sql.DB
-	Log                 *logrus.Logger
-	Validate            *validator.Validate
-	UserRepository      *repository.UserRepository
-	RoleRepository      *repository.RoleRepository
-	UnitKerjaRepository *repository.UnitKerjaRepository
+	DB                     *sql.DB
+	Log                    *logrus.Logger
+	Validate               *validator.Validate
+	UserRepository         *repository.UserRepository
+	RoleRepository         *repository.RoleRepository
+	UnitKerjaRepository    *repository.UnitKerjaRepository
+	RefreshTokenRepository *repository.RefreshTokenRepository
 }
 
 func NewUserUseCase(
@@ -38,14 +39,16 @@ func NewUserUseCase(
 	userRepository *repository.UserRepository,
 	roleRepository *repository.RoleRepository,
 	unitKerjaRepository *repository.UnitKerjaRepository,
+	refreshTokenRepository *repository.RefreshTokenRepository,
 ) *UserUseCase {
 	return &UserUseCase{
-		DB:                  db,
-		Log:                 log,
-		Validate:            validate,
-		UserRepository:      userRepository,
-		RoleRepository:      roleRepository,
-		UnitKerjaRepository: unitKerjaRepository,
+		DB:                     db,
+		Log:                    log,
+		Validate:               validate,
+		UserRepository:         userRepository,
+		RoleRepository:         roleRepository,
+		UnitKerjaRepository:    unitKerjaRepository,
+		RefreshTokenRepository: refreshTokenRepository,
 	}
 }
 
@@ -268,6 +271,22 @@ func (c *UserUseCase) Update(ctx context.Context, request *model.UpdateUserReque
 
 	if err := tx.Commit(); err != nil {
 		return nil, err
+	}
+
+	// isu #24 fase 3: a password reset, a deactivation, or revoking every
+	// grant all end a user's live sessions by deleting their refresh tokens.
+	// Checked against the patch actually applied, not the request, so a body
+	// that sets is_aktif: true (already true) or leaves password untouched
+	// triggers nothing. Best-effort and logged only — the write already
+	// committed, so a Redis failure here must not turn a successful update
+	// into an error response.
+	if patch.Password != nil ||
+		(patch.IsAktif != nil && !*patch.IsAktif) ||
+		(replacesRoles && len(grants) == 0) {
+		if err := c.RefreshTokenRepository.RevokeAllForUser(ctx, user.ID); err != nil {
+			c.Log.WithError(err).WithField("user_id", user.ID).
+				Warn("gagal mencabut refresh token setelah memperbarui user")
+		}
 	}
 
 	return converter.UserToResponse(user), nil

@@ -14,7 +14,7 @@ Backend ERP dengan fokus pada persediaan, pembelian, dan penjualan. Ditulis deng
 | Bahasa | Go 1.25 |
 | HTTP | [Fiber v3](https://github.com/gofiber/fiber) |
 | Database | PostgreSQL via `database/sql` + [pgx/v5](https://github.com/jackc/pgx) — **tanpa ORM** |
-| Cache | Redis (disiapkan untuk sesi captcha ber-TTL, belum dipakai) |
+| Cache | Redis — refresh token dan pembatasan laju login (isu #24); `captcha.ttl_seconds` masih ada di config tapi tidak dipakai, lihat [Autentikasi](#autentikasi) |
 | Config | viper (`config.json` + override environment) |
 | Log | logrus (JSON) |
 | Migrasi | [golang-migrate](https://github.com/golang-migrate/migrate) |
@@ -43,7 +43,7 @@ Itu menaikkan PostgreSQL 17, Redis 7, menjalankan migrasi, memasang seeder, lalu
 | Service | Peran |
 |---|---|
 | `postgres` | PostgreSQL 17, data di volume `postgres-data` |
-| `redis` | Redis 7, persistence dimatikan — captcha memang state ber-TTL |
+| `redis` | Redis 7, persistence dimatikan — refresh token dan penghitung throttle login (isu #24) semuanya state ber-TTL; restart-nya berarti semua orang login ulang, bukan data yang hilang |
 | `migrate` | Sekali jalan: migrasi ke `grand_erp`, lalu keluar |
 | `migrate-test` | Sekali jalan: migrasi ke `grand_erp_test` untuk test |
 | `seed` | Sekali jalan setelah `migrate`: memasang `db/seeder_postgres/` |
@@ -87,7 +87,7 @@ Sesuaikan `postgres:postgres` kalau `POSTGRES_USER`/`POSTGRES_PASSWORD` diubah d
 
 **Konfigurasi di dalam container.** `config.NewViper` panik kalau `config.json` tidak ada, sedangkan `config.json` gitignored karena berisi kredensial. Jadi image menyalin `config.example.json` menjadi `config.json`, lalu compose menimpa kunci yang memang bergantung lingkungan lewat environment variable (`database.host` → `DATABASE_HOST`).
 
-Yang **tidak** ditimpa compose — `app.name`, `captcha.ttl_seconds`, dan ketiga kunci `database.pool.*` — memakai nilai dari `config.example.json` yang terbangun ke dalam image. `dokumen.storage_path` justru ditimpa di kedua service dan harus tetap sama di keduanya; direktorinya dibuat di dalam image dan dimiliki user non-root, karena Docker menyalin kepemilikan itu saat volume bernama pertama kali dibuat. Kalau salah satunya perlu berbeda per lingkungan, tambahkan ke blok `environment:` service `web` dan `worker`.
+Yang **tidak** ditimpa compose — `app.name`, `captcha.ttl_seconds`, `throttle.login.*` (isu #24), dan ketiga kunci `database.pool.*` — memakai nilai dari `config.example.json` yang terbangun ke dalam image. `dokumen.storage_path` justru ditimpa di kedua service dan harus tetap sama di keduanya; direktorinya dibuat di dalam image dan dimiliki user non-root, karena Docker menyalin kepemilikan itu saat volume bernama pertama kali dibuat. Kalau salah satunya perlu berbeda per lingkungan, tambahkan ke blok `environment:` service `web` dan `worker`.
 
 `.dockerignore` sengaja mengecualikan `config.json` supaya kredensial lokal tidak ikut terbangun ke dalam image.
 
@@ -188,11 +188,14 @@ go test -v -race ./...
 
 Test di `internal/usecase` berjalan melawan **PostgreSQL sungguhan** dan melewatkan dirinya sendiri kalau `TEST_DATABASE_URL` tidak menunjuk database bekas. Yang mereka buktikan hidup di database, bukan di Go — stabilitas paginasi saat nama kembar, escaping wildcard `ILIKE`, banyak baris berbagi `kode = NULL` di bawah indeks unik, dan `NUMERIC` yang bulak-balik tanpa berubah. Mock hanya akan menyetujui query yang salah.
 
-Dengan compose, databasenya sudah disiapkan: `docker/initdb/` membuat `grand_erp_test` dan service `migrate-test` memasang skemanya. Jadi cukup arahkan `TEST_DATABASE_URL` ke sana — **port 5433**, karena itu port yang dipublikasikan ke host:
+**Sejak isu #24, `internal/usecase` juga butuh `TEST_REDIS_ADDR`.** `AuthUseCase.Login` sendiri kini mensyaratkan Redis (refresh token dan pembatasan laju), jadi ini bukan kategori dependensi baru — aplikasi yang sungguhan berjalan sudah menolak boot tanpa Redis (`config.NewRedis` `Fatal` kalau ping-nya gagal), ini cuma memperpanjang syarat yang sama ke harness test. Tanpa keduanya, `internal/usecase` tetap hijau lewat skip, sama seperti tanpa `TEST_DATABASE_URL` saja.
+
+Dengan compose, keduanya sudah disiapkan: `docker/initdb/` membuat `grand_erp_test` dan service `migrate-test` memasang skemanya, sementara `redis` sudah jalan di port 6379. Jadi cukup arahkan kedua variabel ke sana — **port 5433** untuk Postgres, karena itu port yang dipublikasikan ke host:
 
 ```bash
 docker compose up -d
 export TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5433/grand_erp_test?sslmode=disable'
+export TEST_REDIS_ADDR='127.0.0.1:6379'
 go test ./...
 ```
 
@@ -202,10 +205,11 @@ Tanpa compose, siapkan sendiri lalu migrasikan:
 createdb grand_erp_test
 export TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/grand_erp_test?sslmode=disable'
 migrate -path db/migrations_postgres -database "$TEST_DATABASE_URL" up
+export TEST_REDIS_ADDR='127.0.0.1:6379'   # instance Redis apa pun; tidak perlu database terpisah
 go test ./...
 ```
 
-Test membersihkan tabel master sendiri, tapi **tidak** membuat skemanya — migrasikan dulu. Di luar `internal/usecase` semuanya unit test murni dan tidak butuh database, jadi `go test ./...` tetap hijau di mesin tanpa PostgreSQL. Test yang butuh database melewatkan dirinya sendiri, jadi hijau tanpa `TEST_DATABASE_URL` **bukan** berarti test itu lulus — jalankan dengan `-v` kalau ingin melihat mana yang di-skip.
+Test membersihkan tabel master dan key Redis-nya sendiri (`refresh:*`, `login_throttle:*`), tapi **tidak** membuat skema Postgres-nya — migrasikan dulu. Di luar `internal/usecase` semuanya unit test murni dan tidak butuh database maupun Redis, jadi `go test ./...` tetap hijau di mesin tanpa keduanya. Test yang butuh database atau Redis melewatkan dirinya sendiri, jadi hijau tanpa `TEST_DATABASE_URL`/`TEST_REDIS_ADDR` **bukan** berarti test itu lulus — jalankan dengan `-v` kalau ingin melihat mana yang di-skip.
 
 ### Migrasi
 
@@ -1081,9 +1085,9 @@ curl -s http://127.0.0.1:3000/api/v1/supplier -H "Authorization: Bearer $TOKEN"
 **`JWT_SECRET` wajib diisi, minimal 32 karakter.** Server berhenti saat boot tanpa itu, dan `config.example.json` sengaja mengisinya dengan string kosong. Tidak ada default karena kunci default berarti kunci yang sama dipakai setiap deployment, dan siapa pun yang memegangnya bisa membuat token `SUPERADMIN` untuk user id mana pun. `docker compose` sudah memberi nilai dev supaya `up` langsung jalan; ganti lewat `.env`. Bangkitkan dengan `openssl rand -base64 48`.
 
 > [!IMPORTANT]
-> **Token tidak bisa dicabut.** Ini konsekuensi dari JWT stateless: tidak ada yang disimpan di server dan tidak ada lookup per request, jadi tidak ada apa pun yang bisa dibatalkan. Menonaktifkan user (`is_aktif: false`) atau mencabut rolenya **tidak** menyentuh token yang sudah keluar — aksesnya baru hilang saat token kedaluwarsa.
+> **Access token tidak bisa dicabut — itu tidak berubah sejak isu #24, hanya ukuran jendelanya.** Ini masih konsekuensi dari JWT stateless: tidak ada yang disimpan di server dan tidak ada lookup per request untuk memvalidasinya, jadi token itu sendiri tidak bisa dibatalkan. Yang berubah adalah **refresh token** — kredensial kedua, tersimpan di Redis, yang *bisa* dicabut langsung: lihat [Ganti password, logout, refresh, dan pencabutan sesi](#ganti-password-logout-refresh-dan-pencabutan-sesi-isu-24) di bawah.
 >
-> Umur token karena itu adalah satu-satunya batas jendela tersebut. Defaultnya 60 menit (`JWT_TTL_MINUTES`), dan memperpanjangnya berarti memperpanjang jendela itu. Kalau pencabutan seketika dibutuhkan, sesi harus pindah ke Redis — Redis sudah terhubung tapi belum dipakai.
+> Umur access token (`JWT_TTL_MINUTES`, sekarang defaultnya **15 menit**, turun dari 60) karena itu adalah jendela sisa setelah sebuah sesi dicabut — bukan lagi umur sesi itu sendiri. Kalau pencabutan seketika terhadap access token itu sendiri dibutuhkan, jawabannya tetap bukan blacklist Redis: itu mengembalikan lookup per request yang justru jadi alasan JWT dipilih sejak awal, dan keputusan itu ditegaskan lagi, bukan dibatalkan, oleh isu #24.
 
 Grant ikut di dalam token, jadi otorisasi tidak menyentuh database. Efek sampingnya: **grant yang diberikan atau dicabut baru berlaku pada login berikutnya** (atau lewat `switch-context`, lihat di bawah). Hanya grant *usable* yang masuk token — rolenya `is_aktif`, dan kalau grant-nya menyebut unit, unitnya juga `is_aktif` — jadi mempensiunkan role atau unit menghentikannya memberi izin pada login berikutnya meski penugasannya masih tercatat.
 
@@ -1118,6 +1122,42 @@ Bagian opsional dari fase 6 yang diminta dan dibangun; dua lainnya (`users.id_ru
 - **`penerimaan-susulan` dan `retur-pembelian` tidak punya `id_ruang` sendiri untuk diperiksa** — keduanya menyalin ruang dari `pembelian` induknya — tapi bacaannya tetap perlu tahu unit ruang itu, jadi query baca kedua modul ikut menyertakan `ruang.id_unit_kerja` lewat join yang sudah ada.
 - **`GET /product/{id}/stok` bukan `Get`, jadi tidak ada 404 untuk ruang yang di luar unit** — sama seperti `List`, baris ruangnya cuma dilewati.
 
+### Ganti password, logout, refresh, dan pencabutan sesi (isu #24)
+
+Empat hal yang sebelumnya tidak mungkin — kasir yang passwordnya bocor harus minta atasan menggantikannya lewat `PATCH /user/{id}`, tidak ada cara keluar dari sesi sendiri, dan tidak ada apa pun yang membuat pencabutan benar-benar terasa sebelum token kedaluwarsa. **Keputusan yang menyetirnya: access token tetap stateless dan tanpa lookup per request — itu tidak dibuka lagi. Yang dicabut adalah refresh token, bukan access token.**
+
+```bash
+# login: sekarang juga menerbitkan refresh_token
+LOGIN=$(curl -s -X POST http://127.0.0.1:3000/api/v1/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin12345"}')
+TOKEN=$(echo "$LOGIN" | jq -r .data.token)
+REFRESH=$(echo "$LOGIN" | jq -r .data.refresh_token)
+
+# ganti password sendiri — password_lama tetap wajib walau sudah terautentikasi
+curl -s -X POST http://127.0.0.1:3000/api/v1/auth/me/password \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"password_lama":"admin12345","password_baru":"password-yang-panjang-dan-acak"}'
+
+# tukar refresh token dengan sepasang token baru — yang lama langsung mati
+NEW=$(curl -s -X POST http://127.0.0.1:3000/api/v1/auth/refresh \
+  -H 'Content-Type: application/json' -d "{\"refresh_token\":\"$REFRESH\"}")
+
+# logout: cabut satu refresh token
+curl -s -X POST http://127.0.0.1:3000/api/v1/auth/logout \
+  -H 'Content-Type: application/json' -d "{\"refresh_token\":\"$(echo "$NEW" | jq -r .data.refresh_token)\"}"
+```
+
+- **`POST /api/v1/auth/me/password`** tidak berrole guard — tier yang sama dengan `auth/me` dan `switch-context`. Sesi tanpa konteks aktif tetap boleh memanggilnya. `password_lama` diverifikasi walau pemanggilnya sudah terautentikasi, supaya token yang dicuri tidak bisa mengunci pemiliknya keluar dari akunnya sendiri; salah menjawab pesan yang sama dengan login gagal, `username or password is wrong`, tidak dibedakan. Ini aksi yang berbeda dari `PATCH /user/{id}` milik `SUPERADMIN` — itu mereset password *orang lain* dan tidak minta `password_lama`, karena atasan memang tidak tahu password bawahannya.
+- **Refresh token adalah string acak buram (256 bit, base64url), bukan JWT kedua.** Itu bukan detail kosmetik: `middleware.Auth`/`Authenticate` hanya pernah mencoba mem-parse bearer token sebagai JWT, jadi sebuah refresh token yang disodorkan ke endpoint biasa gagal parse dan ditolak begitu saja — tidak ada pemeriksaan khusus yang perlu ditulis di mana pun untuk menegakkan "refresh token tidak boleh dipakai sebagai access token".
+- **Tersimpan di Redis lewat `RefreshTokenRepository`, dirotasi setiap dipakai.** `POST /api/v1/auth/refresh` menghapusnya secara atomik (`GETDEL`) sebelum menerbitkan pasangan baru — dipakai ulang, baik oleh balapan device lain maupun oleh penyerang yang mencegatnya, selalu bertemu token yang sudah tidak ada dan ditolak dengan pesan yang sama seperti yang sudah kedaluwarsa. Konteks aktifnya dibaca ulang ke database saat refresh, bukan dipercaya dari catatan tersimpan — grant yang sejak itu dicabut atau dipensiunkan membuat access token barunya terbit tanpa konteks aktif, persis seperti login dengan grant yang ambigu.
+- **`POST /api/v1/auth/logout`** menghapus satu refresh token. Baik yang masih hidup maupun yang sudah kedaluwarsa/terpakai, jawabannya sukses — keduanya sudah berada di keadaan yang memang dituju logout.
+- **Tiga pemicu mencabut *seluruh* refresh token seorang user sekaligus**, lewat `RevokeAllForUser`: ganti password (sendiri lewat endpoint di atas, atau lewat `PATCH /user/{id}` oleh `SUPERADMIN`), `is_aktif: false`, dan `grants: []` (mencabut seluruh grant). Efeknya baru terasa saat access token yang sudah terlanjur terbit kedaluwarsa — dengan `JWT_TTL_MINUTES=15`, paling lama 15 menit, bukan seketika. Angka itu ditulis terang-terangan, bukan disamarkan.
+- **`POST /auth/refresh` dan `POST /auth/logout` tidak butuh bearer token sama sekali** — keduanya ada justru untuk kasus access token-nya sudah kedaluwarsa, dan refresh token yang dikirim di body sudah menjadi kredensial yang cukup.
+- `switch-context` **tidak berubah bentuknya** oleh isu ini: ia tetap hanya menerbitkan access token baru, tidak pernah refresh token, dan tetap tidak bisa mencabut access token yang digantikannya.
+- **Pembatasan laju login menggantikan captcha (fase 4).** Lima kegagalan login dari pasangan `(ip, username)` yang sama dalam lima belas menit (`throttle.login.max_attempts`/`window_minutes`) membuat pasangan itu ditolak — **dengan pesan dan status yang identik dengan password salah biasa**, tidak dibedakan sama sekali, termasuk waktunya (perbandingan bcrypt dummy tetap dijalankan). Dihitung per pasangan, bukan per username saja, supaya satu penyerang tidak bisa mengunci akun orang lain hanya dengan menebak salah berkali-kali dari IP-nya sendiri — korban tetap bisa login dari IP-nya sendiri. Login yang berhasil mereset hitungannya. `captcha.ttl_seconds` tetap ada di config, sengaja tidak dipakai.
+- **Catatan jujur soal IP:** `ctx.IP()` dipakai apa adanya, tanpa daftar trusted proxy — di belakang reverse proxy, setiap request bisa terlihat berasal dari IP yang sama, dan pembatasan per pasangan melemah mendekati per username saja. Belum diatasi di sini.
+
 ### Superadmin pertama
 
 Karena `POST /api/v1/user` hanya untuk `SUPERADMIN`, tanpa user awal API terkunci dari dirinya sendiri. `db/seeder_postgres/004_superadmin.sql` memasangnya:
@@ -1126,10 +1166,10 @@ Karena `POST /api/v1/user` hanya untuk `SUPERADMIN`, tanpa user awal API terkunc
 |---|---|---|
 | `admin` | `admin12345` | `SUPERADMIN` |
 
-Passwordnya ada di repositori, jadi perlakukan sebagai kredensial sekali pakai. Setelah login pertama:
+Passwordnya ada di repositori, jadi perlakukan sebagai kredensial sekali pakai. Setelah login pertama, ganti sendiri lewat `POST /api/v1/auth/me/password` (lihat di atas) — sejak isu #24 tidak perlu lagi lewat `PATCH /user/{id}`, meski itu masih berfungsi:
 
 ```bash
-# ganti passwordnya
+# alternatif: reset lewat PATCH, seperti sebelum isu #24
 curl -X PATCH http://127.0.0.1:3000/api/v1/user/1 \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"password":"password-yang-panjang-dan-acak"}'
@@ -1271,6 +1311,9 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `POST` | `/api/v1/auth/login` | Tukar kredensial dengan token — satu-satunya `/api/v1` tanpa token |
 | `GET` | `/api/v1/auth/me` | Sesi yang sedang berlaku menurut token |
 | `POST` | `/api/v1/auth/switch-context` | Tukar token dengan yang beraksi sebagai satu grant tertentu — tanpa role guard |
+| `POST` | `/api/v1/auth/me/password` | Ganti password akun sendiri — tanpa role guard, `password_lama` tetap wajib (isu #24) |
+| `POST` | `/api/v1/auth/refresh` | Tukar refresh token dengan sepasang token baru — tanpa token (isu #24) |
+| `POST` | `/api/v1/auth/logout` | Cabut satu refresh token — tanpa token (isu #24) |
 | `POST` | `/api/v1/dokumen` | Unggah lampiran (`multipart/form-data`, field `berkas`); barisnya lahir yatim |
 | `GET` | `/api/v1/dokumen` | Lampiran satu dokumen (`ref_table` + `ref_id`), atau berkas yatim milik sendiri |
 | `GET` | `/api/v1/dokumen/{id}` | Unduh isinya — selalu `attachment`, tetap butuh token |
@@ -1461,6 +1504,7 @@ Sudah ada:
 - **Harga jual siap pakai** (isu #8): `GET /product/{id}/harga-jual` menjawab versi yang **berlaku** pada satu tanggal per satuan — sebuah `WHERE`, bukan "yang terbaru menang", karena `product_harga_jual_no_overlap` menjamin tidak pernah ada dua versi berlaku bersamaan; resolver batch (`FindHargaBerlakuBatch`) yang saat ditulis disiapkan untuk `penjualan`, dan sejak isu #10 memang dipakainya untuk memvalidasi `id_harga_jual` opsional di setiap baris nota; `PATCH`/`DELETE .../harga-jual/{id_harga}` mengoreksi atau menghapus satu versi, ditolak 409 begitu dipakai `penjualan_detail`, dan `DELETE`-nya **keras** — pengecualian ketiga setelah `user_role` dan `dokumen` — sekaligus selalu membuka kembali versi sebelumnya supaya tidak ada rentang tanggal tanpa harga; `GET /product/harga-jual` adalah daftar harga lintas produk lewat `LEFT JOIN`, supaya produk tanpa harga tetap kelihatan; pemotongan tanggal-dari-timestamp memakai WIB (`Asia/Jakarta`, offset tetap +7) sejak `tanggalHargaJual`, dipakai saat `tanggal` query param GET diabaikan — `penjualan.tanggal` sendiri sudah tanggal murni (`YYYY-MM-DD`) sehingga masuk ke resolver batch apa adanya, tanpa pemotongan zona waktu
 - **Bacaan atas `kartu_stok`** (isu #22): `GET /product/{id}/kartu-stok` — riwayat pergerakan satu barang di satu ruang, urut `id` naik, dengan `ref_table`+`ref_id_transaksi` diterjemahkan jadi `nomor_dokumen` lewat `CASE`, dan baris pembalik ditandai `id_kartu_stok_asal`; `GET /product/stok-minimum` — barang `is_aktif` dengan `total_stok <= stok_minimum` (bukan `<`), `stok_minimum = 0` tidak pernah muncul, terparah dulu; dan tiga laporan tanpa kolom baru — `GET /laporan/nilai-persediaan` (jumlah `nilai_akhir` per ruang, termasuk ruang pensiun), `GET /laporan/laba-kotor` (`SUM(total) - SUM(total_hpp)` nota `POSTED` per bulan, satu-satunya yang membaca dokumen bukan `kartu_stok`), dan `GET /laporan/pergerakan` (`stok_masuk`/`stok_keluar` per `(barang, ruang, jenis_transaksi)` dalam rentang tanggal — teruji secara eksplisit menempatkan pembalikan dokumen periode lama di periode pembatalannya, bukan periode dokumennya). Tidak ada migrasi sama sekali di isu ini, sesuai definition of done-nya
 - **Dua utang kecil di slice master dilunasi** (isu #23): `ruang` mendapat kolom jejak perubahan (migrasi `000026`) dan `PATCH /api/v1/ruang/{id}` — `kode`, `nama_ruang`, `is_aktif` saja, `id_unit_kerja` sengaja tidak ada di DTO-nya (lihat [Ruang: PATCH tanpa id_unit_kerja, dan dua penolakan saat mempensiunkan](#ruang-patch-tanpa-id_unit_kerja-dan-dua-penolakan-saat-mempensiunkan)), dan mempensiunkan ruang bersaldo atau ruang yang sedang dibekukan opname ditolak 409. `created_by`/`updated_by` kini terisi dari token di seluruh slice master — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `unit_kerja`, `role`, `user` (termasuk patch yang hanya mengganti grant), dan `ruang` — mengikuti pola `product_controller.go` yang sudah lama ada tapi belum dipakai slice lain
+- **Siklus hidup sesi** (isu #24): `POST /api/v1/auth/me/password` untuk ganti password sendiri, tanpa role guard, `password_lama` tetap diverifikasi walau pemanggilnya sudah terautentikasi; refresh token buram (bukan JWT) tersimpan di Redis lewat `RefreshTokenRepository`, dirotasi sekali pakai lewat `POST /api/v1/auth/refresh` (`GETDEL` atomik menutup celah dipakai ulang), dan dicabut lewat `POST /api/v1/auth/logout`; tiga pemicu pencabutan — ganti password (sendiri maupun `PATCH /user/{id}` oleh `SUPERADMIN`), `is_aktif: false`, dan seluruh grant dicabut — menghapus semua refresh token user itu lewat `RevokeAllForUser`; `jwt.ttl_minutes` turun dari 60 ke 15 karena itulah sekarang jendela sisa satu-satunya setelah sesi dicabut, bukan umur sesi itu sendiri; dan pembatasan laju login per `(ip, username)` di Redis (`throttle.login.*`) menggantikan captcha — jawabannya identik dengan password salah biasa, tanpa membedakan diri
 - Delapan modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `unit_kerja`, `role`, `user`, dan — sejak isu #23 — `ruang`, semuanya create/get/list/patch
 - User dengan banyak grant (role + unit_kerja opsional), `grants` yang mengganti seluruh himpunan dalam satu transaksi dengan diff `NULL`-safe, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
@@ -1471,9 +1515,7 @@ Sudah ada:
 
 Belum ada:
 
-- **Pencabutan sesi.** Token stateless tidak bisa dicabut sebelum kedaluwarsa
-- **Logout dan refresh token**
-- Captcha (Redis sudah terhubung tapi belum dipakai)
+- **Captcha.** Isu #24 fase 4 memutuskan ini secara sadar, bukan menundanya: pembatasan laju per `(ip, username)` di Redis dipilih sebagai gantinya — lihat [Autentikasi](#autentikasi). `captcha.ttl_seconds` tetap ada di config, tidak dipakai satu baris pun, kalau keputusannya suatu saat dibalik
 - Lapisan Go untuk retur penjualan. `retur_penjualan` menunjuk baris `penjualan_detail` yang baru ada sejak `penjualan` (isu #10) jadi, sehingga wajib dikerjakan sesudahnya — dan sekarang satu-satunya potongan sisi piutang yang belum dikerjakan, setelah `penerimaan_pembayaran` (isu #20)
 - **Penyimpanan lampiran di object storage.** Yang berjalan disk lokal di balik `repository.DokumenStorage`, jadi `web` belum bisa discale lebih dari satu instance
 - Validasi tingkat aplikasi yang tersisa di sisi penjualan — **plafon kredit** (isu #10 fase 2), **batas alokasi penerimaan pembayaran, larangan alokasi ke dokumen batal, dan `penjualan.status_pembayaran` penuh** (isu #20) semuanya sudah ditegakkan. Yang tersisa tinggal kuota retur penjualan, begitu modul itu dibangun. Didaftar lengkap di CLAUDE.md

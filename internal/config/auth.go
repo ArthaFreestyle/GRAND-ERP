@@ -15,9 +15,10 @@ const minSecretLength = 32
 
 // AuthConfig carries the token settings, validated once at boot.
 type AuthConfig struct {
-	Secret string
-	TTL    time.Duration
-	Issuer string
+	Secret     string
+	TTL        time.Duration
+	RefreshTTL time.Duration
+	Issuer     string
 }
 
 // NewAuthConfig reads and checks the JWT settings, failing at startup rather than at
@@ -49,9 +50,20 @@ func NewAuthConfig(cfg *viper.Viper, log *logrus.Logger) *AuthConfig {
 			Fatal("jwt.ttl_minutes must be greater than zero")
 	}
 
+	// The refresh token, not the access token, is now what actually bounds a
+	// session — isu #24. It lives in Redis and can be revoked outright
+	// (logout, password change, is_aktif = false, every grant revoked); TTL
+	// here only bounds how long an untouched one survives.
+	refreshTTL := time.Duration(cfg.GetInt("jwt.refresh_ttl_minutes")) * time.Minute
+	if refreshTTL <= 0 {
+		log.WithField("jwt.refresh_ttl_minutes", cfg.GetInt("jwt.refresh_ttl_minutes")).
+			Fatal("jwt.refresh_ttl_minutes must be greater than zero")
+	}
+
 	return &AuthConfig{
-		Secret: secret,
-		TTL:    ttl,
-		Issuer: cfg.GetString("jwt.issuer"),
+		Secret:     secret,
+		TTL:        ttl,
+		RefreshTTL: refreshTTL,
+		Issuer:     cfg.GetString("jwt.issuer"),
 	}
 }

@@ -2,9 +2,12 @@ package usecase
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"Arthafreestyle/ERP/internal/entity"
@@ -21,27 +24,37 @@ import (
 // AuthUseCase issues and verifies bearer tokens. It holds the signing key, so it is
 // the only place that can mint a session.
 //
-// The tokens are stateless JWTs: nothing is stored server-side and no lookup happens
-// per request. The cost of that is stated plainly because it is a real limitation,
-// not a detail — a session cannot be revoked. Setting is_aktif = false on a user, or
-// taking away a role, does not reach a token that is already out. TTL is the only
-// bound on it, which is why jwt.ttl_minutes defaults to 60 rather than to days.
+// The access tokens are stateless JWTs: nothing about THEM is stored server-side and
+// no lookup happens per request to validate one. That half is unchanged and is not
+// reopened by isu #24 — Authenticate still costs nothing but a signature check. What
+// isu #24 adds is a second, deliberately stateful credential: the refresh token,
+// stored in Redis via RefreshTokenRepository, which is what can actually be revoked
+// (logout, password change, is_aktif = false, every grant revoked). An access token
+// itself still cannot be revoked — TTL is the only bound on it, which is why
+// jwt.ttl_minutes shrank from 60 to 15: that is now the entire residual window after
+// a session is revoked, not the session's whole lifetime.
 //
-// Switching active context (isu #12 fase 4) mints a brand new token; it does not and
-// cannot revoke the old one either — the same limitation, stated again at
-// SwitchContext because it is easy to assume otherwise there specifically.
+// Switching active context (isu #12 fase 4) mints a brand new access token and, on
+// purpose, no refresh token — SwitchContext's shape is unchanged by isu #24. It still
+// cannot revoke the access token it replaces either, the same limitation, stated
+// again there because it is easy to assume otherwise specifically at that call site.
 //
 // It imports jwt but not Fiber: the middleware in the delivery layer calls
 // Authenticate and receives a *model.Session, so HTTP stays on the far side.
 type AuthUseCase struct {
-	DB             *sql.DB
-	Log            *logrus.Logger
-	Validate       *validator.Validate
-	UserRepository *repository.UserRepository
+	DB                      *sql.DB
+	Log                     *logrus.Logger
+	Validate                *validator.Validate
+	UserRepository          *repository.UserRepository
+	RefreshTokenRepository  *repository.RefreshTokenRepository
+	LoginThrottleRepository *repository.LoginThrottleRepository
 
-	secret []byte
-	ttl    time.Duration
-	issuer string
+	secret         []byte
+	ttl            time.Duration
+	refreshTTL     time.Duration
+	issuer         string
+	maxAttempts    int
+	throttleWindow time.Duration
 }
 
 func NewAuthUseCase(
@@ -49,18 +62,28 @@ func NewAuthUseCase(
 	log *logrus.Logger,
 	validate *validator.Validate,
 	userRepository *repository.UserRepository,
+	refreshTokenRepository *repository.RefreshTokenRepository,
+	loginThrottleRepository *repository.LoginThrottleRepository,
 	secret string,
 	ttl time.Duration,
+	refreshTTL time.Duration,
 	issuer string,
+	maxAttempts int,
+	throttleWindow time.Duration,
 ) *AuthUseCase {
 	return &AuthUseCase{
-		DB:             db,
-		Log:            log,
-		Validate:       validate,
-		UserRepository: userRepository,
-		secret:         []byte(secret),
-		ttl:            ttl,
-		issuer:         issuer,
+		DB:                      db,
+		Log:                     log,
+		Validate:                validate,
+		UserRepository:          userRepository,
+		RefreshTokenRepository:  refreshTokenRepository,
+		LoginThrottleRepository: loginThrottleRepository,
+		secret:                  []byte(secret),
+		ttl:                     ttl,
+		refreshTTL:              refreshTTL,
+		issuer:                  issuer,
+		maxAttempts:             maxAttempts,
+		throttleWindow:          throttleWindow,
 	}
 }
 
@@ -84,9 +107,12 @@ type claims struct {
 
 // Login verifies a password and returns a token.
 //
-// Every failure answers the same "username or password is wrong". Distinguishing
-// "no such user" from "wrong password" hands an attacker a way to enumerate valid
-// usernames, and the operator gains nothing from the difference.
+// Every failure answers the same "username or password is wrong" — unknown
+// username, wrong password, disabled account, and now (isu #24 fase 4) a
+// throttled (ip, username) pair too. Distinguishing any of them hands an
+// attacker either a way to enumerate valid usernames or a way to tell
+// "you're being rate-limited" from "you typed it wrong", and the operator
+// gains nothing from any of those differences.
 //
 // A caller holding more than one usable grant gets a token with no active
 // context (isu #12 fase 4): with grants now bound to a place, there is no
@@ -94,9 +120,29 @@ type claims struct {
 // realize they had picked, so the token can only reach switch-context and
 // auth/me until one is chosen. Holding exactly one grant has no such ambiguity
 // and is selected automatically.
-func (c *AuthUseCase) Login(ctx context.Context, request *model.LoginRequest) (*model.LoginResponse, error) {
+//
+// ip is the caller's address as Fiber's own ctx.IP() reports it — no
+// trusted-proxy list is configured anywhere in this codebase, so behind a
+// reverse proxy every request can present the same address and the per-pair
+// throttle degrades toward per-username. Documented, not solved here.
+func (c *AuthUseCase) Login(ctx context.Context, ip string, request *model.LoginRequest) (*model.LoginResponse, error) {
 	if err := c.Validate.Struct(request); err != nil {
 		return nil, err
+	}
+
+	key := loginThrottleKey(ip, request.Username)
+
+	throttled, err := c.isThrottled(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if throttled {
+		// Same timing shape as the unknown-username branch below: a real
+		// bcrypt comparison, so a throttled reply costs the same wall-clock
+		// time as a wrong-password one.
+		bcryptDummyCompare()
+
+		return nil, model.Unauthorized("username or password is wrong")
 	}
 
 	user, err := c.UserRepository.FindByUsernameWithPassword(ctx, c.DB, request.Username)
@@ -106,6 +152,7 @@ func (c *AuthUseCase) Login(ctx context.Context, request *model.LoginRequest) (*
 			// unknown username measurably faster to reject than a wrong password,
 			// which leaks exactly what the identical message is hiding.
 			bcryptDummyCompare()
+			c.recordLoginFailure(ctx, key)
 
 			return nil, model.Unauthorized("username or password is wrong")
 		}
@@ -114,13 +161,23 @@ func (c *AuthUseCase) Login(ctx context.Context, request *model.LoginRequest) (*
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(request.Password)); err != nil {
+		c.recordLoginFailure(ctx, key)
+
 		return nil, model.Unauthorized("username or password is wrong")
 	}
 
 	// Checked after the password, deliberately: answering "account disabled" to
 	// anyone who names a disabled user tells them the account exists.
 	if !user.IsAktif {
+		c.recordLoginFailure(ctx, key)
+
 		return nil, model.Unauthorized("username or password is wrong")
+	}
+
+	// A legitimate caller who eventually gets it right should not go on
+	// paying for earlier typos.
+	if err := c.LoginThrottleRepository.Reset(ctx, key); err != nil {
+		c.Log.WithError(err).Warn("gagal mereset penghitung login throttle")
 	}
 
 	if err := c.attachRolesForLogin(ctx, user); err != nil {
@@ -139,14 +196,53 @@ func (c *AuthUseCase) Login(ctx context.Context, request *model.LoginRequest) (*
 		return nil, err
 	}
 
+	refreshToken, err := c.issueRefresh(ctx, user.ID, idUserRoleOf(modelAktif))
+	if err != nil {
+		return nil, err
+	}
+
 	return &model.LoginResponse{
-		Token:     token,
-		TokenType: "Bearer",
-		ExpiresAt: expiresAt,
-		User:      converter.UserToResponse(user),
-		Grants:    toGrantList(user.Roles),
-		Aktif:     modelAktif,
+		Token:        token,
+		TokenType:    "Bearer",
+		ExpiresAt:    expiresAt,
+		RefreshToken: refreshToken,
+		User:         converter.UserToResponse(user),
+		Grants:       toGrantList(user.Roles),
+		Aktif:        modelAktif,
 	}, nil
+}
+
+// isThrottled reports whether key has already reached the attempt ceiling. It
+// only reads — recordLoginFailure is what actually advances the count, and
+// only on a genuine failure, never on a throttled attempt itself (that would
+// let a caller extend their own lockout indefinitely just by retrying, which
+// is a self-inflicted denial of service dressed up as a security feature).
+func (c *AuthUseCase) isThrottled(ctx context.Context, key string) (bool, error) {
+	count, err := c.LoginThrottleRepository.Peek(ctx, key)
+	if err != nil {
+		return false, err
+	}
+
+	return count >= int64(c.maxAttempts), nil
+}
+
+// recordLoginFailure advances the throttle counter. Errors are logged, not
+// returned: a Redis hiccup must not turn into a 500 on top of an ordinary
+// wrong-password response, and losing one increment only costs the caller one
+// extra attempt before the ceiling bites.
+func (c *AuthUseCase) recordLoginFailure(ctx context.Context, key string) {
+	if _, err := c.LoginThrottleRepository.Increment(ctx, key, c.throttleWindow); err != nil {
+		c.Log.WithError(err).Warn("gagal mencatat kegagalan login untuk throttle")
+	}
+}
+
+// loginThrottleKey pairs ip and username (case-insensitively, mirroring every
+// other username comparison in this codebase) — isu #24 fase 4's explicit
+// requirement that the limit is computed per pair, not per username alone, so
+// one attacker spamming one victim's username cannot lock that victim out
+// from their own, different, IP.
+func loginThrottleKey(ip, username string) string {
+	return fmt.Sprintf("login_throttle:%s:%s", ip, strings.ToLower(username))
 }
 
 // SwitchContext issues a new token whose active context is the named grant —
@@ -309,6 +405,200 @@ func (c *AuthUseCase) issue(user *entity.User, aktif *model.ActiveContext) (stri
 	}
 
 	return signed, expiresAt, nil
+}
+
+// issueRefresh mints and stores a new refresh token for userID, remembering
+// idUserRole (the access token's active grant, if any) so Refresh can later
+// reissue an access token that carries the same active context forward —
+// isu #24 fase 2. Never called by SwitchContext, which mints an access token
+// only, unchanged from before this issue.
+func (c *AuthUseCase) issueRefresh(ctx context.Context, userID int64, idUserRole *int64) (string, error) {
+	token, err := randomToken()
+	if err != nil {
+		return "", fmt.Errorf("generate refresh token: %w", err)
+	}
+
+	record := repository.RefreshRecord{UserID: userID, IDUserRole: idUserRole}
+	if err := c.RefreshTokenRepository.Store(ctx, token, record, c.refreshTTL); err != nil {
+		return "", err
+	}
+
+	return token, nil
+}
+
+// idUserRoleOf extracts the active grant's own id out of an ActiveContext, or
+// nil when there is none — the shape issueRefresh stores and Refresh later
+// re-resolves through FindGrantByID + grantUsableBy, the same re-check
+// SwitchContext already performs against the database rather than trusting a
+// stale claim.
+func idUserRoleOf(aktif *model.ActiveContext) *int64 {
+	if aktif == nil {
+		return nil
+	}
+
+	id := aktif.IDUserRole
+
+	return &id
+}
+
+// randomToken generates an opaque, unguessable refresh token — 256 bits from
+// crypto/rand, base64url-encoded. It is deliberately not a JWT: Authenticate
+// only ever tries to parse a bearer token as one, so a refresh token handed
+// to a protected route fails to parse and is rejected the same way any
+// garbage string would be — no special-casing needed anywhere to keep a
+// refresh token out of routes that expect an access token.
+func randomToken() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+
+	return base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+// ChangePassword is POST /api/v1/auth/me/password — isu #24 fase 1. userID
+// comes from the caller's own session (the same way SwitchContext takes it as
+// a parameter rather than a body field): this endpoint can only ever change
+// the caller's own password, never anyone else's.
+//
+// PasswordLama is verified even though the caller already holds a valid
+// session, and a wrong one answers the identical "username or password is
+// wrong" used everywhere else in this module — a stolen access token must not
+// be able to lock the real account holder out by changing the password out
+// from under them, and the rejection must not read any differently than an
+// ordinary login failure.
+func (c *AuthUseCase) ChangePassword(ctx context.Context, userID int64, request *model.ChangePasswordRequest) (*model.UserResponse, error) {
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, err
+	}
+
+	user, err := c.UserRepository.FindByIDWithPassword(ctx, c.DB, userID)
+	if err != nil {
+		return nil, notFoundOnNoRows(err, "user not found")
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(request.PasswordLama)); err != nil {
+		return nil, model.Unauthorized("username or password is wrong")
+	}
+
+	hash, err := hashPassword(request.PasswordBaru)
+	if err != nil {
+		return nil, err
+	}
+
+	updated, err := c.UserRepository.Update(ctx, c.DB, userID, repository.UserPatch{
+		Password:     &hash,
+		SetUpdatedBy: true,
+		UpdatedBy:    &userID,
+	})
+	if err != nil {
+		return nil, notFoundOnNoRows(err, "user not found")
+	}
+
+	// isu #24 fase 3: a password change revokes every refresh token the user
+	// holds. Best-effort — the password write already committed, so a Redis
+	// failure here must not turn a successful change into an error response;
+	// it only means the (already ≤15-minute-bounded) residual access window
+	// does not shrink to zero immediately.
+	if err := c.RefreshTokenRepository.RevokeAllForUser(ctx, userID); err != nil {
+		c.Log.WithError(err).WithField("user_id", userID).
+			Warn("gagal mencabut refresh token setelah ganti password")
+	}
+
+	return converter.UserToResponse(updated), nil
+}
+
+// Refresh exchanges a refresh token for a brand new access/refresh pair —
+// isu #24 fase 2. The old refresh token is consumed (deleted) atomically
+// before anything else happens, so it can never be presented again: a
+// concurrent replay of the same token, whether from a legitimate second
+// device racing a rotation or an attacker who intercepted it, meets
+// ErrRefreshTokenNotFound and is refused.
+//
+// The active context carried by the old token is re-resolved against the
+// database, not trusted from the stored record — the same reasoning
+// SwitchContext already applies: a grant revoked or retired since the token
+// was issued must not survive a refresh. If it is no longer usable, the new
+// access token simply has no active context, same as a fresh Login would
+// produce, and the caller must switch-context again.
+func (c *AuthUseCase) Refresh(ctx context.Context, request *model.RefreshTokenRequest) (*model.LoginResponse, error) {
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, err
+	}
+
+	const invalidMessage = "refresh token tidak valid atau sudah kedaluwarsa"
+
+	record, err := c.RefreshTokenRepository.Consume(ctx, request.RefreshToken)
+	if err != nil {
+		if errors.Is(err, repository.ErrRefreshTokenNotFound) {
+			return nil, model.Unauthorized(invalidMessage)
+		}
+
+		return nil, err
+	}
+
+	user, err := c.UserRepository.FindByID(ctx, c.DB, record.UserID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, model.Unauthorized(invalidMessage)
+		}
+
+		return nil, err
+	}
+
+	if !user.IsAktif {
+		return nil, model.Unauthorized(invalidMessage)
+	}
+
+	if err := c.attachRolesForLogin(ctx, user); err != nil {
+		return nil, err
+	}
+
+	var modelAktif *model.ActiveContext
+	if record.IDUserRole != nil {
+		assignment, err := c.UserRepository.FindGrantByID(ctx, c.DB, *record.IDUserRole)
+		if err == nil && grantUsableBy(assignment, user.ID) {
+			modelAktif = toActiveContext(&assignment.RoleGrant)
+		} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
+		// Any other outcome — unknown grant, or one no longer usable — leaves
+		// modelAktif nil, the same "not chosen yet" shape Login already
+		// produces for an ambiguous set of grants.
+	}
+
+	token, expiresAt, err := c.issue(user, modelAktif)
+	if err != nil {
+		return nil, err
+	}
+
+	refreshToken, err := c.issueRefresh(ctx, user.ID, idUserRoleOf(modelAktif))
+	if err != nil {
+		return nil, err
+	}
+
+	return &model.LoginResponse{
+		Token:        token,
+		TokenType:    "Bearer",
+		ExpiresAt:    expiresAt,
+		RefreshToken: refreshToken,
+		User:         converter.UserToResponse(user),
+		Grants:       toGrantList(user.Roles),
+		Aktif:        modelAktif,
+	}, nil
+}
+
+// Logout revokes one refresh token — isu #24 fase 2. It answers success
+// whether or not the token was still live: an already-expired or
+// already-used token reaching logout has already achieved what logout wants,
+// and treating that as an error would give a caller a way to probe whether a
+// token value was ever valid.
+func (c *AuthUseCase) Logout(ctx context.Context, request *model.LogoutRequest) error {
+	if err := c.Validate.Struct(request); err != nil {
+		return err
+	}
+
+	return c.RefreshTokenRepository.Delete(ctx, request.RefreshToken)
 }
 
 // attachRolesForLogin loads the grants that go into the token.

@@ -241,15 +241,32 @@ func Bootstrap(config *BootstrapConfig) {
 	// Fails the process at boot when jwt.secret is missing or too short, rather than
 	// at the first login attempt.
 	authConfig := NewAuthConfig(config.Config, config.Log)
+	// throttleConfig is isu #24 fase 4 (rate limiting instead of captcha); it
+	// Fatals the same way authConfig does on a non-positive setting, since a
+	// zero max_attempts would lock out every caller immediately.
+	throttleConfig := NewLoginThrottleConfig(config.Config, config.Log)
+	// refreshTokenRepository and loginThrottleRepository are Redis-backed —
+	// isu #24 is what finally gives the client wired since the very first
+	// commit an actual job. Both are shared between AuthUseCase (refresh
+	// tokens: issued, rotated, revoked) and UserUseCase (refresh tokens only:
+	// revoked on password reset, deactivation, or every grant being pulled).
+	refreshTokenRepository := repository.NewRefreshTokenRepository(config.Redis)
+	loginThrottleRepository := repository.NewLoginThrottleRepository(config.Redis)
 	authUseCase := usecase.NewAuthUseCase(
 		config.DB, config.Log, config.Validate, userRepository,
-		authConfig.Secret, authConfig.TTL, authConfig.Issuer,
+		refreshTokenRepository, loginThrottleRepository,
+		authConfig.Secret, authConfig.TTL, authConfig.RefreshTTL, authConfig.Issuer,
+		throttleConfig.MaxAttempts, throttleConfig.Window,
 	)
-	// UserUseCase takes all three repositories: granting a role at a unit_kerja
-	// has to verify both the role and the unit exist and are active, and that
-	// SQL belongs to each one's own repository (isu #12 fase 3).
+	// UserUseCase takes all three master-data repositories: granting a role at
+	// a unit_kerja has to verify both the role and the unit exist and are
+	// active, and that SQL belongs to each one's own repository (isu #12 fase
+	// 3). RefreshTokenRepository is isu #24 fase 3: a password reset,
+	// deactivation, or full grant revocation through PATCH /user/{id} all end
+	// that user's live sessions the same way AuthUseCase.ChangePassword does.
 	userUseCase := usecase.NewUserUseCase(
 		config.DB, config.Log, config.Validate, userRepository, roleRepository, unitKerjaRepository,
+		refreshTokenRepository,
 	)
 
 	ruangController := deliveryhttp.NewRuangController(config.Log, ruangUseCase)
