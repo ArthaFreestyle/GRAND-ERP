@@ -2,8 +2,9 @@
 // repository, and usecase layers as cmd/web; only the trigger differs — a schedule
 // instead of an HTTP request.
 //
-// One job is registered: sweeping up uploaded files that were never attached to a
-// document. See internal/config/worker.go.
+// Two jobs are registered: sweeping up uploaded files that were never attached to
+// a document, and reconciling the kartu_stok balance chain (isu #25) — reporting a
+// discrepancy, never repairing one. See internal/config/worker.go.
 package main
 
 import (

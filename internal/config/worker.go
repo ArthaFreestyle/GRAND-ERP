@@ -139,6 +139,11 @@ func BootstrapWorker(config *WorkerBootstrapConfig) *Scheduler {
 		dokumenConfig.MaxUkuranByte, dokumenConfig.OrphanTTL,
 	)
 
+	rekonsiliasiConfig := NewRekonsiliasiConfig(config.Config, config.Log)
+	rekonsiliasiUseCase := usecase.NewRekonsiliasiUseCase(
+		config.DB, config.Log, repository.NewKartuStokRepository(),
+	)
+
 	return &Scheduler{
 		Log: config.Log,
 		Jobs: []Job{
@@ -146,6 +151,14 @@ func BootstrapWorker(config *WorkerBootstrapConfig) *Scheduler {
 				Nama:     "pembersihan-dokumen-yatim",
 				Interval: dokumenConfig.CleanupInterval,
 				Jalankan: dokumenUseCase.BersihkanYatim,
+			},
+			// isu #25: the second job cmd/worker has ever had, still on the same
+			// time.Ticker Scheduler already provides — daily, same as the sweep
+			// above, so nothing about its timing needs robfig/cron either.
+			{
+				Nama:     "rekonsiliasi-rantai-kartu-stok",
+				Interval: rekonsiliasiConfig.Interval,
+				Jalankan: rekonsiliasiUseCase.PeriksaRantaiSaldo,
 			},
 		},
 	}

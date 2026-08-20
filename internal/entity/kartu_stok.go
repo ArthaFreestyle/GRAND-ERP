@@ -127,6 +127,19 @@ type KartuStok struct {
 	CreatedAt time.Time
 }
 
+// SelisihRantaiKartuStok is one balance chain — one (id_barang, id_ruang) partition
+// — where KartuStokRepository.PeriksaRantai found the stored row disagreeing with
+// what the trigger should have computed from the row before it. ID is the earliest
+// row in the partition where that happens, not every row after it: once one row is
+// wrong, everything the trigger built on top of it inherits the error, and naming
+// only the first is what makes the log line enough to go straight to the row that
+// actually needs looking at.
+type SelisihRantaiKartuStok struct {
+	IDBarang int64
+	IDRuang  int64
+	ID       int64
+}
+
 // SaldoRuangBaris is one product's tail of the balance chain in one room —
 // KartuStokRepository.SaldoRuang's row shape, and stok_opname's TarikSaldo (isu
 // #15) is its only caller. IDKartuStok is what fills stok_opname_detail's

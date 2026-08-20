@@ -44,6 +44,9 @@
     "orphan_ttl_hours": 24,
     "cleanup_interval": "24h"
   },
+  "rekonsiliasi": {
+    "interval": "24h"
+  },
   "jwt": {
     "secret": "",
     "ttl_minutes": 15,
