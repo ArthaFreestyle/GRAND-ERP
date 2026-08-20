@@ -70,6 +70,11 @@ func NewViper() *viper.Viper {
 	cfg.SetDefault("dokumen.orphan_ttl_hours", 24)
 	cfg.SetDefault("dokumen.cleanup_interval", "24h")
 
+	// kartu_stok balance-chain reconciliation (isu #25). Daily, same as the
+	// document sweep: while the table is small a full walk every day is the
+	// honest answer, and there is no partial-scan mode yet to default instead.
+	cfg.SetDefault("rekonsiliasi.interval", "24h")
+
 	if err := cfg.ReadInConfig(); err != nil {
 		panic(fmt.Errorf("config: cannot read config.json: %w", err))
 	}

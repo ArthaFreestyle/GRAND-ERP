@@ -90,28 +90,29 @@ func TestMain(m *testing.M) {
 
 // app carries the usecases under test.
 type app struct {
-	satuan     *usecase.SatuanUseCase
-	ekspedisi  *usecase.EkspedisiUseCase
-	supplier   *usecase.SupplierUseCase
-	pelanggan  *usecase.PelangganUseCase
-	ruang      *usecase.RuangUseCase
-	unitKerja  *usecase.UnitKerjaUseCase
-	role       *usecase.RoleUseCase
-	product    *usecase.ProductUseCase
-	user       *usecase.UserUseCase
-	pembelian  *usecase.PembelianUseCase
-	susulan    *usecase.PenerimaanSusulanUseCase
-	retur      *usecase.ReturPembelianUseCase
-	mutasi     *usecase.MutasiUseCase
-	pemakaian  *usecase.PemakaianUseCase
-	penjualan  *usecase.PenjualanUseCase
-	pembayaran *usecase.PembayaranUtangUseCase
-	penerimaan *usecase.PenerimaanPembayaranUseCase
-	stokOpname *usecase.StokOpnameUseCase
-	laporan    *usecase.LaporanUseCase
-	dokumen    *usecase.DokumenUseCase
-	periode    *usecase.PeriodeUseCase
-	auth       *usecase.AuthUseCase
+	satuan       *usecase.SatuanUseCase
+	ekspedisi    *usecase.EkspedisiUseCase
+	supplier     *usecase.SupplierUseCase
+	pelanggan    *usecase.PelangganUseCase
+	ruang        *usecase.RuangUseCase
+	unitKerja    *usecase.UnitKerjaUseCase
+	role         *usecase.RoleUseCase
+	product      *usecase.ProductUseCase
+	user         *usecase.UserUseCase
+	pembelian    *usecase.PembelianUseCase
+	susulan      *usecase.PenerimaanSusulanUseCase
+	retur        *usecase.ReturPembelianUseCase
+	mutasi       *usecase.MutasiUseCase
+	pemakaian    *usecase.PemakaianUseCase
+	penjualan    *usecase.PenjualanUseCase
+	pembayaran   *usecase.PembayaranUtangUseCase
+	penerimaan   *usecase.PenerimaanPembayaranUseCase
+	stokOpname   *usecase.StokOpnameUseCase
+	laporan      *usecase.LaporanUseCase
+	dokumen      *usecase.DokumenUseCase
+	rekonsiliasi *usecase.RekonsiliasiUseCase
+	periode      *usecase.PeriodeUseCase
+	auth         *usecase.AuthUseCase
 	// dokumenDir is where this test's attachments land, so a test can check that a
 	// file really was written — or really was removed — rather than trusting the row.
 	dokumenDir string
@@ -180,6 +181,9 @@ func newApp(t *testing.T) *app {
 		dokumen: usecase.NewDokumenUseCase(
 			testDB, log, validate, repository.NewDokumenRepository(), dokumenStorage,
 			testMaxUkuranDokumen, testOrphanTTL,
+		),
+		rekonsiliasi: usecase.NewRekonsiliasiUseCase(
+			testDB, log, kartuStokRepository,
 		),
 		satuan: usecase.NewSatuanUseCase(
 			testDB, log, validate, repository.NewSatuanRepository(),

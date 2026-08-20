@@ -218,6 +218,10 @@ services:
       DOKUMEN_STORAGE_PATH: /app/data/dokumen
       DOKUMEN_ORPHAN_TTL_HOURS: ${DOKUMEN_ORPHAN_TTL_HOURS:-24}
       DOKUMEN_CLEANUP_INTERVAL: ${DOKUMEN_CLEANUP_INTERVAL:-24h}
+      # isu #25: kartu_stok's balance-chain reconciliation. Worker-only, so unlike
+      # DOKUMEN_STORAGE_PATH this key has no reason to exist in web's block above —
+      # web never runs this job.
+      REKONSILIASI_INTERVAL: ${REKONSILIASI_INTERVAL:-24h}
     volumes:
       - dokumen-data:/app/data/dokumen
 

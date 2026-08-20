@@ -17,6 +17,12 @@ import (
 // new reversing row pointing at the original through id_kartu_stok_asal.
 type KartuStokRepository struct{}
 
+// lockRekonsiliasi keys the reconciliation job's session-level advisory lock — isu
+// #25. Must differ from lockPembersihanDokumen (dokumen_repository.go); the two
+// jobs share pg_advisory_lock's one namespace and picking the same number would
+// serialise two unrelated sweeps against each other for no reason.
+const lockRekonsiliasi int64 = 25_102_501
+
 func NewKartuStokRepository() *KartuStokRepository {
 	return &KartuStokRepository{}
 }
@@ -831,6 +837,162 @@ func (r *KartuStokRepository) Pergerakan(
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate pergerakan: %w", err)
+	}
+
+	return list, nil
+}
+
+// TryLockRekonsiliasi takes the balance-chain reconciliation job's advisory lock
+// and reports whether it got it — isu #25, the mirror of TryLockPembersihan. A
+// false is not a failure: another worker is already reconciling, and this run has
+// nothing to do.
+//
+// Session-level, not transaction-level, for the same reason as the document sweep:
+// db must be a single connection (a *sql.Conn), because releasing it from a
+// different pooled connection would silently do nothing.
+func (r *KartuStokRepository) TryLockRekonsiliasi(ctx context.Context, db DBTX) (bool, error) {
+	var locked bool
+	if err := db.QueryRowContext(
+		ctx, `SELECT pg_try_advisory_lock($1)`, lockRekonsiliasi,
+	).Scan(&locked); err != nil {
+		return false, fmt.Errorf("lock rekonsiliasi kartu_stok: %w", err)
+	}
+
+	return locked, nil
+}
+
+// UnlockRekonsiliasi releases the lock TryLockRekonsiliasi took. Must run on the
+// same connection.
+func (r *KartuStokRepository) UnlockRekonsiliasi(ctx context.Context, db DBTX) error {
+	if _, err := db.ExecContext(
+		ctx, `SELECT pg_advisory_unlock($1)`, lockRekonsiliasi,
+	); err != nil {
+		return fmt.Errorf("unlock rekonsiliasi kartu_stok: %w", err)
+	}
+
+	return nil
+}
+
+// PeriksaRantai walks every (id_barang, id_ruang) balance chain and reports the
+// ones where a stored row disagrees with what kartu_stok_hitung_saldo should have
+// computed from the row before it — isu #25. Read-only: it takes no lock the
+// posting path waits on, and it never writes a correction (see CLAUDE.md, "Kenapa
+// 'melapor, tidak pernah memperbaiki'" — the only honest fix for a broken chain is
+// a new stok_opname, never a rewrite here).
+//
+// One SQL statement, not a page-by-page walk in Go. That is not only cheaper than
+// pulling millions of rows across the wire — it is what makes the "rows written
+// while the job runs" trap impossible rather than merely rare: a single statement
+// executes against one MVCC snapshot, so the batas CTE's MAX(id) and every row the
+// window function reads afterward agree on exactly the same cutoff, and nothing
+// committed after the statement started can appear as a disconnected tail in a
+// partition already walked. batas is still named explicitly, in its own CTE,
+// because that guarantee should be legible to whoever reads this query next, not
+// merely true by accident of today's implementation being one statement.
+//
+// Every arithmetic step mirrors kartu_stok_hitung_saldo (migration 000023) exactly
+// — same COALESCE-to-zero for a partition's first row, same branch on stok_masuk >
+// 0, same ROUND(..., 4) for harga_pokok_satuan and ROUND(..., 2) for nilai_keluar,
+// same zeroing of nilai_akhir when stok_akhir is zero. Doing the comparison in SQL
+// against the NUMERIC columns directly, rather than pulling them into Go, is what
+// keeps a float64 out of the whole calculation: two independent roundings of the
+// same NUMERIC by two different rules is exactly the kind of one-cent drift that
+// would bury a real corruption, and PostgreSQL's own ROUND compared against
+// PostgreSQL's own ROUND cannot disagree with itself.
+//
+// Only the row immediately before a given row is ever consulted (via LAG, reading
+// what is actually stored there) — never a value recomputed from further back in
+// the chain. That is deliberate: it is exactly what the trigger itself does on
+// every insert (a plain "ORDER BY id DESC LIMIT 1" against whatever is already on
+// disk), so a single corrupted row is reported once, at the row where the stored
+// value first disagrees with its immediate predecessor — not again on every row
+// after it that the trigger correctly built on top of the bad one.
+//
+// Negative stok_akhir can never survive kartu_stok_stok_akhir_check today, so that
+// half of the comparison is currently unreachable — kept anyway because the guard
+// it backs is application logic in the trigger, not a table CHECK, and the issue
+// asks for it by name.
+func (r *KartuStokRepository) PeriksaRantai(ctx context.Context, db DBTX) ([]entity.SelisihRantaiKartuStok, error) {
+	const query = `
+		WITH batas AS (
+			SELECT COALESCE(MAX(id), 0) AS maks FROM kartu_stok
+		),
+		rantai AS (
+			SELECT
+				ks.id, ks.id_barang, ks.id_ruang,
+				ks.stok_awal, ks.stok_masuk, ks.stok_keluar, ks.stok_akhir,
+				ks.harga_pokok_satuan, ks.nilai_masuk, ks.nilai_keluar, ks.nilai_akhir,
+				LAG(ks.stok_akhir)          OVER w AS prev_stok_akhir,
+				LAG(ks.nilai_akhir)         OVER w AS prev_nilai_akhir,
+				LAG(ks.harga_pokok_satuan)  OVER w AS prev_hpp
+			FROM kartu_stok ks
+			CROSS JOIN batas
+			WHERE ks.id <= batas.maks
+			WINDOW w AS (PARTITION BY ks.id_barang, ks.id_ruang ORDER BY ks.id)
+		),
+		dihitung AS (
+			SELECT
+				id, id_barang, id_ruang, stok_awal, stok_akhir, harga_pokok_satuan, nilai_keluar, nilai_akhir,
+				COALESCE(prev_stok_akhir, 0) AS exp_stok_awal,
+				COALESCE(prev_stok_akhir, 0) + stok_masuk - stok_keluar AS exp_stok_akhir,
+				CASE
+					WHEN stok_masuk > 0 THEN 0
+					ELSE ROUND(stok_keluar * COALESCE(prev_hpp, 0), 2)
+				END AS exp_nilai_keluar,
+				CASE
+					WHEN stok_masuk > 0 THEN COALESCE(prev_nilai_akhir, 0) + nilai_masuk
+					ELSE COALESCE(prev_nilai_akhir, 0)
+						- ROUND(stok_keluar * COALESCE(prev_hpp, 0), 2)
+				END AS exp_nilai_akhir_sblm_nol,
+				CASE
+					WHEN stok_masuk > 0 AND (COALESCE(prev_stok_akhir, 0) + stok_masuk - stok_keluar) > 0
+						THEN ROUND(
+							(COALESCE(prev_nilai_akhir, 0) + nilai_masuk)
+								/ (COALESCE(prev_stok_akhir, 0) + stok_masuk - stok_keluar),
+							4
+						)
+					ELSE COALESCE(prev_hpp, 0)
+				END AS exp_hpp
+			FROM rantai
+		),
+		final AS (
+			SELECT
+				id, id_barang, id_ruang, stok_awal, exp_stok_awal, stok_akhir, exp_stok_akhir,
+				harga_pokok_satuan, exp_hpp, nilai_keluar, exp_nilai_keluar, nilai_akhir,
+				CASE WHEN exp_stok_akhir = 0 THEN 0 ELSE exp_nilai_akhir_sblm_nol END AS exp_nilai_akhir
+			FROM dihitung
+		)
+		SELECT id_barang, id_ruang, MIN(id) AS id_pertama
+		FROM final
+		WHERE stok_awal  != exp_stok_awal
+		   OR stok_akhir != exp_stok_akhir
+		   OR stok_akhir < 0
+		   OR harga_pokok_satuan != exp_hpp
+		   OR nilai_keluar != exp_nilai_keluar
+		   OR nilai_akhir != exp_nilai_akhir
+		GROUP BY id_barang, id_ruang
+		ORDER BY id_barang, id_ruang`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("periksa rantai kartu_stok: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.SelisihRantaiKartuStok, 0)
+
+	for rows.Next() {
+		var selisih entity.SelisihRantaiKartuStok
+
+		if err := rows.Scan(&selisih.IDBarang, &selisih.IDRuang, &selisih.ID); err != nil {
+			return nil, fmt.Errorf("scan rantai kartu_stok: %w", err)
+		}
+
+		list = append(list, selisih)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate rantai kartu_stok: %w", err)
 	}
 
 	return list, nil
