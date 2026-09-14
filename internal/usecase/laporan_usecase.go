@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"database/sql"
+	"time"
 
 	"Arthafreestyle/ERP/internal/model"
 	"Arthafreestyle/ERP/internal/model/converter"
@@ -88,4 +89,41 @@ func (c *LaporanUseCase) Pergerakan(ctx context.Context, request *model.ListPerg
 	}
 
 	return converter.PergerakanToResponses(list), nil
+}
+
+// KesehatanStok answers the stock health score of the active unit_kerja — isu #37.
+// Nothing is stored; see kesehatan_stok_skor.go for the arithmetic and
+// kesehatan_stok_repository.go for what each component reads.
+//
+// The two reads run inside one read-only REPEATABLE READ transaction so they share a
+// snapshot: a sale committing between them could otherwise count a product as
+// "sehat" in one query and value its room's stock from after the sale in the other.
+// It is a read transaction, so it takes no lock any posting could wait on.
+func (c *LaporanUseCase) KesehatanStok(ctx context.Context, request *model.KesehatanStokRequest) (*model.KesehatanStokResponse, error) {
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, err
+	}
+
+	sekarang := time.Now()
+
+	tx, err := c.DB.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	produk, err := c.KartuStokRepository.KesehatanStokProduk(ctx, tx, request.IDRuang, request.AktifIDUnitKerja)
+	if err != nil {
+		return nil, err
+	}
+
+	ruang, err := c.KartuStokRepository.KesehatanStokRuang(
+		ctx, tx, request.IDRuang, request.AktifIDUnitKerja,
+		sekarang.AddDate(0, 0, -hariStokMati), sekarang.AddDate(0, 0, -hariAkurasiOpname),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return susunKesehatanStok(*produk, ruang, request.AktifIDUnitKerja, request.IDRuang, sekarang), nil
 }

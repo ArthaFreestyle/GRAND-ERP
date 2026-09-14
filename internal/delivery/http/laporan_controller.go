@@ -70,3 +70,20 @@ func (c *LaporanController) Pergerakan(ctx fiber.Ctx) error {
 
 	return ctx.JSON(model.WebResponse[[]model.PergerakanResponse]{Data: responses})
 }
+
+// KesehatanStok reports the stock health score of the active unit_kerja — isu #37.
+func (c *LaporanController) KesehatanStok(ctx fiber.Ctx) error {
+	request := new(model.KesehatanStokRequest)
+	if err := ctx.Bind().Query(request); err != nil {
+		return model.Invalid("malformed query parameters")
+	}
+
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
+
+	response, err := c.UseCase.KesehatanStok(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.KesehatanStokResponse]{Data: response})
+}

@@ -1647,6 +1647,61 @@ paths:
                     items: { $ref: "#/components/schemas/Pergerakan" }
         "400": { $ref: "#/components/responses/ValidationError" }
 
+  /api/v1/laporan/kesehatan-stok:
+    get:
+      tags: [laporan]
+      summary: Skor kesehatan stok unit kerja aktif (0–100)
+      operationId: getLaporanKesehatanStok
+      description: >
+        Isu #37 — bacaan yang bukan modul, tanpa tabel, tanpa migrasi, dan skornya
+        **tidak pernah disimpan**. Satu angka 0–100 untuk unit_kerja aktif sesi
+        pemanggil, **selalu bersama rinciannya**: skor, bobot, dan angka mentah tiap
+        komponen. Konteks global menilai seluruh perusahaan.
+
+
+        Empat komponen, rata-rata berbobot:
+        `KETERSEDIAAN` (35) — produk aktif ber-`stok_minimum` yang pernah bergerak di
+        cakupan, `sehat` (> minimum) bernilai 1, `menipis` (0 < total <= minimum)
+        ½, `habis` 0; ambangnya sama persis dengan `GET /product/stok-minimum`.
+        `STOK_MATI` (25) — `1 − nilai stok mati / nilai persediaan`; stok mati adalah
+        barang yang tidak terjual/terpakai di **mana pun dalam unit** selama 90 hari
+        dan kedatangan pertamanya ke unit lebih tua dari itu. Mutasi keluar dan baris
+        pembalik bukan permintaan; mutasi masuk dari ruang dalam unit yang sama bukan
+        kedatangan. `AKURASI_OPNAME` (25) — per ruang pemegang stok, opname `POSTED`
+        terakhir dalam 90 hari: `1 − (surplus + defisit) / nilai dihitung`, surplus
+        dan defisit dijumlahkan mutlak, baris `stok_so` kosong tidak ikut; ruang
+        tanpa opname bernilai **0**; dibobot nilai persediaan ruang.
+        `CAKUPAN_MINIMUM` (15) — porsi produk yang sedang dipegang yang punya
+        `stok_minimum`.
+
+
+        Komponen yang tidak berlaku (tidak ada yang bisa dinilai) bernilai `null`
+        dan skor unit dinormalisasi ulang atas bobot sisanya; kalau tidak ada satu
+        pun yang berlaku, `skor` dan `status` `null`. Skor unit dihitung dari nilai
+        eksak komponen lalu dibulatkan sekali. `status`: `SEHAT` ≥ 80,
+        `PERLU_PERHATIAN` 60–79, `KRITIS` < 60.
+
+
+        `id_ruang` di luar unit aktif tidak menghasilkan error — cakupannya kosong,
+        jadi `skor: null`, sama seperti bacaan berbentuk daftar lain (isu #12 fase 6).
+      parameters:
+        - name: id_ruang
+          in: query
+          description: >
+            Persempit ke satu ruang. Permintaan dan kedatangan untuk `STOK_MATI`
+            tetap dinilai se-unit — yang dipersempit hanya stok yang dinilai.
+          schema: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: Skor kesehatan stok beserta rinciannya
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/KesehatanStok" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
   /api/v1/pembelian:
     get:
       tags: [pembelian]
@@ -8135,6 +8190,78 @@ components:
           type: array
           description: Rincian per ruang di balik `total_stok`.
           items: { $ref: "#/components/schemas/StokRuang" }
+
+    KesehatanStok:
+      type: object
+      description: Skor kesehatan stok — isu #37. Dihitung saat dibaca, tidak disimpan.
+      properties:
+        id_unit_kerja: { type: integer, format: int64, nullable: true, description: "Unit aktif sesi; null untuk konteks global." }
+        id_ruang: { type: integer, format: int64, nullable: true }
+        skor: { type: integer, minimum: 0, maximum: 100, nullable: true, example: 74 }
+        status: { type: string, enum: [SEHAT, PERLU_PERHATIAN, KRITIS], nullable: true }
+        dihitung_pada: { type: string, format: date-time }
+        komponen:
+          type: array
+          description: Selalu empat entri, urutan tetap.
+          items: { $ref: "#/components/schemas/KesehatanStokKomponen" }
+        ruang:
+          type: array
+          description: Ruang pemegang stok, terburuk dulu.
+          items: { $ref: "#/components/schemas/KesehatanStokRuang" }
+
+    KesehatanStokKomponen:
+      type: object
+      properties:
+        kode: { type: string, enum: [KETERSEDIAAN, STOK_MATI, AKURASI_OPNAME, CAKUPAN_MINIMUM] }
+        bobot: { type: integer, example: 35 }
+        skor: { type: integer, minimum: 0, maximum: 100, nullable: true, description: "Dibulatkan untuk tampilan; skor unit memakai nilai eksaknya." }
+        rincian:
+          description: Bentuknya menurut `kode`.
+          oneOf:
+            - type: object
+              title: KETERSEDIAAN
+              properties:
+                produk_dinilai: { type: integer, format: int64 }
+                sehat: { type: integer, format: int64 }
+                menipis: { type: integer, format: int64 }
+                habis: { type: integer, format: int64 }
+            - type: object
+              title: STOK_MATI
+              properties:
+                nilai_persediaan: { type: string, example: "152000000.00" }
+                nilai_stok_mati: { type: string, example: "48640000.00" }
+                hari_ambang: { type: integer, example: 90 }
+            - type: object
+              title: AKURASI_OPNAME
+              properties:
+                ruang_dinilai: { type: integer, format: int64 }
+                ruang_tanpa_opname: { type: integer, format: int64 }
+                nilai_selisih: { type: string, description: "Surplus + defisit, keduanya mutlak." }
+                nilai_dihitung: { type: string }
+                hari_ambang: { type: integer, example: 90 }
+            - type: object
+              title: CAKUPAN_MINIMUM
+              properties:
+                produk_dipegang: { type: integer, format: int64 }
+                produk_berminimum: { type: integer, format: int64 }
+
+    KesehatanStokRuang:
+      type: object
+      description: >
+        Rincian per ruang untuk dua komponen yang berwatak ruang. `KETERSEDIAAN` dan
+        `CAKUPAN_MINIMUM` tidak dipecah per ruang karena `stok_minimum` angka per
+        produk.
+      properties:
+        id_ruang: { type: integer, format: int64 }
+        nama_ruang: { type: string }
+        total_stok: { type: integer, format: int64 }
+        nilai_persediaan: { type: string }
+        nilai_stok_mati: { type: string }
+        skor_stok_mati: { type: integer, nullable: true }
+        nomor_opname: { type: string, nullable: true, description: "Null berarti tidak ada opname POSTED dalam 90 hari." }
+        ts_cutoff_opname: { type: string, format: date-time, nullable: true }
+        nilai_selisih_opname: { type: string, nullable: true }
+        skor_akurasi_opname: { type: integer, description: "0, bukan null, untuk ruang tanpa opname." }
 
     NilaiPersediaan:
       type: object

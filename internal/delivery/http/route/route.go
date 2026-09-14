@@ -293,6 +293,9 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Get("/laporan/nilai-persediaan", c.LaporanController.NilaiPersediaan)
 	api.Get("/laporan/laba-kotor", c.LaporanController.LabaKotor)
 	api.Get("/laporan/pergerakan", c.LaporanController.Pergerakan)
+	// kesehatan-stok is isu #37: one 0-100 score over the same material, open like
+	// every other report — seeing that stock is unhealthy is not a way to change it.
+	api.Get("/laporan/kesehatan-stok", c.LaporanController.KesehatanStok)
 
 	// pembelian is the first module whose writes are split by workflow stage rather
 	// than by which data they touch, because posting one is not an edit — it appends
