@@ -75,6 +75,16 @@ func NewViper() *viper.Viper {
 	// honest answer, and there is no partial-scan mode yet to default instead.
 	cfg.SetDefault("rekonsiliasi.interval", "24h")
 
+	// OCR pembelian via Gemini (isu #39). gemini.api_key has no default, the same
+	// reasoning jwt.secret follows — see NewGeminiConfig. gemini.model is a fixed
+	// name, never an alias like "gemini-flash-latest": an alias can move to a
+	// different model overnight with no commit behind the change, which is exactly
+	// what isu #37's fixed score weights already refused to allow for a different
+	// reason. Google has already retired models this project tried during isu #39
+	// (gemini-2.5-flash answers 404), so pin one and bump it deliberately.
+	cfg.SetDefault("gemini.model", "gemini-3.6-flash")
+	cfg.SetDefault("gemini.timeout_seconds", 60)
+
 	if err := cfg.ReadInConfig(); err != nil {
 		panic(fmt.Errorf("config: cannot read config.json: %w", err))
 	}

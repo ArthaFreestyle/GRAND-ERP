@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"Arthafreestyle/ERP/internal/config"
+	"Arthafreestyle/ERP/internal/entity"
 	"Arthafreestyle/ERP/internal/repository"
 	"Arthafreestyle/ERP/internal/usecase"
 
@@ -113,6 +114,11 @@ type app struct {
 	rekonsiliasi *usecase.RekonsiliasiUseCase
 	periode      *usecase.PeriodeUseCase
 	auth         *usecase.AuthUseCase
+	// ocr's FakturReader starts as a fakeFakturReader returning no lines at all —
+	// every real ocr_pembelian_test.go case swaps app.ocr.FakturReader for its own
+	// fake before calling, the exported-field shape isu #39 relies on instead of a
+	// constructor argument per test.
+	ocr *usecase.OCRPembelianUseCase
 	// dokumenDir is where this test's attachments land, so a test can check that a
 	// file really was written — or really was removed — rather than trusting the row.
 	dokumenDir string
@@ -277,7 +283,32 @@ func newApp(t *testing.T) *app {
 		laporan: usecase.NewLaporanUseCase(
 			testDB, log, validate, kartuStokRepository, penjualanRepository,
 		),
+		ocr: usecase.NewOCRPembelianUseCase(
+			log, testDB, validate, productRepository, pembelianRepository, ruangRepository,
+			&fakeFakturReader{}, testMaxUkuranDokumen, time.Second,
+		),
 	}
+}
+
+// fakeFakturReader is the FakturReader every OCR test hands in — isu #39's own
+// decision that no usecase test may call Gemini for real. Baca answers whatever
+// Hasil and Err are set to at the moment it is called, which is enough for every
+// test in ocr_pembelian_test.go: each one sets these on app.ocr.FakturReader (a
+// *fakeFakturReader, asserted back from the interface field) before calling the
+// usecase.
+type fakeFakturReader struct {
+	Hasil *repository.FakturReaderHasil
+	Err   error
+}
+
+func (f *fakeFakturReader) Baca(
+	context.Context, []byte, string, repository.JenisOCRFaktur, []entity.Product,
+) (*repository.FakturReaderHasil, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
+
+	return f.Hasil, nil
 }
 
 func requireDB(t *testing.T) {

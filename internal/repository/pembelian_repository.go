@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -288,6 +290,32 @@ func (r *PembelianRepository) ExistsFakturSupplier(ctx context.Context, db DBTX,
 	}
 
 	return exists, nil
+}
+
+// FindNomorFakturSupplier is ExistsFakturSupplier's read-only cousin for the OCR
+// endpoints (isu #39): a duplicate faktur there is only a peringatan, not a 409, and
+// the message names the earlier document — so this returns its nomor rather than a
+// bare bool. Nil means no other non-BATAL pembelian for this supplier carries the
+// same no_faktur_supplier.
+func (r *PembelianRepository) FindNomorFakturSupplier(ctx context.Context, db DBTX, idSupplier int64, noFaktur string) (*string, error) {
+	const query = `
+		SELECT nomor FROM pembelian
+		WHERE id_supplier = $1
+		  AND lower(no_faktur_supplier) = lower($2)
+		  AND status <> 'BATAL'
+		ORDER BY id DESC
+		LIMIT 1`
+
+	var nomor string
+	if err := db.QueryRowContext(ctx, query, idSupplier, noFaktur).Scan(&nomor); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+
+		return nil, fmt.Errorf("find nomor faktur supplier: %w", err)
+	}
+
+	return &nomor, nil
 }
 
 // UpdateHeader applies a patch. sql.ErrNoRows means the id does not exist, so there

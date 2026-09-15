@@ -182,6 +182,14 @@ services:
       # berbeda, pembersihannya diam-diam tidak melakukan apa-apa.
       DOKUMEN_STORAGE_PATH: /app/data/dokumen
       DOKUMEN_MAX_SIZE_MB: ${DOKUMEN_MAX_SIZE_MB:-10}
+      # OCR pembelian via Gemini (isu #39). Empty by default, the same shape
+      # jwt.secret is NOT — an empty key just leaves the two OCR routes
+      # unregistered (NewGeminiConfig never Fatals), so compose still boots
+      # with the feature simply unavailable until a real key is set in .env.
+      # worker never reads any of this — OCR is web-only.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
+      GEMINI_TIMEOUT_SECONDS: ${GEMINI_TIMEOUT_SECONDS:-60}
     volumes:
       - dokumen-data:/app/data/dokumen
     ports:

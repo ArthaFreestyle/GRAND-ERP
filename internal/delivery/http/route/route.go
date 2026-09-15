@@ -31,28 +31,31 @@ type RouteConfig struct {
 	// enable the routes without also having something to serve them.
 	DocsController *deliveryhttp.DocsController
 
-	AuthController       *deliveryhttp.AuthController
-	DokumenController    *deliveryhttp.DokumenController
-	PeriodeController    *deliveryhttp.PeriodeController
-	PembelianController  *deliveryhttp.PembelianController
-	SusulanController    *deliveryhttp.PenerimaanSusulanController
-	ReturController      *deliveryhttp.ReturPembelianController
-	MutasiController     *deliveryhttp.MutasiController
-	PemakaianController  *deliveryhttp.PemakaianController
-	PenjualanController  *deliveryhttp.PenjualanController
-	PembayaranController *deliveryhttp.PembayaranUtangController
-	PenerimaanController *deliveryhttp.PenerimaanPembayaranController
-	StokOpnameController *deliveryhttp.StokOpnameController
-	ProductController    *deliveryhttp.ProductController
-	LaporanController    *deliveryhttp.LaporanController
-	UnitKerjaController  *deliveryhttp.UnitKerjaController
-	RuangController      *deliveryhttp.RuangController
-	SatuanController     *deliveryhttp.SatuanController
-	EkspedisiController  *deliveryhttp.EkspedisiController
-	SupplierController   *deliveryhttp.SupplierController
-	PelangganController  *deliveryhttp.PelangganController
-	RoleController       *deliveryhttp.RoleController
-	UserController       *deliveryhttp.UserController
+	AuthController      *deliveryhttp.AuthController
+	DokumenController   *deliveryhttp.DokumenController
+	PeriodeController   *deliveryhttp.PeriodeController
+	PembelianController *deliveryhttp.PembelianController
+	// OCRPembelianController is nil when gemini.api_key is empty (isu #39) — see
+	// Setup's own comment where the routes are registered.
+	OCRPembelianController *deliveryhttp.OCRPembelianController
+	SusulanController      *deliveryhttp.PenerimaanSusulanController
+	ReturController        *deliveryhttp.ReturPembelianController
+	MutasiController       *deliveryhttp.MutasiController
+	PemakaianController    *deliveryhttp.PemakaianController
+	PenjualanController    *deliveryhttp.PenjualanController
+	PembayaranController   *deliveryhttp.PembayaranUtangController
+	PenerimaanController   *deliveryhttp.PenerimaanPembayaranController
+	StokOpnameController   *deliveryhttp.StokOpnameController
+	ProductController      *deliveryhttp.ProductController
+	LaporanController      *deliveryhttp.LaporanController
+	UnitKerjaController    *deliveryhttp.UnitKerjaController
+	RuangController        *deliveryhttp.RuangController
+	SatuanController       *deliveryhttp.SatuanController
+	EkspedisiController    *deliveryhttp.EkspedisiController
+	SupplierController     *deliveryhttp.SupplierController
+	PelangganController    *deliveryhttp.PelangganController
+	RoleController         *deliveryhttp.RoleController
+	UserController         *deliveryhttp.UserController
 }
 
 func (c *RouteConfig) Setup() {
@@ -310,6 +313,18 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Get("/pembelian", c.PembelianController.List)
 	api.Get("/pembelian/:id", c.PembelianController.Get)
 	api.Get("/pembelian/:id/sisa", c.PembelianController.Sisa)
+
+	// OCRPembelianController is nil when gemini.api_key is empty — the same
+	// nil-controller shape web.swagger/DocsController already uses — so the whole
+	// server still boots with the feature simply unavailable. Registered before any
+	// POST /pembelian/:id/... route: "ocr" would otherwise be a legal :id value at
+	// the same path depth, and the static segment has to win (isu #39, the same
+	// discipline GET /product/harga-jual needed against GET /product/:id).
+	if c.OCRPembelianController != nil {
+		api.Post("/pembelian/ocr/faktur-kedatangan", inventaris, c.OCRPembelianController.FakturKedatangan)
+		api.Post("/pembelian/ocr/nota", inventaris, c.OCRPembelianController.Nota)
+	}
+
 	api.Post("/pembelian", inventaris, c.PembelianController.Create)
 	api.Patch("/pembelian/:id", inventaris, c.PembelianController.Update)
 	api.Put("/pembelian/:id/detail", inventaris, c.PembelianController.ReplaceDetail)

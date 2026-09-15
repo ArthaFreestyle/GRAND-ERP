@@ -19,6 +19,7 @@ Backend ERP dengan fokus pada persediaan, pembelian, dan penjualan. Ditulis deng
 | Log | logrus (JSON) |
 | Migrasi | [golang-migrate](https://github.com/golang-migrate/migrate) |
 | Validasi | go-playground/validator |
+| OCR | [google.golang.org/genai](https://pkg.go.dev/google.golang.org/genai) — Gemini API, opsional lewat `gemini.api_key` (isu #39) |
 
 **Go 1.25 wajib** — Fiber v3 menolak dibangun di bawah versi itu.
 
@@ -1365,6 +1366,8 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `POST` | `/api/v1/pembelian/{id}/tolak` | `DIAJUKAN` → `DRAFT`, wajib `alasan` — `SUPERADMIN` |
 | `POST` | `/api/v1/pembelian/{id}/batal` | Tulis baris pembalik, wajib `alasan_batal` — `SUPERADMIN` |
 | `GET` | `/api/v1/pembelian/{id}/sisa` | Baris yang belum lengkap diterima |
+| `POST` | `/api/v1/pembelian/ocr/faktur-kedatangan` | OCR Gemini atas foto faktur kedatangan (`multipart/form-data`: `file`, `id_supplier`, `id_ruang`, `tanggal`); tidak menulis apa pun, mengembalikan `usulan` sebentuk `CreatePembelianRequest` (isu #39) |
+| `POST` | `/api/v1/pembelian/ocr/nota` | Sama, untuk nota vendor tanpa konvensi centang — `jenis_pembayaran` dibaca dari cap/tulisan di nota, tidak ditebak (isu #39) |
 | `GET` | `/api/v1/penerimaan-susulan` | List — `page`, `size`, `search`, `status`, `id_pembelian`, `tanggal_dari`, `tanggal_sampai` |
 | `POST` | `/api/v1/penerimaan-susulan` | Buat draft; pembelian asal harus `POSTED` |
 | `GET` | `/api/v1/penerimaan-susulan/{id}` | Detail beserta barisnya |
@@ -1524,6 +1527,7 @@ Sudah ada:
 - **Siklus hidup sesi** (isu #24): `POST /api/v1/auth/me/password` untuk ganti password sendiri, tanpa role guard, `password_lama` tetap diverifikasi walau pemanggilnya sudah terautentikasi; refresh token buram (bukan JWT) tersimpan di Redis lewat `RefreshTokenRepository`, dirotasi sekali pakai lewat `POST /api/v1/auth/refresh` (`GETDEL` atomik menutup celah dipakai ulang), dan dicabut lewat `POST /api/v1/auth/logout`; tiga pemicu pencabutan — ganti password (sendiri maupun `PATCH /user/{id}` oleh `SUPERADMIN`), `is_aktif: false`, dan seluruh grant dicabut — menghapus semua refresh token user itu lewat `RevokeAllForUser`; `jwt.ttl_minutes` turun dari 60 ke 15 karena itulah sekarang jendela sisa satu-satunya setelah sesi dicabut, bukan umur sesi itu sendiri; dan pembatasan laju login per `(ip, username)` di Redis (`throttle.login.*`) menggantikan captcha — jawabannya identik dengan password salah biasa, tanpa membedakan diri
 - **Job rekonsiliasi harian rantai saldo kartu stok** (isu #25): job kedua di `cmd/worker`, read-only, yang menelusuri setiap partisi `(id_barang, id_ruang)` urut `id` lewat window function SQL dan membandingkannya dengan yang seharusnya dihitung trigger `kartu_stok_hitung_saldo` — kalau ketemu selisih, ia hanya melapor lewat log `Error` beserta `id_barang`/`id_ruang`/id baris pertama yang menyimpang, tidak pernah memperbaikinya; koreksi yang genuinely diperlukan tetap lewat `stok_opname`
 - **Skor kesehatan stok** (isu #37): `GET /laporan/kesehatan-stok`, satu angka 0–100 per unit kerja aktif dari empat komponen — ketersediaan terhadap `stok_minimum`, nilai stok mati 90 hari, akurasi opname terakhir, dan cakupan pengisian `stok_minimum` — selalu dikembalikan bersama rinciannya, dihitung saat dibaca dan tidak pernah disimpan, tanpa migrasi
+- **OCR faktur/nota pembelian lewat Gemini** (isu #39): `POST /pembelian/ocr/faktur-kedatangan` dan `POST /pembelian/ocr/nota` membaca foto lalu mengusulkan isi form — **tidak menulis apa pun**, tanpa migrasi. Katalog produk aktif dikirim sebagai system prompt supaya Gemini menjawab dengan `id_product` katalog kami, bukan kode vendor; keluaran terstruktur lewat `ResponseSchema` dengan setiap angka bertipe `STRING`, diparse `parseAngkaIndonesia` ke `big.Rat`, tidak pernah lewat `float64`. `usulan` berbentuk persis `CreatePembelianRequest` dan langsung bisa dikirim ke `POST /pembelian` tanpa DTO kedua. Endpoint pertama membaca konvensi centang (dicentang → `qty_diterima = qty_faktur`; tidak/ragu → tulisan tangan atau `"0"`, tidak pernah `null`); endpoint kedua mengabaikannya sepenuhnya. Kedua endpoint tidak terdaftar sama sekali kalau `gemini.api_key` kosong — bentuk yang sama dengan `DocsController` nil saat `web.swagger` mati
 - Delapan modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `unit_kerja`, `role`, `user`, dan — sejak isu #23 — `ruang`, semuanya create/get/list/patch
 - User dengan banyak grant (role + unit_kerja opsional), `grants` yang mengganti seluruh himpunan dalam satu transaksi dengan diff `NULL`-safe, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian

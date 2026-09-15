@@ -865,3 +865,58 @@ func (r *ProductRepository) FindHargaJual(ctx context.Context, db DBTX, productI
 
 	return list, nil
 }
+
+// FindKatalogOCR returns every active product with its satuan, for the OCR system
+// prompt (isu #39) — one query, not one per product, the same anti-N+1 shape
+// FindSatuanHargaBatch already established. Gemini is told to answer every line with
+// an id_product from exactly this list, never with a vendor's own code, so the
+// prompt has to describe the whole active catalog rather than a page of it.
+//
+// A retired product is left out on purpose: a supplier's invoice can only ever be
+// entered against something still bought or sold, and offering a dead id would let
+// Gemini map a line to a product POST /pembelian would refuse anyway.
+func (r *ProductRepository) FindKatalogOCR(ctx context.Context, db DBTX) ([]entity.Product, error) {
+	const query = `
+		SELECT p.id, p.kode_barang, p.nama, ps.id_satuan, s.nama, ps.faktor
+		FROM product p
+		JOIN product_satuan ps ON ps.id_product = p.id
+		JOIN satuan s ON s.id = ps.id_satuan
+		WHERE p.is_aktif = true
+		ORDER BY p.id, ps.faktor`
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("select katalog ocr: %w", err)
+	}
+	defer rows.Close()
+
+	katalog := make([]entity.Product, 0, 256)
+	indeks := make(map[int64]int, 256)
+
+	for rows.Next() {
+		var idProduct int64
+		var kodeBarang, nama string
+		var satuan entity.ProductSatuan
+
+		if err := rows.Scan(
+			&idProduct, &kodeBarang, &nama, &satuan.IDSatuan, &satuan.NamaSatuan, &satuan.Faktor,
+		); err != nil {
+			return nil, fmt.Errorf("scan katalog ocr: %w", err)
+		}
+
+		i, ada := indeks[idProduct]
+		if !ada {
+			katalog = append(katalog, entity.Product{ID: idProduct, KodeBarang: kodeBarang, Nama: nama, IsAktif: true})
+			i = len(katalog) - 1
+			indeks[idProduct] = i
+		}
+
+		katalog[i].Satuan = append(katalog[i].Satuan, satuan)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate katalog ocr: %w", err)
+	}
+
+	return katalog, nil
+}
