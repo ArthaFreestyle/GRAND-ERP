@@ -1064,6 +1064,22 @@ Tidak satu pun dari ketiganya butuh kolom baru — semuanya sudah dihitung dan d
 - **`GET /api/v1/laporan/laba-kotor?dari=&sampai=`** — `SUM(total) - SUM(total_hpp)` atas nota `penjualan` **POSTED**, per bulan. Satu-satunya di antara kelimanya yang membaca dokumen dan bukan `kartu_stok`, dan itu benar: `total_hpp` sudah disalin dari `RETURNING kartu_stok` saat posting dan dibekukan di sana, membacanya ulang dari kartu stok cuma akan membayar query yang lebih mahal untuk angka yang sama. Nota `BATAL` dikeluarkan; `retur_penjualan` belum ada sehingga belum ada yang mengurangi laba kotornya — begitu modul itu ada, kreditnya masuk di sini.
 - **`GET /api/v1/laporan/pergerakan?dari=&sampai=&id_ruang=&id_product=`** — jumlah `stok_masuk`/`stok_keluar` per `(barang, ruang, jenis_transaksi)` dalam rentang tanggal. Yang menjawab "barang ini keluar ke mana saja bulan lalu", dan yang membuat penyusutan hasil `stok_opname` terlihat sebagai angka bulanan, bukan per dokumen.
 
+### Skor kesehatan stok (isu #37)
+
+**`GET /api/v1/laporan/kesehatan-stok?id_ruang=`** — satu angka 0–100 untuk unit kerja aktif, **selalu bersama rinciannya**. Tanpa tabel, tanpa migrasi, tidak pernah disimpan. Bobot, jendela 90 hari, dan ambang status adalah konstanta Go, bukan config: skor yang rumusnya berbeda per deployment tidak bisa dibandingkan antar-outlet.
+
+| Komponen | Bobot | Yang diukur |
+| --- | --- | --- |
+| `KETERSEDIAAN` | 35 | Produk ber-`stok_minimum` yang **pernah bergerak di unit ini**: di atas minimum 1, `<=` minimum ½, habis 0. Ambangnya sama dengan daftar stok minimum, tapi produk yang tidak pernah dipegang unit tidak ikut — outlet tidak dihukum untuk barang yang tidak ia jual |
+| `STOK_MATI` | 25 | Nilai persediaan yang produknya tidak terjual/terpakai **di mana pun dalam unit** selama 90 hari dan pertama datang ke unit lebih dari 90 hari lalu. Diukur dengan nilai, bukan jumlah item. Mutasi keluar dan baris pembalik bukan permintaan; mutasi dari ruang dalam unit yang sama bukan kedatangan |
+| `AKURASI_OPNAME` | 25 | Per ruang pemegang stok, opname `POSTED` terakhir dalam 90 hari: `1 − (surplus + defisit) / nilai dihitung`. Surplus dan defisit tidak saling menutup; baris yang belum dihitung tidak ikut; **ruang tanpa opname bernilai 0**, bukan dilewati. Dibobot nilai persediaan ruang |
+| `CAKUPAN_MINIMUM` | 15 | Porsi produk yang sedang dipegang yang punya `stok_minimum` — menutup celah mengisi minimum hanya untuk barang yang selalu penuh |
+
+- Komponen yang tidak bisa dinilai bernilai `null` dan bobotnya dibagi ulang ke yang lain; kalau tidak ada satu pun, `skor` dan `status` `null` — unit tanpa stok tidak sehat maupun sakit.
+- Skor unit dihitung dari nilai **eksak** komponen dengan `big.Rat`, lalu dibulatkan sekali (setengah menjauhi nol). `status`: `SEHAT` ≥ 80, `PERLU_PERHATIAN` 60–79, `KRITIS` < 60.
+- Permintaan dan kedatangan dinilai **per produk se-unit**, bukan per `(barang, ruang)`: gudang yang hanya mengisi toko lewat `mutasi` tidak dicap stok mati selama tokonya menjual barang itu, dan satu mutasi internal tidak membuat barang lama tampak baru.
+- Dua query dalam satu transaksi baca `REPEATABLE READ`, apa pun jumlah ruang dan produknya.
+
 ### Hal lain yang perlu diketahui
 
 - **Disaring unit aktif dengan bentuk daftar** (isu #12 fase 6 diperluas ke sini): baris di luar unit dilewati begitu saja, tanpa error — tidak ada 404, karena tidak ada satu id tunggal untuk dijawab begitu. `GET .../kartu-stok` tetap 404 kalau `id_ruang`-nya sama sekali tidak dikenal; yang berbeda cuma ruang yang **ada** tapi di luar unit aktif, yang menjawab halaman kosong.
@@ -1337,6 +1353,7 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `GET` | `/api/v1/laporan/nilai-persediaan` | `SUM(nilai_akhir)` baris terakhir tiap `(barang, ruang)`, per ruang — `id_ruang` |
 | `GET` | `/api/v1/laporan/laba-kotor` | `SUM(total) - SUM(total_hpp)` nota `POSTED`, per bulan — `dari`, `sampai` |
 | `GET` | `/api/v1/laporan/pergerakan` | `stok_masuk`/`stok_keluar` per `(barang, ruang, jenis_transaksi)` — `dari`, `sampai`, `id_ruang`, `id_product` |
+| `GET` | `/api/v1/laporan/kesehatan-stok` | Skor 0–100 unit kerja aktif beserta empat komponennya dan rincian per ruang — `id_ruang` |
 | `GET` | `/api/v1/pembelian` | List — `page`, `size`, `search`, `status`, `status_penerimaan`, `id_supplier`, `tanggal_dari`, `tanggal_sampai` |
 | `POST` | `/api/v1/pembelian` | Buat draft beserta barisnya; nomor digenerate server; `id_ruang` divalidasi terhadap unit aktif |
 | `GET` | `/api/v1/pembelian/{id}` | Detail beserta baris, selisih, dan alokasi ongkir |
@@ -1506,6 +1523,7 @@ Sudah ada:
 - **Dua utang kecil di slice master dilunasi** (isu #23): `ruang` mendapat kolom jejak perubahan (migrasi `000026`) dan `PATCH /api/v1/ruang/{id}` — `kode`, `nama_ruang`, `is_aktif` saja, `id_unit_kerja` sengaja tidak ada di DTO-nya (lihat [Ruang: PATCH tanpa id_unit_kerja, dan dua penolakan saat mempensiunkan](#ruang-patch-tanpa-id_unit_kerja-dan-dua-penolakan-saat-mempensiunkan)), dan mempensiunkan ruang bersaldo atau ruang yang sedang dibekukan opname ditolak 409. `created_by`/`updated_by` kini terisi dari token di seluruh slice master — `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `unit_kerja`, `role`, `user` (termasuk patch yang hanya mengganti grant), dan `ruang` — mengikuti pola `product_controller.go` yang sudah lama ada tapi belum dipakai slice lain
 - **Siklus hidup sesi** (isu #24): `POST /api/v1/auth/me/password` untuk ganti password sendiri, tanpa role guard, `password_lama` tetap diverifikasi walau pemanggilnya sudah terautentikasi; refresh token buram (bukan JWT) tersimpan di Redis lewat `RefreshTokenRepository`, dirotasi sekali pakai lewat `POST /api/v1/auth/refresh` (`GETDEL` atomik menutup celah dipakai ulang), dan dicabut lewat `POST /api/v1/auth/logout`; tiga pemicu pencabutan — ganti password (sendiri maupun `PATCH /user/{id}` oleh `SUPERADMIN`), `is_aktif: false`, dan seluruh grant dicabut — menghapus semua refresh token user itu lewat `RevokeAllForUser`; `jwt.ttl_minutes` turun dari 60 ke 15 karena itulah sekarang jendela sisa satu-satunya setelah sesi dicabut, bukan umur sesi itu sendiri; dan pembatasan laju login per `(ip, username)` di Redis (`throttle.login.*`) menggantikan captcha — jawabannya identik dengan password salah biasa, tanpa membedakan diri
 - **Job rekonsiliasi harian rantai saldo kartu stok** (isu #25): job kedua di `cmd/worker`, read-only, yang menelusuri setiap partisi `(id_barang, id_ruang)` urut `id` lewat window function SQL dan membandingkannya dengan yang seharusnya dihitung trigger `kartu_stok_hitung_saldo` — kalau ketemu selisih, ia hanya melapor lewat log `Error` beserta `id_barang`/`id_ruang`/id baris pertama yang menyimpang, tidak pernah memperbaikinya; koreksi yang genuinely diperlukan tetap lewat `stok_opname`
+- **Skor kesehatan stok** (isu #37): `GET /laporan/kesehatan-stok`, satu angka 0–100 per unit kerja aktif dari empat komponen — ketersediaan terhadap `stok_minimum`, nilai stok mati 90 hari, akurasi opname terakhir, dan cakupan pengisian `stok_minimum` — selalu dikembalikan bersama rinciannya, dihitung saat dibaca dan tidak pernah disimpan, tanpa migrasi
 - Delapan modul lengkap sampai OpenAPI: `satuan`, `ekspedisi`, `supplier`, `pelanggan`, `unit_kerja`, `role`, `user`, dan — sejak isu #23 — `ruang`, semuanya create/get/list/patch
 - User dengan banyak grant (role + unit_kerja opsional), `grants` yang mengganti seluruh himpunan dalam satu transaksi dengan diff `NULL`-safe, password ter-hash bcrypt
 - Semantik PATCH dengan `model.Optional[T]`, keunikan kode tidak peka huruf, pemetaan pelanggaran unik jadi 409, escaping wildcard pencarian
