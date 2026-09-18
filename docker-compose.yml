@@ -132,6 +132,8 @@ services:
       - "/seeders/003_role.sql"
       - "-f"
       - "/seeders/004_superadmin.sql"
+      - "-f"
+      - "/seeders/005_product.sql"
 
   web:
     build:
@@ -182,6 +184,14 @@ services:
       # berbeda, pembersihannya diam-diam tidak melakukan apa-apa.
       DOKUMEN_STORAGE_PATH: /app/data/dokumen
       DOKUMEN_MAX_SIZE_MB: ${DOKUMEN_MAX_SIZE_MB:-10}
+      # OCR pembelian via Gemini (isu #39). Empty by default, the same shape
+      # jwt.secret is NOT — an empty key just leaves the two OCR routes
+      # unregistered (NewGeminiConfig never Fatals), so compose still boots
+      # with the feature simply unavailable until a real key is set in .env.
+      # worker never reads any of this — OCR is web-only.
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-3.6-flash}
+      GEMINI_TIMEOUT_SECONDS: ${GEMINI_TIMEOUT_SECONDS:-60}
     volumes:
       - dokumen-data:/app/data/dokumen
     ports:
@@ -222,6 +232,9 @@ services:
       # DOKUMEN_STORAGE_PATH this key has no reason to exist in web's block above —
       # web never runs this job.
       REKONSILIASI_INTERVAL: ${REKONSILIASI_INTERVAL:-24h}
+      # isu #40 fase 5: presensi's LUPA_PULANG sweep. Worker-only for the same
+      # reason as REKONSILIASI_INTERVAL above.
+      PRESENSI_SAPUAN_INTERVAL: ${PRESENSI_SAPUAN_INTERVAL:-24h}
     volumes:
       - dokumen-data:/app/data/dokumen
 

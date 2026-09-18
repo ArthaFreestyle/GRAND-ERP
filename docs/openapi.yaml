@@ -219,6 +219,7 @@ tags:
   - name: product
   - name: laporan
   - name: periode
+  - name: presensi
   - name: docs
   - name: unit-kerja
   - name: ruang
@@ -1406,9 +1407,19 @@ paths:
         Hanya produk `is_aktif`. Diurutkan dari yang paling parah — selisih
         terhadap `stok_minimum`, bukan abjad — karena ini daftar kerja, pola yang
         sama dengan `GET /supplier/{id}/utang`.
+
+
+        `search` menyaring di SQL, bukan di halaman yang sudah termuat. Daftar ini
+        berhalaman, jadi kolom cari di sisi klien hanya pernah menemukan barang
+        yang kebetulan ada di halaman itu — barang yang dicari di halaman dua tidak
+        akan pernah ketemu.
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          description: Menyaring `nama` dan `kode_barang`, lewat EscapeLike.
+          schema: { type: string, maxLength: 255 }
         - name: id_ruang
           in: query
           schema: { type: integer, format: int64, minimum: 1 }
@@ -1565,8 +1576,15 @@ paths:
       summary: Laba kotor per bulan
       operationId: listLaporanLabaKotor
       description: >
-        Isu #22 fase 3. `SUM(total) - SUM(total_hpp)` atas nota `penjualan`
+        Isu #22 fase 3. `SUM(total - ppn) - SUM(total_hpp)` atas nota `penjualan`
         **POSTED**, dikelompokkan per bulan `tanggal`.
+
+
+        **`ppn` dikeluarkan dari omzet.** PPN keluaran yang dipungut di kasir adalah
+        uang negara yang kebetulan lewat di nota, bukan pendapatan toko; ikut
+        menghitungnya sebagai omzet akan melebihkan margin tiap bulan persis sebesar
+        pajaknya. Angkanya tetap dilaporkan sendiri di `total_ppn`, jadi
+        `total_penjualan + total_ppn` masih sama dengan jumlah `total` notanya.
 
 
         Satu-satunya laporan di isu ini yang membaca dokumen, bukan `kartu_stok`
@@ -1810,75 +1828,7 @@ paths:
         content:
           application/json:
             schema:
-              type: object
-              required: [tanggal, id_supplier, id_ruang, detail]
-              properties:
-                tanggal: { type: string, format: date, example: "2026-08-11" }
-                id_supplier: { type: integer, format: int64, minimum: 1 }
-                id_ruang:
-                  type: integer
-                  format: int64
-                  minimum: 1
-                  description: >
-                    Ruang tujuan seluruh baris. Satu dokumen tidak bisa masuk ke dua
-                    ruang.
-
-
-                    Isu #12 fase 5: divalidasi terhadap unit_kerja aktif sesi
-                    pemanggil. Konteks aktif global (grant tanpa unit, bentuk
-                    SUPERADMIN) tidak dibatasi; konteks aktif yang menyebut
-                    satu unit hanya boleh memilih ruang di unit itu, kalau
-                    tidak → 403.
-                no_faktur_supplier:
-                  type: string
-                  nullable: true
-                  maxLength: 64
-                  description: >
-                    Unik per supplier dan tidak peduli huruf besar-kecil. Tanpa
-                    purchase order, ini satu-satunya jejak faktur supplier — nota
-                    yang sama diinput dua kali akan menaikkan stok dua kali. Dokumen
-                    `BATAL` melepas nomornya kembali. Boleh kosong, dan berapa pun
-                    dokumen boleh sama-sama kosong.
-                tanggal_faktur: { type: string, format: date, nullable: true }
-                diskon_nota:
-                  type: string
-                  description: Desimal. Tidak boleh melebihi subtotal.
-                  example: "0"
-                ppn: { type: string, example: "0" }
-                ppn_dikreditkan:
-                  type: boolean
-                  default: false
-                  description: >
-                    `false` berarti PPN ikut masuk harga pokok; `true` berarti jadi
-                    pajak masukan dan tidak menyentuh harga pokok.
-                pembulatan:
-                  type: string
-                  description: Boleh negatif — ini baris pembulatan nota.
-                  example: "0"
-                id_ekspedisi: { type: integer, format: int64, nullable: true, minimum: 1 }
-                no_resi: { type: string, nullable: true, maxLength: 64 }
-                total_koli: { type: string, nullable: true, example: "3" }
-                tarif_per_koli: { type: string, nullable: true, example: "50000" }
-                ditanggung_supplier:
-                  type: boolean
-                  default: false
-                  description: >
-                    `true` berarti ongkir sudah termasuk nota supplier dan **tidak
-                    dialokasikan lagi** — mengalokasikannya berarti rupiah yang sama
-                    masuk harga pokok dua kali.
-                metode_alokasi_angkut:
-                  type: string
-                  enum: [KOLI, QTY]
-                  default: KOLI
-                jenis_pembayaran:
-                  type: string
-                  enum: [TUNAI, KREDIT]
-                  default: TUNAI
-                detail:
-                  type: array
-                  minItems: 1
-                  maxItems: 500
-                  items: { $ref: "#/components/schemas/PembelianDetailInput" }
+              $ref: "#/components/schemas/CreatePembelianRequest"
       responses:
         "201":
           description: Created
@@ -1891,6 +1841,189 @@ paths:
         "400": { $ref: "#/components/responses/ValidationError" }
         "403": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/ocr/faktur-kedatangan:
+    post:
+      tags: [pembelian]
+      summary: Usulkan isi form pembelian dari foto faktur kedatangan (OCR Gemini)
+      operationId: ocrPembelianFakturKedatangan
+      description: >
+        isu #39. Foto faktur kedatangan barang — yang sudah dicentang petugas
+        gudang saat mencocokkan fisik barang dengan fakturnya — dibaca oleh
+        Gemini dan setiap barisnya dipetakan ke katalog produk aktif, yang
+        dikirim sebagai system prompt. **Tidak menulis apa pun**: tidak ada
+        `pembelian`, tidak ada nomor dari `document_counter`, tidak ada baris
+        `dokumen`, tidak ada `kartu_stok`. Satu-satunya efek sampingnya adalah
+        panggilan ke Gemini.
+
+
+        `usulan` berbentuk persis `CreatePembelianRequest` dan bisa dikirim apa
+        adanya ke `POST /api/v1/pembelian` setelah diperiksa manusia — tidak ada
+        endpoint "konfirmasi OCR" terpisah, dan tidak ada DTO kedua yang bisa
+        bercabang dari yang pertama. Setiap baris di `ocr.baris` menunjuk
+        posisinya di `usulan.detail` lewat `indeks_usulan`, atau `null` untuk
+        baris yang tidak dikenali — id_product-nya tidak yakin dipetakan ke
+        katalog, satuannya tidak terdaftar untuk produk itu, atau qty/harga
+        tidak terbaca sebagai angka yang valid. Baris seperti itu tetap
+        dilaporkan di `ocr.baris` supaya tidak hilang diam-diam dan bisa
+        dipetakan manual.
+
+
+        **Baris dicentang** → `qty_diterima = qty_faktur`. **Baris tanpa
+        centang** — termasuk yang centangnya meragukan atau tidak jelas terbaca
+        — → `qty_diterima` diisi dari angka tulisan tangan di baris itu bila ada
+        dan terbaca, atau `"0"` bila tidak. `qty_diterima` **tidak pernah**
+        `null`, karena `POST /pembelian` membaca `qty_diterima` yang dihilangkan
+        sebagai "sama dengan qty_faktur" — usulan yang tidak diubah sama sekali
+        tidak boleh diam-diam mencatat baris yang belum lengkap sebagai lengkap.
+        `keterangan_selisih` otomatis diisi `"OCR: baris tidak dicentang"` pada
+        baris itu, karena `POST /pembelian` mewajibkannya bila ada selisih.
+
+
+        `id_ruang` divalidasi terhadap unit_kerja aktif sesi pemanggil
+        (isu #12 fase 5) **sebelum foto sekalipun dibaca**, supaya penolakan 403
+        terjadi sebelum pengguna mengoreksi puluhan baris, bukan hanya saat
+        submit ke `POST /pembelian`.
+
+
+        `no_faktur_supplier` yang sudah dipakai pembelian lain (bukan `BATAL`)
+        untuk supplier yang sama hanya menjadi satu `peringatan` yang menyebut
+        nomor pembelian lamanya — bukan 409. Indeks unik yang sebenarnya tetap
+        jadi penjaga saat submit ke `POST /pembelian`.
+
+
+        Field ekspedisi (`id_ekspedisi`, `no_resi`, `total_koli`,
+        `tarif_per_koli`) tidak pernah diisi — biaya angkut bukan bagian faktur
+        supplier.
+
+
+        `id_supplier` **tidak ditebak** dari kop faktur — nama supplier di kop
+        sering berbeda dari nama di master, dan salah supplier mencatat utang ke
+        pihak yang salah. Nama yang terbaca dikembalikan sebagai
+        `ocr.supplier_terbaca` untuk dibandingkan mata manusia.
+
+
+        Kalau Gemini gagal (timeout, kuota, atau `gemini.model` sudah tidak
+        tersedia lagi), endpoint ini menjawab error dan tidak ada usulan
+        setengah jadi yang dikembalikan.
+
+
+        Foto **tidak disimpan** oleh endpoint ini. Kalau ingin dilampirkan,
+        pakai alur yang sudah ada setelah `POST /pembelian` berhasil:
+        `POST /dokumen` lalu `POST /dokumen/{id}/tempel`.
+
+
+        Tidak terdaftar sama sekali kalau `gemini.api_key` kosong.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, id_supplier, id_ruang]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: >
+                    JPEG, PNG, atau WEBP. Jenisnya ditentukan dari isi berkas
+                    (magic bytes), bukan dari Content-Type. Dibatasi oleh
+                    `dokumen.max_size_mb`, sama seperti `POST /dokumen`, tapi
+                    dibaca di memori dan dikirim ke Gemini — tidak pernah
+                    disimpan ke storage.
+                id_supplier:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: Disalin apa adanya ke usulan.id_supplier.
+                id_ruang:
+                  type: integer
+                  format: int64
+                  minimum: 1
+                  description: >
+                    Disalin ke usulan.id_ruang; divalidasi terhadap unit_kerja
+                    aktif sesi pemanggil sebelum foto dibaca.
+                tanggal:
+                  type: string
+                  format: date
+                  description: Default hari ini (WIB) bila dikosongkan.
+      responses:
+        "200":
+          description: Usulan isi form pembelian — tidak ada yang tersimpan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      usulan: { $ref: "#/components/schemas/CreatePembelianRequest" }
+                      ocr: { $ref: "#/components/schemas/OCRPembelianInfo" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /api/v1/pembelian/ocr/nota:
+    post:
+      tags: [pembelian]
+      summary: Usulkan isi form pembelian dari foto nota pembelian vendor (OCR Gemini)
+      operationId: ocrPembelianNota
+      description: >
+        isu #39. Mirror dari `POST /pembelian/ocr/faktur-kedatangan` untuk nota
+        pembelian dari vendor (misalnya pembelian langsung di toko, barang
+        dibawa pulang saat itu juga) — dokumen yang tidak punya konvensi
+        centang sama sekali. Baca deskripsi endpoint itu dulu; hanya bedanya
+        yang tercatat di sini.
+
+
+        **Konvensi centang tidak berlaku sama sekali.** Tanda apa pun pada
+        nota diabaikan, dan setiap baris yang dikenali dibaca sebagai
+        `qty_diterima = qty_faktur` — tidak ada `keterangan_selisih` otomatis.
+
+
+        `jenis_pembayaran` diambil dari cap atau tulisan yang benar-benar ada
+        di nota (mis. "LUNAS", "TUNAI", "KREDIT") — **tidak ditebak**. Kalau
+        tidak ada tanda sama sekali, field ini dikosongkan (default
+        `POST /pembelian` yang berlaku, yaitu `TUNAI`) dan masuk
+        `ocr.peringatan`.
+
+
+        Sama seperti faktur kedatangan: tidak menulis apa pun, `usulan`
+        berbentuk persis `CreatePembelianRequest`, `id_ruang` divalidasi
+        terhadap unit_kerja aktif sebelum foto dibaca, `no_faktur_supplier`
+        duplikat hanya jadi peringatan, dan foto tidak pernah disimpan oleh
+        endpoint ini. Tidak terdaftar sama sekali kalau `gemini.api_key`
+        kosong.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, id_supplier, id_ruang]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: JPEG, PNG, atau WEBP. Sama seperti endpoint faktur-kedatangan.
+                id_supplier: { type: integer, format: int64, minimum: 1 }
+                id_ruang: { type: integer, format: int64, minimum: 1 }
+                tanggal: { type: string, format: date, description: Default hari ini (WIB) bila dikosongkan. }
+      responses:
+        "200":
+          description: Usulan isi form pembelian — tidak ada yang tersimpan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      usulan: { $ref: "#/components/schemas/CreatePembelianRequest" }
+                      ocr: { $ref: "#/components/schemas/OCRPembelianInfo" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
 
   /api/v1/pembelian/{id}:
     get:
@@ -3759,10 +3892,20 @@ paths:
 
 
         `subtotal` adalah jumlah `subtotal` setiap baris (`qty_input x
-        harga_satuan_input - diskon_baris`); `total = subtotal - diskon_nota +
-        pembulatan`. `diskon_nota` tidak boleh melebihi `subtotal`, dan `total`
-        tidak boleh negatif. `pembulatan` boleh negatif — itu baris pembulatan
-        nota, bukan galat.
+        harga_satuan_input - diskon_baris`); `total = subtotal - diskon_nota + ppn +
+        pembulatan`. `diskon_nota` tidak boleh melebihi `subtotal`, `ppn` tidak boleh
+        negatif, dan `total` tidak boleh negatif. `pembulatan` boleh negatif — itu
+        baris pembulatan nota, bukan galat.
+
+
+        `ppn` adalah **nominal rupiah, bukan tarif** — bentuk yang sama persis dengan
+        `pembelian.ppn`. Kliennya yang menghitung 11% (atau tarif apa pun yang
+        berlaku) dan mengirim hasilnya; yang dibekukan dokumen adalah uangnya, angka
+        yang harus tetap benar ketika tarif nasional berubah. Sifatnya *exclusive*:
+        harga di `product_harga_jual` adalah DPP, dan piutang nota `KREDIT` ikut naik
+        sebesar pajaknya — memang itu yang ditagih. Tidak ada pasangan
+        `ppn_dikreditkan` seperti di pembelian: PPN keluaran itu utang ke negara,
+        tidak pernah jadi harga pokok, jadi tidak pernah menyentuh `kartu_stok`.
 
 
         `harga_pokok_satuan_dasar`/`hpp_total`/`total_hpp` baru terisi saat
@@ -3792,6 +3935,12 @@ paths:
                   enum: [TUNAI, KREDIT]
                   default: TUNAI
                 diskon_nota: { type: string, example: "0" }
+                ppn:
+                  type: string
+                  example: "10450"
+                  description: >
+                    Nominal PPN keluaran dalam rupiah, bukan tarif. Kosong berarti
+                    nol — nota yang tidak memungut PPN.
                 pembulatan: { type: string, example: "0" }
                 detail:
                   type: array
@@ -3844,6 +3993,11 @@ paths:
         setelah patch, bukan hanya field yang dikirim — mengirim
         `jenis_pembayaran: KREDIT` saat `id_pelanggan` tersimpan masih kosong tetap
         ditolak.
+
+
+        `total` dihitung ulang setelah patch, karena `diskon_nota`, `ppn`, dan
+        `pembulatan` semuanya masuk ke dalamnya. Ketiganya divalidasi terhadap
+        `subtotal` yang **tersimpan** — patch header tidak pernah menyentuh baris.
       parameters:
         - $ref: "#/components/parameters/ID"
       requestBody:
@@ -3859,6 +4013,7 @@ paths:
                 id_pelanggan: { type: integer, format: int64, minimum: 1, nullable: true }
                 jenis_pembayaran: { type: string, enum: [TUNAI, KREDIT] }
                 diskon_nota: { type: string }
+                ppn: { type: string }
                 pembulatan: { type: string }
       responses:
         "200":
@@ -6503,6 +6658,356 @@ paths:
                   paging: { $ref: "#/components/schemas/PageMetadata" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /api/v1/presensi/masuk:
+    post:
+      tags: [presensi]
+      summary: Tombol masuk
+      description: >
+        Mencatat jam masuk pemanggil, sekali tekan. **Tanpa body sama sekali** — dan
+        itu memang intinya, bukan kelalaian.
+
+
+        `id_user` datang dari token, tidak pernah dari request. Kalau ia bisa dikirim
+        klien, satu karyawan bisa mengabsenkan temannya yang belum sampai kantor, dan
+        seluruh modul ini kehilangan alasannya untuk ada.
+
+
+        **Shift disimpulkan server dari jam tekan**, bukan dipilih: sebelum 17:30 WIB
+        jadi `PAGI`, selain itu `MALAM`. Satu tombol tetap satu tombol, dan tidak ada
+        yang bisa mengaku hadir di shift malam sambil menekan tombolnya pukul delapan
+        pagi. Klien tidak pernah menyimpulkan shift sendiri — di sekitar 17:30, jam
+        handphone yang meleset beberapa menit sudah cukup untuk menaruh kehadiran
+        seseorang di shift yang salah.
+
+
+        Kalau pemanggil masih punya shift lain yang terbuka (lupa menekan tombol
+        pulang), baris itu **ditandai `LUPA_PULANG` di transaksi yang sama** —
+        `jam_pulang` dibiarkan `NULL` selamanya, karena mengarangnya adalah satu
+        kebohongan yang paling ingin dihindari modul ini.
+
+
+        `id_unit_kerja` diambil sebagai **snapshot** konteks aktif sesi saat itu. Sesi
+        tanpa konteks aktif (pemegang lebih dari satu grant yang belum
+        `switch-context`) **tetap boleh absen**; barisnya hanya tidak membawa unit,
+        dan karena itu tidak muncul di daftar pemanggil mana pun yang terikat satu
+        unit.
+
+
+        Rute ini **tanpa guard peran**, setingkat `auth/me`: setiap karyawan absen
+        untuk dirinya sendiri, apa pun perannya.
+      operationId: presensiMasuk
+      responses:
+        "201":
+          description: Jam masuk tercatat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Presensi" }
+        "409":
+          description: >
+            Sudah ada presensi di shift ini hari ini, atau masih ada shift lain yang
+            sedang terbuka. Pesannya menyebut jam yang sudah tercatat, cukup bagi
+            klien untuk menggambar keadaan yang benar — handphone di jaringan buruk
+            akan mengirim tap yang sama dua kali, dan yang kedua tidak boleh
+            melahirkan baris kedua maupun berpura-pura baru mencatat sesuatu. Shift
+            yang **lain** di hari yang sama bukan duplikat: itu justru hari yang
+            paling bernilai bagi penggajian.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { nullable: true, example: null }
+                  errors: { type: string, example: "sudah presensi masuk shift PAGI hari ini pukul 08:03" }
+
+  /api/v1/presensi/pulang:
+    post:
+      tags: [presensi]
+      summary: Tombol pulang
+      description: >
+        Menutup shift yang sedang terbuka milik pemanggil — **tanpa body**, dan tanpa
+        peduli tanggal atau shift mana yang sedang berjalan sekarang. Ada tepat satu
+        baris `BUKA` milik satu orang pada satu saat (`presensi_terbuka_uidx`), jadi
+        rute ini tidak pernah perlu menebak baris mana yang dimaksud.
+
+
+        **Tidak menyimpulkan ulang shift dan tidak membandingkan jam tekan dengan jam
+        selesai shift.** Shift ditentukan sekali, saat masuk; lembur dan pulang telat
+        bukan urusan modul ini untuk dinilai. Menutup baris yang dibuka kemarin (lewat
+        tengah malam) tetap berfungsi walau tidak ada shift yang menyeberang tengah
+        malam dengan jam yang berlaku hari ini — sengaja ditulis begitu untuk tap
+        pulang yang genuinely lewat tengah malam.
+      operationId: presensiPulang
+      responses:
+        "200":
+          description: Jam pulang tercatat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Presensi" }
+        "409":
+          description: Belum ada presensi masuk yang terbuka.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { nullable: true, example: null }
+                  errors: { type: string, example: "belum presensi masuk" }
+
+  /api/v1/presensi/saya/hari-ini:
+    get:
+      tags: [presensi]
+      summary: Keadaan kedua shift hari ini
+      description: >
+        Apa yang harus digambar tombolnya. Menjawab keadaan **kedua shift sekaligus**,
+        bukan hanya yang sedang berjalan — itulah yang membuat layar bisa menampilkan
+        "pagi sudah tercatat, malam belum" tanpa panggilan kedua, dan persis itu yang
+        dilihat orang yang hendak lanjut shift kedua.
+
+
+        Shift yang belum punya baris menjawab `status: "BELUM_MASUK"`, **bukan 404** —
+        jawaban sintetis, bentuk yang sama dengan `periode` yang menjawab `BUKA`
+        sintetis untuk bulan yang tidak punya baris.
+
+
+        `shift_sekarang` adalah kesimpulan server dari jamnya sendiri, supaya klien
+        tidak pernah perlu menyimpulkannya dari jam handphone.
+      operationId: presensiHariIni
+      responses:
+        "200":
+          description: Keadaan hari ini
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/PresensiHariIni" }
+
+  /api/v1/presensi/saya:
+    get:
+      tags: [presensi]
+      summary: Riwayat kehadiran sendiri
+      description: >
+        Riwayat kehadiran pemanggil sendiri, berpaginasi — dibangun di atas mesin
+        pencarian yang sama dengan `GET /presensi`, hanya saja `id_user` dipaksa ke
+        pemanggil dan tidak bisa dialihkan lewat query string.
+
+
+        **Tidak disaring unit kerja sama sekali**, satu-satunya bacaan di proyek ini
+        yang memang begitu: riwayat sendiri adalah milik sendiri, termasuk hari-hari
+        saat yang bersangkutan bertugas di unit lain.
+      operationId: presensiSaya
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+        - name: shift
+          in: query
+          schema: { type: string, enum: [PAGI, MALAM] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [BUKA, SELESAI, LUPA_PULANG] }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Presensi" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  /api/v1/presensi:
+    get:
+      tags: [presensi]
+      summary: Daftar presensi
+      description: >
+        **SUPERADMIN.** Penyimpangan sadar dari "bacaan terbuka untuk setiap pemanggil
+        terautentikasi": aturan itu lahir untuk data barang dan harga, sedangkan jam
+        datang seseorang adalah data pribadi rekan kerjanya. `GET /presensi/saya`
+        menutup kebutuhan yang sah bagi semua orang.
+
+
+        Baris di luar unit aktif pemanggil **dihilangkan diam-diam**, tidak pernah 404
+        — daftar tidak punya identitas sumber daya tunggal untuk di-404-kan.
+        Penyaringannya jatuh pada `presensi.id_unit_kerja` yang sudah ada di barisnya,
+        tanpa join ke tabel lain. Baris ber-`id_unit_kerja` null hanya terlihat oleh
+        pemanggil bergrant global.
+      operationId: listPresensi
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: id_user
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+        - name: shift
+          in: query
+          schema: { type: string, enum: [PAGI, MALAM] }
+        - name: status
+          in: query
+          schema: { type: string, enum: [BUKA, SELESAI, LUPA_PULANG] }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/Presensi" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /api/v1/presensi/rekap:
+    get:
+      tags: [presensi]
+      summary: Rekap kehadiran satu bulan
+      description: >
+        **SUPERADMIN.** Satu baris per karyawan untuk satu bulan, seluruh halaman
+        dalam **satu query** — bukan satu query per karyawan. `hari_dua_shift` jadi
+        satu agregasi bertingkat di dalam query itu, bukan loop di Go.
+
+
+        **Rekap melaporkan, tidak memutuskan.** Ia menghitung hari hadir per shift dan
+        hari hadir dua shift; ia tidak memutuskan baris mana yang layak dibayar. Itu
+        pertanyaan penggajian, dan menjawabnya di sini berarti mengunci kebijakan gaji
+        ke dalam query rekap sebelum kebijakannya sendiri ditulis.
+      operationId: rekapPresensi
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: tahun
+          in: query
+          required: true
+          schema: { type: integer, minimum: 2000, maximum: 2200 }
+        - name: bulan
+          in: query
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 12 }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/RekapPresensi" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /api/v1/presensi/{id}:
+    patch:
+      tags: [presensi]
+      summary: Koreksi presensi
+      description: >
+        **SUPERADMIN.** Yang tidak boleh terjadi adalah baris hasil koreksi tidak bisa
+        dibedakan dari baris hasil klik: setiap PATCH yang berhasil mengisi
+        `dikoreksi_oleh`, `ts_koreksi`, dan menandai `sumber_masuk`/`sumber_pulang`
+        yang bersangkutan menjadi `KOREKSI`.
+
+
+        **`shift` boleh dikoreksi, tapi tidak pernah disimpulkan ulang dari
+        `jam_masuk` yang baru.** Koreksi jam dan koreksi shift adalah dua keputusan
+        terpisah; menautkannya berarti membetulkan salah ketik satu menit diam-diam
+        memindahkan orang ke shift lain.
+
+
+        **`jam_pulang` boleh diisi atau dipindah, tapi tidak boleh dikosongkan
+        kembali.** Membuka kembali shift yang sudah `SELESAI` akan mengaktifkan lagi
+        `presensi_terbuka_uidx` untuk hari yang sudah lewat, dan orangnya tidak bisa
+        absen lagi besok pagi.
+
+
+        **`status` dihitung ulang dari kolomnya, tidak pernah diterima dari form.**
+        `jam_pulang` terisi setelah patch → `SELESAI`; kalau tidak, statusnya tetap
+        seperti sebelumnya (`BUKA` atau `LUPA_PULANG`). Mengoreksi baris
+        `LUPA_PULANG` dengan mengisi `jam_pulang`-nya membuatnya `SELESAI` dengan
+        sendirinya.
+
+
+        `id_user` dan `tanggal` **tidak ada di DTO**: memindahkan presensi ke orang
+        lain atau ke hari lain bukan koreksi. `jam_masuk`/`jam_pulang` diberikan
+        sebagai jam dinding WIB dan ditempelkan pada `tanggal` baris itu sendiri,
+        jadi sebuah koreksi tidak bisa menyeberang hari.
+
+
+        `alasan_koreksi` **wajib** dan tidak bisa dikosongkan — satu-satunya catatan
+        kenapa jam seseorang berubah. Kebijakan, bukan constraint; presedennya
+        `keterangan_selisih` dan `retur_pembelian.alasan`.
+      operationId: updatePresensi
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_koreksi]
+              properties:
+                jam_masuk:
+                  type: string
+                  example: "06:45"
+                  description: Jam dinding WIB (`HH:MM`), ditempelkan pada tanggal baris ini.
+                jam_pulang:
+                  type: string
+                  example: "17:05"
+                  description: >
+                    Jam dinding WIB (`HH:MM`). Tidak boleh dikirim `null` — itu berarti
+                    membuka kembali shift yang sudah selesai, yang ditolak 400.
+                shift: { type: string, enum: [PAGI, MALAM] }
+                alasan_koreksi: { type: string, maxLength: 1000 }
+      responses:
+        "200":
+          description: Baris setelah dikoreksi
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Presensi" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409":
+          description: >
+            Koreksi `shift` bertabrakan dengan `presensi_user_tanggal_shift_uidx` —
+            orangnya sudah punya baris di shift tujuan pada tanggal yang sama.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { nullable: true, example: null }
+                  errors: { type: string, example: "orang ini sudah punya presensi di shift itu pada tanggal yang sama" }
+
 components:
   securitySchemes:
     bearerAuth:
@@ -7219,6 +7724,77 @@ components:
           example: "10500.0000"
         keterangan_selisih: { type: string, nullable: true }
 
+    CreatePembelianRequest:
+      type: object
+      required: [tanggal, id_supplier, id_ruang, detail]
+      properties:
+        tanggal: { type: string, format: date, example: "2026-08-11" }
+        id_supplier: { type: integer, format: int64, minimum: 1 }
+        id_ruang:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Ruang tujuan seluruh baris. Satu dokumen tidak bisa masuk ke dua
+            ruang.
+
+
+            Isu #12 fase 5: divalidasi terhadap unit_kerja aktif sesi
+            pemanggil. Konteks aktif global (grant tanpa unit, bentuk
+            SUPERADMIN) tidak dibatasi; konteks aktif yang menyebut
+            satu unit hanya boleh memilih ruang di unit itu, kalau
+            tidak → 403.
+        no_faktur_supplier:
+          type: string
+          nullable: true
+          maxLength: 64
+          description: >
+            Unik per supplier dan tidak peduli huruf besar-kecil. Tanpa
+            purchase order, ini satu-satunya jejak faktur supplier — nota
+            yang sama diinput dua kali akan menaikkan stok dua kali. Dokumen
+            `BATAL` melepas nomornya kembali. Boleh kosong, dan berapa pun
+            dokumen boleh sama-sama kosong.
+        tanggal_faktur: { type: string, format: date, nullable: true }
+        diskon_nota:
+          type: string
+          description: Desimal. Tidak boleh melebihi subtotal.
+          example: "0"
+        ppn: { type: string, example: "0" }
+        ppn_dikreditkan:
+          type: boolean
+          default: false
+          description: >
+            `false` berarti PPN ikut masuk harga pokok; `true` berarti jadi
+            pajak masukan dan tidak menyentuh harga pokok.
+        pembulatan:
+          type: string
+          description: Boleh negatif — ini baris pembulatan nota.
+          example: "0"
+        id_ekspedisi: { type: integer, format: int64, nullable: true, minimum: 1 }
+        no_resi: { type: string, nullable: true, maxLength: 64 }
+        total_koli: { type: string, nullable: true, example: "3" }
+        tarif_per_koli: { type: string, nullable: true, example: "50000" }
+        ditanggung_supplier:
+          type: boolean
+          default: false
+          description: >
+            `true` berarti ongkir sudah termasuk nota supplier dan **tidak
+            dialokasikan lagi** — mengalokasikannya berarti rupiah yang sama
+            masuk harga pokok dua kali.
+        metode_alokasi_angkut:
+          type: string
+          enum: [KOLI, QTY]
+          default: KOLI
+        jenis_pembayaran:
+          type: string
+          enum: [TUNAI, KREDIT]
+          default: TUNAI
+        detail:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items: { $ref: "#/components/schemas/PembelianDetailInput" }
+
     PembelianDetailInput:
       type: object
       required: [id_product, id_satuan_input, qty_faktur, harga_satuan_input]
@@ -7244,6 +7820,71 @@ components:
         diskon_baris: { type: string, example: "0" }
         jumlah_koli: { type: string, example: "0" }
         keterangan_selisih: { type: string, nullable: true, maxLength: 500 }
+
+    OCRPembelianInfo:
+      type: object
+      description: >
+        isu #39. Bagian yang tidak pernah dikirim ke `POST /pembelian`: apa yang
+        Gemini baca, apa yang endpoint OCR menghitung sendiri dari `usulan`, dan
+        setiap peringatan yang muncul di sepanjang jalan. Tidak satu pun di sini
+        menolak panggilan — tujuannya `usulan` yang tidak diubah sama sekali
+        lolos `POST /pembelian`, atau pemanggil sudah tahu kenapa tidak sebelum
+        mengoreksi baris satu per satu.
+      required: [model, total_dihitung, peringatan, baris]
+      properties:
+        model: { type: string, example: "gemini-3.6-flash" }
+        supplier_terbaca:
+          type: string
+          nullable: true
+          description: Nama supplier seperti terbaca di kop dokumen — dibandingkan mata manusia, tidak pernah dipakai memilih id_supplier.
+        total_terbaca:
+          type: string
+          nullable: true
+          description: Total seperti terbaca di dokumen, dinormalisasi ke bentuk desimal biasa.
+        total_dihitung:
+          type: string
+          description: >
+            Total `usulan` sendiri, dijumlahkan dengan rumus yang sama seperti
+            `POST /pembelian` (subtotal setiap baris dikurangi diskon_nota,
+            ditambah ppn). Dibandingkan dengan total_terbaca untuk peringatan
+            "total terbaca berbeda dari total dihitung"; tidak pernah diambil
+            dari faktur begitu saja.
+        peringatan:
+          type: array
+          items: { type: string }
+          description: >
+            Setiap alasan sebuah baris tidak dikenali, angka yang tidak
+            terbaca, no_faktur_supplier duplikat, atau ketidakcocokan total —
+            selalu dalam bahasa yang menyebut nomor barisnya.
+        baris:
+          type: array
+          items: { $ref: "#/components/schemas/OCRPembelianBaris" }
+
+    OCRPembelianBaris:
+      type: object
+      description: >
+        Satu baris pada foto, dipetakan ke posisinya di `usulan.detail` lewat
+        `indeks_usulan` — atau `null` kalau baris itu tidak dikenali, supaya
+        tidak hilang diam-diam dan bisa dipetakan manual.
+      required: [urutan, indeks_usulan, teks_asli]
+      properties:
+        urutan: { type: integer, format: int64, description: Nomor urut baris pada dokumen. }
+        indeks_usulan:
+          type: integer
+          nullable: true
+          description: Indeks baris ini di usulan.detail, atau null kalau tidak dikenali dan karena itu tidak ikut diusulkan.
+        teks_asli: { type: string, description: Teks nama barang persis seperti tertulis di foto. }
+        kode_vendor: { type: string, nullable: true, description: Kode barang milik vendor, kalau ada — bukan kode_barang kita. }
+        kode_barang: { type: string, description: Hanya ada saat baris ini dikenali. }
+        nama_product: { type: string, description: Hanya ada saat baris ini dikenali. }
+        qty:
+          type: string
+          nullable: true
+          description: Hanya dilaporkan untuk baris yang tidak dikenali, sebagai bekas untuk pemetaan manual.
+        harga:
+          type: string
+          nullable: true
+          description: Hanya dilaporkan untuk baris yang tidak dikenali.
 
     RiwayatBeli:
       type: object
@@ -7970,11 +8611,19 @@ components:
           description: Jumlah `subtotal` seluruh baris.
           example: "150000.00"
         diskon_nota: { type: string, example: "0.00" }
+        ppn:
+          type: string
+          example: "16500.00"
+          description: >
+            PPN keluaran, *exclusive*: ditambahkan di atas DPP, bukan dipecah dari
+            harga. Nominal rupiah yang diketik klien, bukan tarif — cermin
+            `pembelian.ppn`, tanpa pasangan `ppn_dikreditkan` karena PPN keluaran
+            tidak pernah jadi harga pokok.
         pembulatan: { type: string, example: "0.00" }
         total:
           type: string
-          description: "`subtotal - diskon_nota + pembulatan`."
-          example: "150000.00"
+          description: "`subtotal - diskon_nota + ppn + pembulatan`."
+          example: "166500.00"
         total_hpp:
           type: string
           nullable: true
@@ -8280,7 +8929,18 @@ components:
       description: Laba kotor satu bulan kalender — isu #22 fase 3.
       properties:
         bulan: { type: string, example: "2026-08" }
-        total_penjualan: { type: string, description: "SUM(total) nota POSTED." }
+        total_penjualan:
+          type: string
+          description: >
+            `SUM(total - ppn)` nota POSTED — omzet **bersih dari PPN keluaran**. PPN
+            yang dipungut di kasir itu uang negara yang cuma lewat di nota, bukan
+            pendapatan toko; membiarkannya di sini akan melebihkan margin tiap bulan
+            persis sebesar pajaknya.
+        total_ppn:
+          type: string
+          description: >
+            `SUM(ppn)` nota POSTED, dilaporkan terpisah supaya `total_penjualan +
+            total_ppn` tetap sama dengan jumlah `total` notanya sendiri.
         total_hpp: { type: string, description: "SUM(total_hpp) nota POSTED." }
         laba_kotor: { type: string, description: "total_penjualan - total_hpp." }
 
@@ -8701,6 +9361,150 @@ components:
         size: { type: integer }
         total_item: { type: integer, format: int64 }
         total_page: { type: integer, format: int64 }
+
+    Presensi:
+      type: object
+      description: >
+        Satu shift kehadiran: orang ini masuk di sini, pada jam ini, di shift ini,
+        dan (kalau sudah ditutup) pulang pada jam itu.
+      properties:
+        id: { type: integer, format: int64 }
+        id_user: { type: integer, format: int64 }
+        nama_user:
+          type: string
+          description: >
+            `nama_lengkap`, jatuh ke `username` kalau kosong — daftar kehadiran dengan
+            nama kosong tidak ada gunanya, dan setiap user pasti punya username.
+        tanggal:
+          type: string
+          format: date
+          description: >
+            Tanggal kalender **WIB** dari `jam_masuk`, dipotong di server. WIB dipakai
+            sebagai offset tetap UTC+7, bukan `time.LoadLocation` — Indonesia bagian
+            barat tidak punya DST dan tidak ada yang bergantung pada tzdata terpasang
+            di container.
+        shift:
+          type: string
+          enum: [PAGI, MALAM]
+          description: >
+            Disimpulkan server dari jam tekan tombol masuk (batas 17:30 WIB), tidak
+            pernah dipilih klien. Boleh dikoreksi lewat PATCH, tapi tidak pernah
+            disimpulkan ulang dari jam yang dikoreksi.
+        jam_masuk: { type: string, format: date-time }
+        jam_pulang:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            `null` selama shift masih `BUKA` atau kalau berakhir `LUPA_PULANG` —
+            tidak pernah diisi jam karangan. Hanya terisi lewat tombol pulang atau
+            lewat koreksi eksplisit.
+        status:
+          type: string
+          enum: [BUKA, SELESAI, LUPA_PULANG]
+          description: >
+            `BUKA` sejak tombol masuk sampai ditutup; `SELESAI` setelah tombol pulang
+            atau koreksi yang mengisi `jam_pulang`; `LUPA_PULANG` kalau ditutup tanpa
+            jam pulang — oleh tap berikutnya yang membuka shift lain, atau oleh
+            sapuan harian di worker. Selalu dihitung ulang, tidak pernah diterima
+            dari form.
+        durasi_kerja_menit:
+          type: integer
+          nullable: true
+          description: >
+            Dihitung saat dibaca dari `jam_pulang - jam_masuk`, **tidak disimpan** —
+            satu-satunya angka turunan di proyek ini yang sengaja bukan snapshot,
+            karena koreksi yang menggeser salah satu jamnya harus menggeser
+            durasinya juga. `null`, bukan `0`, selama shift belum `SELESAI`.
+        id_unit_kerja:
+          type: integer
+          format: int64
+          nullable: true
+          description: >
+            **Snapshot** konteks aktif sesi saat menekan tombol masuk, bukan turunan
+            yang dibaca ulang nanti: grant seseorang bisa berpindah unit bulan depan,
+            dan rekap bulan lalu tidak boleh ikut berpindah bersamanya. Null berarti
+            grantnya global.
+        nama_unit_kerja: { type: string, nullable: true }
+        sumber_masuk:
+          type: string
+          enum: [TOMBOL, KOREKSI]
+          description: >
+            `TOMBOL` berarti orangnya menekan sendiri; `KOREKSI` berarti jam masuknya
+            diketik atau digeser orang lain. Baris yang jamnya diketik orang lain
+            harus selamanya terbaca begitu.
+        sumber_pulang: { type: string, enum: [TOMBOL, KOREKSI], nullable: true }
+        ip_masuk:
+          type: string
+          nullable: true
+          description: >
+            `ctx.IP()` apa adanya. **Belum membuktikan apa pun**: proyek ini tidak
+            punya konfigurasi trusted-proxy di mana pun, jadi di belakang reverse
+            proxy setiap permintaan bisa menunjukkan alamat yang sama. Diisi supaya
+            berguna begitu setelan itu ada, bukan supaya dipercaya hari ini.
+        ip_pulang: { type: string, nullable: true }
+        dikoreksi_oleh: { type: integer, format: int64, nullable: true }
+        ts_koreksi: { type: string, format: date-time, nullable: true }
+        alasan_koreksi: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    PresensiShiftHariIni:
+      type: object
+      properties:
+        shift: { type: string, enum: [PAGI, MALAM] }
+        status:
+          type: string
+          enum: [BELUM_MASUK, BUKA, SELESAI, LUPA_PULANG]
+          description: >
+            `BELUM_MASUK` untuk shift yang belum punya baris — jawaban sintetis,
+            bukan 404. Setiap field lain ikut kosong dalam keadaan itu.
+        id: { type: integer, format: int64, nullable: true }
+        jam_masuk: { type: string, format: date-time, nullable: true }
+        jam_pulang: { type: string, format: date-time, nullable: true }
+        durasi_kerja_menit: { type: integer, nullable: true }
+
+    PresensiHariIni:
+      type: object
+      properties:
+        tanggal: { type: string, format: date }
+        shift_sekarang:
+          type: string
+          enum: [PAGI, MALAM]
+          description: >
+            Kesimpulan server dari jamnya sendiri — yang memutuskan tombol mana
+            digambar, bukan handphone.
+        pagi: { $ref: "#/components/schemas/PresensiShiftHariIni" }
+        malam: { $ref: "#/components/schemas/PresensiShiftHariIni" }
+
+    RekapPresensi:
+      type: object
+      description: >
+        Satu bulan milik satu karyawan. Angka yang ditunggu penggajian, dilaporkan
+        tanpa memutuskan apa pun.
+      properties:
+        id_user: { type: integer, format: int64 }
+        nama_user: { type: string }
+        tahun: { type: integer }
+        bulan: { type: integer }
+        hari_pagi_selesai: { type: integer }
+        hari_malam_selesai: { type: integer }
+        hari_dua_shift:
+          type: integer
+          description: >
+            Hari kalender yang `PAGI` **dan** `MALAM`-nya sama-sama `SELESAI`. Angka
+            tersendiri, bukan sesuatu yang bisa diturunkan klien:
+            `hari_pagi_selesai + hari_malam_selesai` menghitung hari itu dua kali dan
+            tidak bisa menyebut hari mana yang bertindih.
+        hari_lupa_pulang_pagi:
+          type: integer
+          description: >
+            Dihitung terpisah, tidak pernah dilebur ke `hari_pagi_selesai` — apakah
+            hari `LUPA_PULANG` tetap dihitung hadir adalah kebijakan penggajian yang
+            belum ditulis.
+        hari_lupa_pulang_malam: { type: integer }
+        total_menit_kerja_pagi: { type: integer }
+        total_menit_kerja_malam: { type: integer }
 
   responses:
     Error:

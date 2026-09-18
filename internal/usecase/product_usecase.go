@@ -17,15 +17,6 @@ import (
 // dateOnly parses berlaku_dari, which is a DATE: no time, no zone.
 const dateOnly = "2006-01-02"
 
-// zonaHargaJual is Asia/Jakarta (WIB), used only to decide which calendar date a
-// point in time falls on for product_harga_jual purposes — isu #8 fase 1.
-//
-// A fixed UTC+7 offset rather than time.LoadLocation("Asia/Jakarta"): Indonesia's
-// western zone observes no daylight saving, so the offset never changes, and a fixed
-// zone does not depend on a tzdata database being present in whatever image this
-// runs in. If WIB is ever redefined, this is the one place to change.
-var zonaHargaJual = time.FixedZone("WIB", 7*60*60)
-
 // tanggalHargaJual truncates a point in time to the calendar date that decides which
 // product_harga_jual version applies, in the store's own calendar (WIB) rather than
 // the server's or UTC's.
@@ -41,7 +32,7 @@ var zonaHargaJual = time.FixedZone("WIB", 7*60*60)
 // The returned time is midnight UTC on that date, which is how every DATE column in
 // this codebase is already represented in Go (see berlakuDari in AddHargaJual).
 func tanggalHargaJual(t time.Time) time.Time {
-	tahun, bulan, hari := t.In(zonaHargaJual).Date()
+	tahun, bulan, hari := t.In(zonaWIB).Date()
 
 	return time.Date(tahun, bulan, hari, 0, 0, 0, 0, time.UTC)
 }
@@ -702,7 +693,7 @@ func (c *ProductUseCase) StokMinimum(ctx context.Context, request *model.ListSto
 	}
 
 	list, total, err := c.KartuStokRepository.StokMinimum(
-		ctx, c.DB, idRuang, request.AktifIDUnitKerja, request.Size, request.Offset(),
+		ctx, c.DB, request.Search, idRuang, request.AktifIDUnitKerja, request.Size, request.Offset(),
 	)
 	if err != nil {
 		return nil, nil, err

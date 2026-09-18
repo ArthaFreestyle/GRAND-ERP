@@ -221,3 +221,57 @@ func TestLabaKotorMenjumlahkanNotaPostedSajaPerBulan(t *testing.T) {
 		t.Errorf("laba_kotor = %s, want 50000 (some NUMERIC scale)", list[0].LabaKotor)
 	}
 }
+
+// PPN keluaran never counts as revenue. It is collected for the state and merely
+// passes through the nota, so a month's margin must not move when a nota starts
+// charging it — leaving it inside total_penjualan would inflate laba_kotor by the
+// entire tax. It is still reported, in total_ppn, so the two add back up to what the
+// notas themselves say.
+func TestLabaKotorMengeluarkanPPNDariOmzet(t *testing.T) {
+	testApp := newApp(t)
+	f := pembelianFixture(t, testApp)
+
+	draft := draftSederhana(t, testApp, f, "100", nil, nil)
+	ajukanDanPosting(t, testApp, f, draft.ID)
+
+	// Same nota as the test above — 10 x 15.000, HPP 10 x 10.000 — but charging
+	// 16.500 of PPN on top, so total is 166.500 while revenue is still 150.000.
+	terjual, err := testApp.penjualan.Create(ctx(), &model.CreatePenjualanRequest{
+		ActorID: f.actor, Tanggal: "2026-08-16", IDRuang: f.ruang, PPN: "16500",
+		Detail: []model.PenjualanDetailRequest{{
+			IDProduct: f.product, IDSatuanInput: f.pcs, QtyInput: "10", HargaSatuanInput: "15000",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create penjualan: %v", err)
+	}
+	if terjual.Total != "166500.00" {
+		t.Fatalf("total nota = %s, want 166500.00", terjual.Total)
+	}
+	if _, err := testApp.penjualan.Posting(ctx(), &model.PostingPenjualanRequest{
+		ID: terjual.ID, ActorID: f.actor,
+	}); err != nil {
+		t.Fatalf("posting penjualan: %v", err)
+	}
+
+	dari, sampai := "2026-08-01", "2026-08-31"
+	list, err := testApp.laporan.LabaKotor(ctx(), &model.ListLabaKotorRequest{
+		Dari: &dari, Sampai: &sampai, AktifIDUnitKerja: &f.unitKerja,
+	})
+	if err != nil {
+		t.Fatalf("laba kotor: %v", err)
+	}
+
+	if len(list) != 1 {
+		t.Fatalf("len(list) = %d, want 1 bulan", len(list))
+	}
+	if list[0].TotalPenjualan != "150000.00" {
+		t.Errorf("total_penjualan = %s, want 150000.00 — PPN bukan omzet", list[0].TotalPenjualan)
+	}
+	if list[0].TotalPPN != "16500.00" {
+		t.Errorf("total_ppn = %s, want 16500.00", list[0].TotalPPN)
+	}
+	if list[0].LabaKotor != "50000.0000" && list[0].LabaKotor != "50000.00" {
+		t.Errorf("laba_kotor = %s, want 50000 — tidak boleh bergerak karena PPN", list[0].LabaKotor)
+	}
+}

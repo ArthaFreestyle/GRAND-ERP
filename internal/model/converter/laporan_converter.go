@@ -24,6 +24,7 @@ func LabaKotorToResponses(list []entity.LabaKotorBaris) []model.LabaKotorRespons
 		responses[i] = model.LabaKotorResponse{
 			Bulan:          list[i].Bulan,
 			TotalPenjualan: list[i].TotalPenjualan,
+			TotalPPN:       list[i].TotalPPN,
 			TotalHPP:       list[i].TotalHPP,
 			LabaKotor:      list[i].LabaKotor,
 		}

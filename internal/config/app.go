@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"database/sql"
 
 	deliveryhttp "Arthafreestyle/ERP/internal/delivery/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/viper"
+	"google.golang.org/genai"
 )
 
 type BootstrapConfig struct {
@@ -54,6 +56,7 @@ func Bootstrap(config *BootstrapConfig) {
 	dokumenRepository := repository.NewDokumenRepository()
 	periodeRepository := repository.NewPeriodeRepository()
 	stokOpnameRepository := repository.NewStokOpnameRepository()
+	presensiRepository := repository.NewPresensiRepository()
 
 	unitKerjaUseCase := usecase.NewUnitKerjaUseCase(
 		config.DB, config.Log, config.Validate, unitKerjaRepository,
@@ -238,6 +241,40 @@ func Bootstrap(config *BootstrapConfig) {
 		config.DB, config.Log, config.Validate, dokumenRepository, dokumenStorage,
 		dokumenConfig.MaxUkuranByte, dokumenConfig.OrphanTTL,
 	)
+
+	// OCR pembelian via Gemini (isu #39). geminiConfig.APIKey empty is a supported,
+	// ordinary state — unlike jwt.secret, nothing here Fatals — and
+	// ocrPembelianController stays nil in that case, the same shape docsController
+	// takes when web.swagger is false: RouteConfig leaves the routes unregistered
+	// rather than handing the app something with no client behind it.
+	//
+	// The genai.Client is built once, here, and injected into GeminiFakturReader —
+	// never created per request. It reuses dokumenConfig.MaxUkuranByte rather than a
+	// second size limit, the issue's own decision.
+	geminiConfig := NewGeminiConfig(config.Config)
+
+	var ocrPembelianController *deliveryhttp.OCRPembelianController
+
+	if geminiConfig.APIKey != "" {
+		geminiClient, err := genai.NewClient(context.Background(), &genai.ClientConfig{
+			APIKey:  geminiConfig.APIKey,
+			Backend: genai.BackendGeminiAPI,
+		})
+		if err != nil {
+			config.Log.WithError(err).Fatal("gemini: client tidak siap")
+		}
+
+		fakturReader := repository.NewGeminiFakturReader(geminiClient, geminiConfig.Model)
+
+		ocrPembelianUseCase := usecase.NewOCRPembelianUseCase(
+			config.Log, config.DB, config.Validate,
+			productRepository, pembelianRepository, ruangRepository, fakturReader,
+			dokumenConfig.MaxUkuranByte, geminiConfig.Timeout,
+		)
+
+		ocrPembelianController = deliveryhttp.NewOCRPembelianController(config.Log, ocrPembelianUseCase)
+	}
+
 	// Fails the process at boot when jwt.secret is missing or too short, rather than
 	// at the first login attempt.
 	authConfig := NewAuthConfig(config.Config, config.Log)
@@ -269,6 +306,13 @@ func Bootstrap(config *BootstrapConfig) {
 		refreshTokenRepository,
 	)
 
+	// PresensiUseCase (isu #40) is the first usecase in this project that touches
+	// neither kartu_stok nor money — no periode, no ruang freeze, no document
+	// counter, no big.Rat.
+	presensiUseCase := usecase.NewPresensiUseCase(
+		config.DB, config.Log, config.Validate, presensiRepository,
+	)
+
 	ruangController := deliveryhttp.NewRuangController(config.Log, ruangUseCase)
 	unitKerjaController := deliveryhttp.NewUnitKerjaController(config.Log, unitKerjaUseCase)
 	satuanController := deliveryhttp.NewSatuanController(config.Log, satuanUseCase)
@@ -279,6 +323,7 @@ func Bootstrap(config *BootstrapConfig) {
 	dokumenController := deliveryhttp.NewDokumenController(config.Log, dokumenUseCase)
 	periodeController := deliveryhttp.NewPeriodeController(config.Log, periodeUseCase)
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
+	presensiController := deliveryhttp.NewPresensiController(config.Log, presensiUseCase)
 	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
 	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
 	returController := deliveryhttp.NewReturPembelianController(config.Log, returUseCase)
@@ -301,31 +346,33 @@ func Bootstrap(config *BootstrapConfig) {
 	}
 
 	routeConfig := route.RouteConfig{
-		App:                  config.App,
-		AuthUseCase:          authUseCase,
-		DocsController:       docsController,
-		AuthController:       authController,
-		DokumenController:    dokumenController,
-		PeriodeController:    periodeController,
-		PembelianController:  pembelianController,
-		SusulanController:    susulanController,
-		ReturController:      returController,
-		MutasiController:     mutasiController,
-		PemakaianController:  pemakaianController,
-		PenjualanController:  penjualanController,
-		PembayaranController: pembayaranController,
-		PenerimaanController: penerimaanController,
-		StokOpnameController: stokOpnameController,
-		ProductController:    productController,
-		LaporanController:    laporanController,
-		UnitKerjaController:  unitKerjaController,
-		RuangController:      ruangController,
-		SatuanController:     satuanController,
-		EkspedisiController:  ekspedisiController,
-		SupplierController:   supplierController,
-		PelangganController:  pelangganController,
-		RoleController:       roleController,
-		UserController:       userController,
+		App:                    config.App,
+		AuthUseCase:            authUseCase,
+		DocsController:         docsController,
+		AuthController:         authController,
+		DokumenController:      dokumenController,
+		PeriodeController:      periodeController,
+		PembelianController:    pembelianController,
+		OCRPembelianController: ocrPembelianController,
+		SusulanController:      susulanController,
+		ReturController:        returController,
+		MutasiController:       mutasiController,
+		PemakaianController:    pemakaianController,
+		PenjualanController:    penjualanController,
+		PembayaranController:   pembayaranController,
+		PenerimaanController:   penerimaanController,
+		StokOpnameController:   stokOpnameController,
+		ProductController:      productController,
+		PresensiController:     presensiController,
+		LaporanController:      laporanController,
+		UnitKerjaController:    unitKerjaController,
+		RuangController:        ruangController,
+		SatuanController:       satuanController,
+		EkspedisiController:    ekspedisiController,
+		SupplierController:     supplierController,
+		PelangganController:    pelangganController,
+		RoleController:         roleController,
+		UserController:         userController,
 	}
 	routeConfig.Setup()
 }

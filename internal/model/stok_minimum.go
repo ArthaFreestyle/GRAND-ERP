@@ -29,6 +29,15 @@ type StokMinimumResponse struct {
 // unit_kerja can see.
 type ListStokMinimumRequest struct {
 	PageRequest
+
+	// Search narrows by nama or kode_barang, the same pair GET /product already
+	// matches on. It exists because this list is paginated: filtering the loaded
+	// page in the browser can only ever find a product that happens to be on it,
+	// so a purchaser looking for one item by name never sees it once the queue
+	// outgrows a page. The filter therefore has to run in SQL, alongside the
+	// stok_minimum comparison itself.
+	Search string `query:"search" validate:"omitempty,max=255"`
+
 	IDRuang int64 `query:"id_ruang" validate:"omitempty,gt=0"`
 
 	// AktifIDUnitKerja is filled from the session's active grant by the controller,

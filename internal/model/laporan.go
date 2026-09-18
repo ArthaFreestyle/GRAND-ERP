@@ -25,9 +25,15 @@ type ListNilaiPersediaanRequest struct {
 }
 
 // LabaKotorResponse is gross margin for one calendar month ("YYYY-MM").
+//
+// total_penjualan is net of output VAT: PPN charged at the till belongs to the
+// state, not to the shop, so counting it as revenue would overstate margin by the
+// entire tax. total_ppn carries what was taken out, so total_penjualan + total_ppn
+// is still exactly the SUM of the notas' own totals.
 type LabaKotorResponse struct {
 	Bulan          string `json:"bulan"`
 	TotalPenjualan string `json:"total_penjualan"`
+	TotalPPN       string `json:"total_ppn"`
 	TotalHPP       string `json:"total_hpp"`
 	LabaKotor      string `json:"laba_kotor"`
 }

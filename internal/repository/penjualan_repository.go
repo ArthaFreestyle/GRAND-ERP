@@ -22,7 +22,7 @@ func NewPenjualanRepository() *PenjualanRepository {
 // Every NUMERIC is cast to TEXT. Scanning NUMERIC into a float64 rounds money, and
 // these figures become a nota total and, for a KREDIT sale, a receivable.
 const penjualanColumns = `id, nomor, tanggal, id_ruang, id_pelanggan,
-	subtotal::TEXT, diskon_nota::TEXT, pembulatan::TEXT, total::TEXT, total_hpp::TEXT,
+	subtotal::TEXT, diskon_nota::TEXT, ppn::TEXT, pembulatan::TEXT, total::TEXT, total_hpp::TEXT,
 	jenis_pembayaran, status_pembayaran, status, created_by, created_at, posted_at,
 	dibatalkan_oleh, alasan_batal`
 
@@ -31,7 +31,7 @@ const penjualanColumns = `id, nomor, tanggal, id_ruang, id_pelanggan,
 // r.id_unit_kerja rides along for isu #21 fase 2 (read-path scoping); it costs
 // nothing extra since penjualanFrom already joins ruang for its name.
 const penjualanReadColumns = `p.id, p.nomor, p.tanggal, p.id_ruang, p.id_pelanggan,
-	p.subtotal::TEXT, p.diskon_nota::TEXT, p.pembulatan::TEXT, p.total::TEXT, p.total_hpp::TEXT,
+	p.subtotal::TEXT, p.diskon_nota::TEXT, p.ppn::TEXT, p.pembulatan::TEXT, p.total::TEXT, p.total_hpp::TEXT,
 	p.jenis_pembayaran, p.status_pembayaran, p.status, p.created_by, p.created_at, p.posted_at,
 	p.dibatalkan_oleh, p.alasan_batal, r.nama_ruang, pel.nama, r.id_unit_kerja`
 
@@ -134,24 +134,32 @@ type PenjualanPatch struct {
 	IDPelanggan     *int64
 	JenisPembayaran *string
 	DiskonNota      *string
+	PPN             *string
 	Pembulatan      *string
 }
 
 // Create inserts the header and fills ID. It returns only the generated key; the
 // response is always re-read through FindByID, which is the only query that can
 // reach the joined names.
+//
+// diskon_nota, ppn, and pembulatan are written here, not left to SimpanTotal: that
+// statement writes subtotal and total alone, so a header created with any of the
+// three omitted from this INSERT would read back as 0 while its own total already
+// had them applied — the nota's own arithmetic disagreeing with the nota. pembelian's
+// Create has always listed all of its money columns for the same reason.
 func (r *PenjualanRepository) Create(ctx context.Context, db DBTX, penjualan *entity.Penjualan) error {
 	const query = `
 		INSERT INTO penjualan (
-			nomor, tanggal, id_ruang, id_pelanggan, jenis_pembayaran, status,
-			status_pembayaran, created_by
+			nomor, tanggal, id_ruang, id_pelanggan, diskon_nota, ppn, pembulatan,
+			jenis_pembayaran, status, status_pembayaran, created_by
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		VALUES ($1, $2, $3, $4, $5::NUMERIC, $6::NUMERIC, $7::NUMERIC, $8, $9, $10, $11)
 		RETURNING id, created_at`
 
 	err := db.QueryRowContext(
 		ctx, query,
 		penjualan.Nomor, penjualan.Tanggal, penjualan.IDRuang, penjualan.IDPelanggan,
+		penjualan.DiskonNota, penjualan.PPN, penjualan.Pembulatan,
 		penjualan.JenisPembayaran, penjualan.Status, penjualan.StatusPembayaran,
 		penjualan.CreatedBy,
 	).Scan(&penjualan.ID, &penjualan.CreatedAt)
@@ -203,7 +211,8 @@ func (r *PenjualanRepository) UpdateHeader(ctx context.Context, db DBTX, id int6
 			id_pelanggan     = CASE WHEN $4::BOOLEAN THEN $5 ELSE id_pelanggan END,
 			jenis_pembayaran = COALESCE($6, jenis_pembayaran),
 			diskon_nota      = COALESCE($7::NUMERIC, diskon_nota),
-			pembulatan       = COALESCE($8::NUMERIC, pembulatan)
+			ppn              = COALESCE($8::NUMERIC, ppn),
+			pembulatan       = COALESCE($9::NUMERIC, pembulatan)
 		WHERE id = $1
 		RETURNING id`
 
@@ -212,7 +221,7 @@ func (r *PenjualanRepository) UpdateHeader(ctx context.Context, db DBTX, id int6
 	err := db.QueryRowContext(
 		ctx, query, id, patch.Tanggal, patch.IDRuang,
 		patch.SetIDPelanggan, patch.IDPelanggan, patch.JenisPembayaran,
-		patch.DiskonNota, patch.Pembulatan,
+		patch.DiskonNota, patch.PPN, patch.Pembulatan,
 	).Scan(&updated)
 	if err != nil {
 		return err
@@ -225,9 +234,9 @@ func (r *PenjualanRepository) UpdateHeader(ctx context.Context, db DBTX, id int6
 //
 // Both figures are computed in Go with math/big.Rat, never in SQL: subtotal is the
 // straight sum of every line's own subtotal, and total = subtotal - diskon_nota +
-// pembulatan, validated by the usecase before this is ever called. Called from
+// ppn + pembulatan, validated by the usecase before this is ever called. Called from
 // Create and ReplaceDetail (subtotal freshly summed from the lines just written)
-// and from Update (subtotal unchanged, only diskon_nota or pembulatan moved) — one
+// and from Update (subtotal unchanged, only diskon_nota, ppn, or pembulatan moved) — one
 // statement rather than three, so there is never a window where subtotal and total
 // disagree with each other.
 func (r *PenjualanRepository) SimpanTotal(ctx context.Context, db DBTX, id int64, subtotal, total string) error {
@@ -612,8 +621,13 @@ func (r *PenjualanRepository) FindPiutangPelanggan(ctx context.Context, db DBTX,
 	return list, total, nil
 }
 
-// LabaKotor sums gross margin — total minus total_hpp — over POSTED notas, grouped
-// by the calendar month of p.tanggal — isu #22 fase 3.
+// LabaKotor sums gross margin — revenue net of output VAT minus total_hpp — over
+// POSTED notas, grouped by the calendar month of p.tanggal — isu #22 fase 3.
+//
+// p.ppn is subtracted from p.total before anything else: PPN keluaran is collected
+// for the state and merely passes through the nota, so leaving it in revenue would
+// inflate every month's margin by the whole tax. It is reported in its own column
+// rather than silently dropped, so the two still reconcile to the notas' totals.
 //
 // This is the one report in that issue reading a document table rather than
 // kartu_stok, and that is deliberate rather than an inconsistency: total_hpp is
@@ -636,7 +650,8 @@ func (r *PenjualanRepository) LabaKotor(
 ) ([]entity.LabaKotorBaris, error) {
 	const query = `
 		SELECT to_char(date_trunc('month', p.tanggal), 'YYYY-MM'),
-			SUM(p.total)::TEXT, SUM(p.total_hpp)::TEXT, SUM(p.total - p.total_hpp)::TEXT
+			SUM(p.total - p.ppn)::TEXT, SUM(p.ppn)::TEXT, SUM(p.total_hpp)::TEXT,
+			SUM(p.total - p.ppn - p.total_hpp)::TEXT
 		FROM penjualan p
 		WHERE p.status = 'POSTED'
 		  AND ($1::DATE IS NULL OR p.tanggal >= $1::DATE)
@@ -658,7 +673,10 @@ func (r *PenjualanRepository) LabaKotor(
 	for rows.Next() {
 		var baris entity.LabaKotorBaris
 
-		if err := rows.Scan(&baris.Bulan, &baris.TotalPenjualan, &baris.TotalHPP, &baris.LabaKotor); err != nil {
+		if err := rows.Scan(
+			&baris.Bulan, &baris.TotalPenjualan, &baris.TotalPPN,
+			&baris.TotalHPP, &baris.LabaKotor,
+		); err != nil {
 			return nil, fmt.Errorf("scan laba kotor: %w", err)
 		}
 
@@ -678,7 +696,7 @@ func penjualanFields(penjualan *entity.Penjualan) []any {
 	return []any{
 		&penjualan.ID, &penjualan.Nomor, &penjualan.Tanggal,
 		&penjualan.IDRuang, &penjualan.IDPelanggan,
-		&penjualan.Subtotal, &penjualan.DiskonNota, &penjualan.Pembulatan,
+		&penjualan.Subtotal, &penjualan.DiskonNota, &penjualan.PPN, &penjualan.Pembulatan,
 		&penjualan.Total, &penjualan.TotalHPP,
 		&penjualan.JenisPembayaran, &penjualan.StatusPembayaran, &penjualan.Status,
 		&penjualan.CreatedBy, &penjualan.CreatedAt, &penjualan.PostedAt,

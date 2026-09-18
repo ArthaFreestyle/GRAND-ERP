@@ -17,8 +17,8 @@ type NilaiPersediaanBaris struct {
 	TotalNilai string
 }
 
-// LabaKotorBaris is gross margin for one calendar month: SUM(total) - SUM(total_hpp)
-// over POSTED penjualan, grouped by the month of p.tanggal.
+// LabaKotorBaris is gross margin for one calendar month: SUM(total - ppn) -
+// SUM(total_hpp) over POSTED penjualan, grouped by the month of p.tanggal.
 //
 // This is the one report in the issue that reads penjualan rather than kartu_stok,
 // and that is correct rather than an inconsistency: total_hpp is already a snapshot
@@ -27,9 +27,17 @@ type NilaiPersediaanBaris struct {
 // the same number. retur_penjualan does not exist yet, so nothing here subtracts a
 // returned sale's margin back out — the day that module ships, this is where its
 // credit has to be wired in.
+//
+// TotalPenjualan is revenue NET of output VAT, and that subtraction is not a
+// presentation choice: PPN collected at the till is money owed to the state that
+// happens to pass through the nota, never the shop's income. Leaving it inside would
+// overstate every month's margin by the whole tax the moment penjualan.ppn stopped
+// always being zero. TotalPPN is reported alongside so the two still add back up to
+// what the notas themselves say.
 type LabaKotorBaris struct {
 	Bulan          string
 	TotalPenjualan string
+	TotalPPN       string
 	TotalHPP       string
 	LabaKotor      string
 }
