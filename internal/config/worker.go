@@ -144,6 +144,11 @@ func BootstrapWorker(config *WorkerBootstrapConfig) *Scheduler {
 		config.DB, config.Log, repository.NewKartuStokRepository(),
 	)
 
+	presensiConfig := NewPresensiConfig(config.Config, config.Log)
+	presensiUseCase := usecase.NewPresensiUseCase(
+		config.DB, config.Log, config.Validate, repository.NewPresensiRepository(),
+	)
+
 	return &Scheduler{
 		Log: config.Log,
 		Jobs: []Job{
@@ -159,6 +164,14 @@ func BootstrapWorker(config *WorkerBootstrapConfig) *Scheduler {
 				Nama:     "rekonsiliasi-rantai-kartu-stok",
 				Interval: rekonsiliasiConfig.Interval,
 				Jalankan: rekonsiliasiUseCase.PeriksaRantaiSaldo,
+			},
+			// isu #40 fase 5: the third job, closing BUKA rows nobody ever tapped
+			// Pulang for again. Same daily cadence, same reason — this is
+			// housekeeping for people who left, not a real-time concern.
+			{
+				Nama:     "sapuan-lupa-pulang",
+				Interval: presensiConfig.SapuanInterval,
+				Jalankan: presensiUseCase.SapuanLupaPulang,
 			},
 		},
 	}

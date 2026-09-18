@@ -47,6 +47,9 @@
   "rekonsiliasi": {
     "interval": "24h"
   },
+  "presensi": {
+    "sapuan_interval": "24h"
+  },
   "gemini": {
     "api_key": "",
     "model": "gemini-3.6-flash",

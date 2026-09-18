@@ -47,6 +47,7 @@ type RouteConfig struct {
 	PenerimaanController   *deliveryhttp.PenerimaanPembayaranController
 	StokOpnameController   *deliveryhttp.StokOpnameController
 	ProductController      *deliveryhttp.ProductController
+	PresensiController     *deliveryhttp.PresensiController
 	LaporanController      *deliveryhttp.LaporanController
 	UnitKerjaController    *deliveryhttp.UnitKerjaController
 	RuangController        *deliveryhttp.RuangController
@@ -154,6 +155,33 @@ func (c *RouteConfig) setupAuthRoute() {
 	// context first.
 	api.Post("/auth/me/password", c.AuthController.ChangePassword)
 
+	// presensi (isu #40). The four self-service routes carry NO role guard, the
+	// same tier as auth/me, switch-context, and me/password, and for the same
+	// reason written there: clocking in or out for yourself must not wait on the
+	// caller having picked an active context first. A session holding several
+	// grants and no active one (Aktif == nil, so RequireRole refuses it
+	// everything) can still tap — the row simply carries no unit_kerja, which is
+	// the honest record of a grant that names none.
+	//
+	// The buttons have no role guard for a second reason too: every employee
+	// attends for themselves whatever their role, and a guard here would be a
+	// list of who is allowed to come to work.
+	//
+	// Everything showing OTHER people's attendance is SUPERADMIN, and that is a
+	// deliberate departure from "reads are open to any authenticated caller". That
+	// rule was written for goods and prices; when somebody arrived is their
+	// colleague's personal data, and there is no reason a cashier can pull the
+	// whole office's hours. /presensi/saya covers the legitimate need everyone has.
+	// (Like the whole role matrix here, an assumption from three role names — the
+	// day an HR role exists, it is the right owner.)
+	//
+	// The literal segments are registered ahead of anything parameterised so
+	// /presensi/saya and /presensi/rekap cannot be swallowed by a future :id.
+	api.Post("/presensi/masuk", c.PresensiController.Masuk)
+	api.Post("/presensi/pulang", c.PresensiController.Pulang)
+	api.Get("/presensi/saya/hari-ini", c.PresensiController.HariIni)
+	api.Get("/presensi/saya", c.PresensiController.Saya)
+
 	// Guard first, controller last. Fiber v3's signature is
 	// Get(path, handler, handlers...) and the chain runs in the order given, so the
 	// role check has to be the FIRST argument. Putting it last registers a guard that
@@ -163,6 +191,14 @@ func (c *RouteConfig) setupAuthRoute() {
 	inventaris := middleware.RequireRole(RoleSuperadmin, RoleInventaris)
 	cashier := middleware.RequireRole(RoleSuperadmin, RoleCashier)
 	superadmin := middleware.RequireRole(RoleSuperadmin)
+
+	api.Get("/presensi", superadmin, c.PresensiController.List)
+	api.Get("/presensi/rekap", superadmin, c.PresensiController.Rekap)
+	// Correcting a recorded tap is writing an hour somebody else will be judged
+	// by. It always leaves a trail naming who did it and why —
+	// sumber_masuk/sumber_pulang = 'KOREKSI' and alasan_koreksi — so a row moved
+	// on someone's behalf never reads like their own tap.
+	api.Patch("/presensi/:id", superadmin, c.PresensiController.Update)
 
 	// dokumen is infrastructure rather than a module: attachments are needed by
 	// receiving, by returns, by delivery notes, and by stock counts, so it belongs to

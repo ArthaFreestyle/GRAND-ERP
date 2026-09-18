@@ -56,6 +56,7 @@ func Bootstrap(config *BootstrapConfig) {
 	dokumenRepository := repository.NewDokumenRepository()
 	periodeRepository := repository.NewPeriodeRepository()
 	stokOpnameRepository := repository.NewStokOpnameRepository()
+	presensiRepository := repository.NewPresensiRepository()
 
 	unitKerjaUseCase := usecase.NewUnitKerjaUseCase(
 		config.DB, config.Log, config.Validate, unitKerjaRepository,
@@ -305,6 +306,13 @@ func Bootstrap(config *BootstrapConfig) {
 		refreshTokenRepository,
 	)
 
+	// PresensiUseCase (isu #40) is the first usecase in this project that touches
+	// neither kartu_stok nor money — no periode, no ruang freeze, no document
+	// counter, no big.Rat.
+	presensiUseCase := usecase.NewPresensiUseCase(
+		config.DB, config.Log, config.Validate, presensiRepository,
+	)
+
 	ruangController := deliveryhttp.NewRuangController(config.Log, ruangUseCase)
 	unitKerjaController := deliveryhttp.NewUnitKerjaController(config.Log, unitKerjaUseCase)
 	satuanController := deliveryhttp.NewSatuanController(config.Log, satuanUseCase)
@@ -315,6 +323,7 @@ func Bootstrap(config *BootstrapConfig) {
 	dokumenController := deliveryhttp.NewDokumenController(config.Log, dokumenUseCase)
 	periodeController := deliveryhttp.NewPeriodeController(config.Log, periodeUseCase)
 	productController := deliveryhttp.NewProductController(config.Log, productUseCase)
+	presensiController := deliveryhttp.NewPresensiController(config.Log, presensiUseCase)
 	pembelianController := deliveryhttp.NewPembelianController(config.Log, pembelianUseCase)
 	susulanController := deliveryhttp.NewPenerimaanSusulanController(config.Log, susulanUseCase)
 	returController := deliveryhttp.NewReturPembelianController(config.Log, returUseCase)
@@ -354,6 +363,7 @@ func Bootstrap(config *BootstrapConfig) {
 		PenerimaanController:   penerimaanController,
 		StokOpnameController:   stokOpnameController,
 		ProductController:      productController,
+		PresensiController:     presensiController,
 		LaporanController:      laporanController,
 		UnitKerjaController:    unitKerjaController,
 		RuangController:        ruangController,

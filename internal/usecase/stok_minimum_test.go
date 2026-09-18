@@ -170,3 +170,79 @@ func TestStokMinimumProdukTidakAktifTidakMuncul(t *testing.T) {
 		}
 	}
 }
+
+// search runs in SQL, alongside the stok_minimum comparison, so a product that falls
+// on page two is still findable by name. Filtering the already-loaded page in the
+// browser could only ever find one that happened to land on page one — the gap this
+// parameter exists to close.
+//
+// The COUNT query shares the same filter constant as the row query, so total_item has
+// to agree with the rows; asserting it here is what pins that.
+func TestStokMinimumSearchMenyaringDiSQLBukanDiHalaman(t *testing.T) {
+	testApp := newApp(t)
+	f := stokMinimumFixture(t, testApp, 100, "5")
+
+	// A second product, also below its minimum, whose name shares nothing with the
+	// fixture's "Kertas A4".
+	kedua, err := testApp.product.Create(ctx(), &model.CreateProductRequest{
+		ActorID:       f.actor,
+		KodeBarang:    "BRG-777",
+		Nama:          "Tinta Printer",
+		IDSatuanDasar: f.pcs,
+		StokMinimum:   50,
+	})
+	if err != nil {
+		t.Fatalf("create produk kedua: %v", err)
+	}
+
+	// Page size 1: unsearched, both are flagged but only one row fits on a page.
+	semua, paging, err := testApp.product.StokMinimum(ctx(), &model.ListStokMinimumRequest{
+		PageRequest:      model.PageRequest{Page: 1, Size: 1},
+		AktifIDUnitKerja: &f.unitKerja,
+	})
+	if err != nil {
+		t.Fatalf("stok minimum tanpa search: %v", err)
+	}
+	if paging.TotalItem != 2 {
+		t.Fatalf("total_item tanpa search = %d, want 2", paging.TotalItem)
+	}
+	if len(semua) != 1 {
+		t.Fatalf("baris tanpa search = %d, want 1 (ukuran halaman)", len(semua))
+	}
+
+	// Searched, the product that did not fit on that page is the one returned — and
+	// total_item follows the filter rather than the unfiltered count.
+	hasil, paging, err := testApp.product.StokMinimum(ctx(), &model.ListStokMinimumRequest{
+		PageRequest:      model.PageRequest{Page: 1, Size: 1},
+		Search:           "Tinta",
+		AktifIDUnitKerja: &f.unitKerja,
+	})
+	if err != nil {
+		t.Fatalf("stok minimum dengan search: %v", err)
+	}
+	if paging.TotalItem != 1 {
+		t.Errorf("total_item dengan search = %d, want 1", paging.TotalItem)
+	}
+	if len(hasil) != 1 || hasil[0].IDProduct != kedua.ID {
+		t.Fatalf("search seharusnya menemukan produk di luar halaman pertama, got %+v", hasil)
+	}
+}
+
+// The same pair GET /product matches on: nama or kode_barang.
+func TestStokMinimumSearchCocokKodeBarang(t *testing.T) {
+	testApp := newApp(t)
+	f := stokMinimumFixture(t, testApp, 100, "5")
+
+	hasil, _, err := testApp.product.StokMinimum(ctx(), &model.ListStokMinimumRequest{
+		PageRequest:      model.PageRequest{Page: 1, Size: 20},
+		Search:           "brg-001",
+		AktifIDUnitKerja: &f.unitKerja,
+	})
+	if err != nil {
+		t.Fatalf("stok minimum: %v", err)
+	}
+
+	if len(hasil) != 1 || hasil[0].IDProduct != f.product {
+		t.Fatalf("search atas kode_barang seharusnya menemukan produk fixture, got %+v", hasil)
+	}
+}

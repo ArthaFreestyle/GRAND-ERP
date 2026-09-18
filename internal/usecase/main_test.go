@@ -113,6 +113,7 @@ type app struct {
 	dokumen      *usecase.DokumenUseCase
 	rekonsiliasi *usecase.RekonsiliasiUseCase
 	periode      *usecase.PeriodeUseCase
+	presensi     *usecase.PresensiUseCase
 	auth         *usecase.AuthUseCase
 	// ocr's FakturReader starts as a fakeFakturReader returning no lines at all —
 	// every real ocr_pembelian_test.go case swaps app.ocr.FakturReader for its own
@@ -222,6 +223,9 @@ func newApp(t *testing.T) *app {
 		),
 		periode: usecase.NewPeriodeUseCase(
 			testDB, log, validate, periodeRepository,
+		),
+		presensi: usecase.NewPresensiUseCase(
+			testDB, log, validate, repository.NewPresensiRepository(),
 		),
 		auth: usecase.NewAuthUseCase(
 			testDB, log, validate, userRepository,
@@ -420,6 +424,11 @@ func truncateMaster(t *testing.T) {
 		// matters more than most: a row left behind here does not fail a later test's
 		// insert, it silently refuses its posting.
 		"periode",
+		// presensi references users (id_user, dikoreksi_oleh) and unit_kerja
+		// (id_unit_kerja), and nothing references presensi — it writes no kartu_stok
+		// and points at no document. So it only has to precede those two, and it sits
+		// alongside dokumen and periode for the same reason they do.
+		"presensi",
 		// pembayaran_alokasi references penjualan, and penerimaan_pembayaran
 		// references pelanggan and users — isu #20's mirror of
 		// pembayaran_utang_alokasi/pembayaran_utang sitting before pembelian, so

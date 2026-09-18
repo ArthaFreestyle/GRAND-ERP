@@ -46,6 +46,12 @@ type Penjualan struct {
 
 	Subtotal   string
 	DiskonNota string
+	// PPN is output VAT, exclusive: it is added on top rather than extracted from
+	// the price, so total = subtotal - diskon_nota + ppn + pembulatan, the same
+	// formula pembelian uses. There is no ppn_dikreditkan counterpart here —
+	// output VAT is a liability to the state, never part of harga pokok, so it
+	// never reaches kartu_stok and never has a second treatment to choose from.
+	PPN        string
 	Pembulatan string
 	Total      string
 	// TotalHPP is null until POSTED. It sums HPPTotal off every line, and that

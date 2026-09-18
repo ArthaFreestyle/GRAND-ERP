@@ -663,11 +663,19 @@ func (r *KartuStokRepository) SaldoPerRuangBatch(
 // signal to reorder, and waiting for the strict inequality means always noticing one
 // step late.
 //
+// search narrows by nama or kode_barang, matched with the same ILIKE pair
+// productFilter uses. It runs here rather than in the caller because the list is
+// paginated: a filter applied to an already-loaded page can only find a product that
+// happened to land on it, and the whole point of this queue is that it is longer than
+// one page.
+//
 // Ordered by how far below minimum a product has fallen, worst first — a work queue,
 // the same reasoning GET /supplier/{id}/utang orders oldest-first for.
 func (r *KartuStokRepository) StokMinimum(
-	ctx context.Context, db DBTX, idRuang, aktifIDUnitKerja *int64, limit, offset int,
+	ctx context.Context, db DBTX, search string, idRuang, aktifIDUnitKerja *int64, limit, offset int,
 ) ([]entity.StokMinimumBaris, int64, error) {
+	search = EscapeLike(search)
+
 	const cte = `
 		WITH saldo_per_produk AS (
 			SELECT s.id_barang, SUM(s.stok_akhir) AS total_stok
@@ -688,11 +696,12 @@ func (r *KartuStokRepository) StokMinimum(
 		LEFT JOIN saldo_per_produk sp ON sp.id_barang = p.id
 		WHERE p.is_aktif
 		  AND p.stok_minimum > 0
-		  AND COALESCE(sp.total_stok, 0) <= p.stok_minimum`
+		  AND COALESCE(sp.total_stok, 0) <= p.stok_minimum
+		  AND ($3 = '' OR p.nama ILIKE '%' || $3 || '%' OR p.kode_barang ILIKE '%' || $3 || '%')`
 
 	var total int64
 	if err := db.QueryRowContext(
-		ctx, cte+`SELECT COUNT(*)`+filter, idRuang, aktifIDUnitKerja,
+		ctx, cte+`SELECT COUNT(*)`+filter, idRuang, aktifIDUnitKerja, search,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count stok minimum: %w", err)
 	}
@@ -704,9 +713,9 @@ func (r *KartuStokRepository) StokMinimum(
 	query := cte + `
 		SELECT p.id, p.kode_barang, p.nama, p.stok_minimum, COALESCE(sp.total_stok, 0)` + filter + `
 		ORDER BY (p.stok_minimum - COALESCE(sp.total_stok, 0)) DESC, p.nama, p.id
-		LIMIT $3 OFFSET $4`
+		LIMIT $4 OFFSET $5`
 
-	rows, err := db.QueryContext(ctx, query, idRuang, aktifIDUnitKerja, limit, offset)
+	rows, err := db.QueryContext(ctx, query, idRuang, aktifIDUnitKerja, search, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select stok minimum: %w", err)
 	}

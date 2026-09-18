@@ -75,6 +75,12 @@ func NewViper() *viper.Viper {
 	// honest answer, and there is no partial-scan mode yet to default instead.
 	cfg.SetDefault("rekonsiliasi.interval", "24h")
 
+	// presensi's LUPA_PULANG sweep (isu #40 fase 5). A row left BUKA past its
+	// own date is housekeeping for someone who left, not a real-time
+	// concern, so a daily cadence is the same honest default the two jobs
+	// above already use.
+	cfg.SetDefault("presensi.sapuan_interval", "24h")
+
 	// OCR pembelian via Gemini (isu #39). gemini.api_key has no default, the same
 	// reasoning jwt.secret follows — see NewGeminiConfig. gemini.model is a fixed
 	// name, never an alias like "gemini-flash-latest": an alias can move to a

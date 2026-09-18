@@ -27,6 +27,7 @@ type PenjualanResponse struct {
 
 	Subtotal   string  `json:"subtotal"`
 	DiskonNota string  `json:"diskon_nota"`
+	PPN        string  `json:"ppn"`
 	Pembulatan string  `json:"pembulatan"`
 	Total      string  `json:"total"`
 	TotalHPP   *string `json:"total_hpp"`
@@ -108,6 +109,18 @@ type CreatePenjualanRequest struct {
 	// multiple: the latter would need a new config key for no benefit this issue
 	// asks for.
 	DiskonNota string `json:"diskon_nota" validate:"omitempty,numeric,max=21"`
+
+	// PPN is output VAT in rupiah, not a rate: the cashier's client computes 11%
+	// (or whatever is in force) and sends the amount, exactly the shape
+	// pembelian.ppn already has. What the document freezes is the money, which is
+	// the figure that must still be true when the national rate changes — every
+	// money column in this project is a snapshot.
+	//
+	// It is exclusive: total = subtotal - diskon_nota + ppn + pembulatan, so the
+	// price list holds DPP and a KREDIT nota's receivable rises by the tax, which
+	// is what is actually billed. Empty means zero — a nota that charges no PPN.
+	PPN string `json:"ppn" validate:"omitempty,numeric,max=21"`
+
 	Pembulatan string `json:"pembulatan" validate:"omitempty,numeric,max=21"`
 
 	Detail []PenjualanDetailRequest `json:"detail" validate:"omitempty,max=500,dive"`
@@ -164,6 +177,7 @@ type UpdatePenjualanRequest struct {
 	IDPelanggan     Optional[int64]  `json:"id_pelanggan" validate:"omitempty,gt=0"`
 	JenisPembayaran Optional[string] `json:"jenis_pembayaran" validate:"omitempty,oneof=TUNAI KREDIT"`
 	DiskonNota      Optional[string] `json:"diskon_nota" validate:"omitempty,numeric,max=21"`
+	PPN             Optional[string] `json:"ppn" validate:"omitempty,numeric,max=21"`
 	Pembulatan      Optional[string] `json:"pembulatan" validate:"omitempty,numeric,max=21"`
 }
 

@@ -19,6 +19,7 @@ func PenjualanToResponse(penjualan *entity.Penjualan) *model.PenjualanResponse {
 
 		Subtotal:   penjualan.Subtotal,
 		DiskonNota: penjualan.DiskonNota,
+		PPN:        penjualan.PPN,
 		Pembulatan: penjualan.Pembulatan,
 		Total:      penjualan.Total,
 		TotalHPP:   penjualan.TotalHPP,

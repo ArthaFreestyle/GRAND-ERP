@@ -152,6 +152,7 @@ func (c *PenjualanUseCase) Create(ctx context.Context, request *model.CreatePenj
 		IDRuang:          request.IDRuang,
 		IDPelanggan:      request.IDPelanggan,
 		DiskonNota:       nilaiAtauNol(request.DiskonNota),
+		PPN:              nilaiAtauNol(request.PPN),
 		Pembulatan:       nilaiAtauNol(request.Pembulatan),
 		JenisPembayaran:  jenisPembayaran,
 		StatusPembayaran: entity.StatusPembayaranBelum,
@@ -178,7 +179,7 @@ func (c *PenjualanUseCase) Create(ctx context.Context, request *model.CreatePenj
 		return nil, err
 	}
 
-	if err := c.simpanTotal(ctx, tx, penjualan.ID, subtotal, penjualan.DiskonNota, penjualan.Pembulatan); err != nil {
+	if err := c.simpanTotal(ctx, tx, penjualan.ID, subtotal, penjualan.DiskonNota, penjualan.PPN, penjualan.Pembulatan); err != nil {
 		return nil, err
 	}
 
@@ -239,7 +240,8 @@ func (c *PenjualanUseCase) Update(ctx context.Context, request *model.UpdatePenj
 	}
 
 	if patch.Tanggal == nil && patch.IDRuang == nil && !patch.SetIDPelanggan &&
-		patch.JenisPembayaran == nil && patch.DiskonNota == nil && patch.Pembulatan == nil {
+		patch.JenisPembayaran == nil && patch.DiskonNota == nil && patch.PPN == nil &&
+		patch.Pembulatan == nil {
 		return nil, model.Invalid("no fields to update")
 	}
 
@@ -279,19 +281,23 @@ func (c *PenjualanUseCase) Update(ctx context.Context, request *model.UpdatePenj
 		}
 	}
 
-	// diskon_nota/pembulatan are validated against the stored subtotal — a header
-	// patch never touches the lines, so the subtotal a patch has to respect is
-	// whatever ReplaceDetail last wrote.
+	// diskon_nota/ppn/pembulatan are validated against the stored subtotal — a
+	// header patch never touches the lines, so the subtotal a patch has to respect
+	// is whatever ReplaceDetail last wrote.
 	effDiskon := penjualan.DiskonNota
 	if patch.DiskonNota != nil {
 		effDiskon = *patch.DiskonNota
+	}
+	effPPN := penjualan.PPN
+	if patch.PPN != nil {
+		effPPN = *patch.PPN
 	}
 	effPembulatan := penjualan.Pembulatan
 	if patch.Pembulatan != nil {
 		effPembulatan = *patch.Pembulatan
 	}
 
-	total, err := hitungTotalPenjualan(mustParseNumeric(penjualan.Subtotal), effDiskon, effPembulatan)
+	total, err := hitungTotalPenjualan(mustParseNumeric(penjualan.Subtotal), effDiskon, effPPN, effPembulatan)
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +358,7 @@ func (c *PenjualanUseCase) ReplaceDetail(ctx context.Context, request *model.Rep
 		return nil, err
 	}
 
-	if err := c.simpanTotal(ctx, tx, request.ID, subtotal, penjualan.DiskonNota, penjualan.Pembulatan); err != nil {
+	if err := c.simpanTotal(ctx, tx, request.ID, subtotal, penjualan.DiskonNota, penjualan.PPN, penjualan.Pembulatan); err != nil {
 		return nil, err
 	}
 
@@ -944,8 +950,8 @@ func (c *PenjualanUseCase) tulisDetail(ctx context.Context, tx repository.DBTX, 
 // computes total, and writes both — the one place Create and ReplaceDetail meet,
 // since both change subtotal and both therefore have to revalidate the discount
 // against it.
-func (c *PenjualanUseCase) simpanTotal(ctx context.Context, tx repository.DBTX, id int64, subtotal *big.Rat, diskonNota, pembulatan string) error {
-	total, err := hitungTotalPenjualan(subtotal, diskonNota, pembulatan)
+func (c *PenjualanUseCase) simpanTotal(ctx context.Context, tx repository.DBTX, id int64, subtotal *big.Rat, diskonNota, ppn, pembulatan string) error {
+	total, err := hitungTotalPenjualan(subtotal, diskonNota, ppn, pembulatan)
 	if err != nil {
 		return err
 	}
@@ -955,12 +961,18 @@ func (c *PenjualanUseCase) simpanTotal(ctx context.Context, tx repository.DBTX, 
 	)
 }
 
-// hitungTotalPenjualan validates diskon_nota against subtotal and returns the
-// resulting total, rejecting a discount steeper than the subtotal it is taken
+// hitungTotalPenjualan validates diskon_nota and ppn against subtotal and returns
+// the resulting total, rejecting a discount steeper than the subtotal it is taken
 // against and a total that would go negative — "nota bertotal negatif bukan
 // penjualan". Pure arithmetic, no I/O, shared by Create, Update, and ReplaceDetail
 // so the rule is checked identically regardless of which of the three moved.
-func hitungTotalPenjualan(subtotal *big.Rat, diskonNotaText, pembulatanText string) (*big.Rat, error) {
+//
+// PPN is exclusive and enters the total after the discount, exactly as pembelian
+// applies it: total = subtotal - diskon_nota + ppn + pembulatan. Nothing here checks
+// that the amount is 11% of anything — the rate lives at the till, and what this
+// document freezes is the rupiah. Only its sign is checked, with
+// penjualan_ppn_check as the backstop.
+func hitungTotalPenjualan(subtotal *big.Rat, diskonNotaText, ppnText, pembulatanText string) (*big.Rat, error) {
 	diskon, err := parseNumeric(diskonNotaText)
 	if err != nil {
 		return nil, err
@@ -972,12 +984,21 @@ func hitungTotalPenjualan(subtotal *big.Rat, diskonNotaText, pembulatanText stri
 		return nil, model.Invalid("diskon_nota tidak boleh melebihi subtotal")
 	}
 
+	ppn, err := parseNumeric(ppnText)
+	if err != nil {
+		return nil, err
+	}
+	if ppn.Sign() < 0 {
+		return nil, model.Invalid("ppn tidak boleh negatif")
+	}
+
 	pembulatan, err := parseNumeric(pembulatanText)
 	if err != nil {
 		return nil, err
 	}
 
-	total := new(big.Rat).Add(new(big.Rat).Sub(subtotal, diskon), pembulatan)
+	total := new(big.Rat).Add(new(big.Rat).Sub(subtotal, diskon), ppn)
+	total.Add(total, pembulatan)
 	if total.Sign() < 0 {
 		return nil, model.Invalid("total penjualan tidak boleh negatif")
 	}
@@ -998,6 +1019,7 @@ func patchPenjualanDariRequest(request *model.UpdatePenjualanRequest) (repositor
 		"id_ruang":         request.IDRuang.Clears(),
 		"jenis_pembayaran": request.JenisPembayaran.Clears(),
 		"diskon_nota":      request.DiskonNota.Clears(),
+		"ppn":              request.PPN.Clears(),
 		"pembulatan":       request.Pembulatan.Clears(),
 	} {
 		if wajib {
@@ -1019,6 +1041,7 @@ func patchPenjualanDariRequest(request *model.UpdatePenjualanRequest) (repositor
 	patch.IDPelanggan = request.IDPelanggan.Value
 	patch.JenisPembayaran = request.JenisPembayaran.Value
 	patch.DiskonNota = request.DiskonNota.Value
+	patch.PPN = request.PPN.Value
 	patch.Pembulatan = request.Pembulatan.Value
 
 	return patch, nil

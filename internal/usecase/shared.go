@@ -11,6 +11,22 @@ import (
 	"Arthafreestyle/ERP/internal/repository"
 )
 
+// zonaWIB is Asia/Jakarta, and it is the one place this codebase decides what
+// "today" means.
+//
+// A fixed UTC+7 offset rather than time.LoadLocation("Asia/Jakarta"): Indonesia's
+// western zone observes no daylight saving, so the offset never changes, and a
+// fixed zone does not depend on a tzdata database being present in whatever image
+// this runs in.
+//
+// Two callers, deliberately sharing one definition rather than each carrying its
+// own: tanggalHargaJual picks which product_harga_jual version applies (isu #8),
+// and presensi picks both the calendar date a tap belongs to AND which shift it
+// falls in (isu #40). Two identical zone definitions in two files is the shape
+// periodeLockKey's duplication already warns about — one gets changed, the other
+// silently does not.
+var zonaWIB = time.FixedZone("WIB", 7*60*60)
+
 // notFoundOnNoRows maps an absent row to a 404. Every FindByID and every
 // UPDATE ... RETURNING funnels through here, so no usecase has to remember that
 // a missing id surfaces as sql.ErrNoRows.

@@ -23,6 +23,7 @@ package usecase_test
 
 import (
 	"testing"
+	"time"
 
 	"Arthafreestyle/ERP/internal/model"
 )
@@ -823,5 +824,133 @@ func TestPenjualanUpdateReReadNotScopedByActiveUnit(t *testing.T) {
 	}
 	if response.ID != created.ID {
 		t.Fatalf("got penjualan %d, want %d", response.ID, created.ID)
+	}
+}
+
+// presensi (isu #40) is scoped by a column it already carries — presensi.id_unit_kerja,
+// snapshotted from the session's active grant at tap time — so unlike the six modules
+// above it needs no join to ruang and no extra read column. Every presensi read is
+// list-shaped, so rows outside the active unit are omitted silently and nothing here
+// ever answers 404 for scoping.
+func TestPresensiListOnlyShowsActiveUnitRows(t *testing.T) {
+	testApp := newApp(t)
+	f := newPresensiFixture(t, testApp)
+
+	masukPada(t, testApp, f, jamUji(2026, time.March, 17, 7, 5), &f.unitKerja)
+
+	unitLain := createUnit(t, testApp, "Unit Lain Presensi")
+
+	list, paging, err := testApp.presensi.Search(ctx(), &model.ListPresensiRequest{
+		PageRequest: model.PageRequest{Page: 1, Size: 20}, AktifIDUnitKerja: &unitLain,
+	})
+	if err != nil {
+		t.Fatalf("list presensi dari unit lain: %v", err)
+	}
+
+	if len(list) != 0 || paging.TotalItem != 0 {
+		t.Fatalf("baris %d / total_item %d, want 0/0 — presensi unit lain bocor", len(list), paging.TotalItem)
+	}
+
+	// The COUNT has to agree with the rows: both run against the same FROM and the
+	// same filter, which is exactly the correction four other modules needed when
+	// fase 6 first landed.
+	milikSendiri, paging, err := testApp.presensi.Search(ctx(), &model.ListPresensiRequest{
+		PageRequest: model.PageRequest{Page: 1, Size: 20}, AktifIDUnitKerja: &f.unitKerja,
+	})
+	if err != nil {
+		t.Fatalf("list presensi unit sendiri: %v", err)
+	}
+
+	if len(milikSendiri) != 1 || paging.TotalItem != 1 {
+		t.Fatalf("baris %d / total_item %d, want 1/1", len(milikSendiri), paging.TotalItem)
+	}
+}
+
+// The recap is scoped the same way, and it matters more there than in the list: a
+// recap that silently counted another unit's days would be wrong in a number rather
+// than in a row somebody can see.
+func TestPresensiRekapOnlyCountsActiveUnitRows(t *testing.T) {
+	testApp := newApp(t)
+	f := newPresensiFixture(t, testApp)
+
+	masukPada(t, testApp, f, jamUji(2026, time.March, 17, 7, 5), &f.unitKerja)
+
+	unitLain := createUnit(t, testApp, "Unit Lain Rekap Presensi")
+
+	list, _, err := testApp.presensi.Rekap(ctx(), &model.ListRekapPresensiRequest{
+		PageRequest: model.PageRequest{Page: 1, Size: 20},
+		Tahun:       2026, Bulan: 3, AktifIDUnitKerja: &unitLain,
+	})
+	if err != nil {
+		t.Fatalf("rekap dari unit lain: %v", err)
+	}
+
+	if len(list) != 0 {
+		t.Fatalf("rekap unit lain = %d baris, want 0", len(list))
+	}
+}
+
+// A row whose id_unit_kerja is NULL — made by a caller holding a global grant, or
+// one who never switched context — is visible only to a caller who is themselves
+// global. Showing it to a unit-bound caller would hand them attendance from any
+// unit at all, since the row itself does not say which one it belongs to.
+func TestPresensiRowTanpaUnitHanyaTerlihatSecaraGlobal(t *testing.T) {
+	testApp := newApp(t)
+	f := newPresensiFixture(t, testApp)
+
+	// A tap made under no active context (a global grant, or several grants
+	// not yet switched to one) carries no unit at all — nil, exactly as
+	// AktifIDUnitKerja is nil here.
+	masukPada(t, testApp, f, jamUji(2026, time.March, 17, 7, 5), nil)
+
+	terikat, _, err := testApp.presensi.Search(ctx(), &model.ListPresensiRequest{
+		PageRequest: model.PageRequest{Page: 1, Size: 20}, AktifIDUnitKerja: &f.unitKerja,
+	})
+	if err != nil {
+		t.Fatalf("list terikat unit: %v", err)
+	}
+
+	if len(terikat) != 0 {
+		t.Fatalf("baris ber-unit NULL terlihat oleh pemanggil terikat unit: %d baris", len(terikat))
+	}
+
+	global, _, err := testApp.presensi.Search(ctx(), &model.ListPresensiRequest{
+		PageRequest: model.PageRequest{Page: 1, Size: 20}, AktifIDUnitKerja: nil,
+	})
+	if err != nil {
+		t.Fatalf("list global: %v", err)
+	}
+
+	if len(global) != 1 {
+		t.Fatalf("baris terlihat secara global = %d, want 1", len(global))
+	}
+}
+
+// GET /presensi/saya is deliberately NOT scoped: your own history is yours,
+// including the days you were working at another unit. This is the one read in the
+// project where leaving the scope off is the decision rather than the omission, so
+// it gets a test of its own rather than being left to the controller's nil.
+func TestPresensiSayaTidakDisaringUnitKerja(t *testing.T) {
+	testApp := newApp(t)
+	f := newPresensiFixture(t, testApp)
+
+	unitLain := createUnit(t, testApp, "Unit Lain Presensi Saya")
+
+	// A day worked at another unit entirely.
+	masukPada(t, testApp, f, jamUji(2026, time.March, 17, 7, 5), &unitLain)
+
+	// What the controller passes for /presensi/saya: id_user forced to the
+	// caller, AktifIDUnitKerja forced to nil regardless of the caller's own
+	// active unit.
+	riwayat, _, err := testApp.presensi.Search(ctx(), &model.ListPresensiRequest{
+		PageRequest: model.PageRequest{Page: 1, Size: 20},
+		IDUser:      &f.karyawan, AktifIDUnitKerja: nil,
+	})
+	if err != nil {
+		t.Fatalf("presensi saya: %v", err)
+	}
+
+	if len(riwayat) != 1 {
+		t.Fatalf("riwayat sendiri kehilangan hari di unit lain: %d baris", len(riwayat))
 	}
 }

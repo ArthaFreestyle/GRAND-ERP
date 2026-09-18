@@ -539,3 +539,116 @@ func TestPenjualanPlafonKreditNullTidakPernahMenolak(t *testing.T) {
 		t.Errorf("status = %q, want POSTED", posted.Status)
 	}
 }
+
+// PPN keluaran (migrasi 000027). Exclusive and typed as an amount, exactly the shape
+// pembelian.ppn has: total = subtotal - diskon_nota + ppn + pembulatan.
+//
+// This also pins the money columns being written by Create at all. Before this
+// migration the INSERT listed neither diskon_nota nor pembulatan, so a nota created
+// with a discount read back as diskon_nota "0.00" while its own total already had the
+// discount taken off — the header disagreeing with its own arithmetic.
+func TestPenjualanPPNMasukTotalDanTersimpanDariCreate(t *testing.T) {
+	testApp, s := stokAwalPenjualan(t, newApp(t), "100")
+
+	// 10 x 15.000 = 150.000 subtotal, diskon 5.000 -> DPP 145.000,
+	// PPN 11% dari DPP = 15.950, pembulatan 50 -> total 161.000.
+	penjualan, err := testApp.penjualan.Create(ctx(), &model.CreatePenjualanRequest{
+		ActorID: s.actor, Tanggal: "2026-08-15", IDRuang: s.ruang,
+		DiskonNota: "5000", PPN: "15950", Pembulatan: "50",
+		Detail: []model.PenjualanDetailRequest{{
+			IDProduct: s.product, IDSatuanInput: s.pcs, QtyInput: "10", HargaSatuanInput: "15000",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create penjualan: %v", err)
+	}
+
+	if penjualan.Subtotal != "150000.00" {
+		t.Errorf("subtotal = %q, want 150000.00", penjualan.Subtotal)
+	}
+	if penjualan.DiskonNota != "5000.00" {
+		t.Errorf("diskon_nota = %q, want 5000.00 — Create harus menyimpannya, bukan cuma memakainya", penjualan.DiskonNota)
+	}
+	if penjualan.PPN != "15950.00" {
+		t.Errorf("ppn = %q, want 15950.00", penjualan.PPN)
+	}
+	if penjualan.Pembulatan != "50.00" {
+		t.Errorf("pembulatan = %q, want 50.00", penjualan.Pembulatan)
+	}
+	if penjualan.Total != "161000.00" {
+		t.Errorf("total = %q, want 161000.00 (subtotal - diskon + ppn + pembulatan)", penjualan.Total)
+	}
+}
+
+// PPN is exclusive, so a KREDIT nota's receivable rises by the tax — that is what is
+// actually billed. sisa_piutang has to follow total, not the DPP.
+func TestPenjualanPPNIkutMenaikkanPiutang(t *testing.T) {
+	testApp, s := stokAwalPenjualan(t, newApp(t), "100")
+
+	penjualan, err := testApp.penjualan.Create(ctx(), &model.CreatePenjualanRequest{
+		ActorID: s.actor, Tanggal: "2026-08-15", IDRuang: s.ruang,
+		IDPelanggan: &s.pelanggan, JenisPembayaran: "KREDIT", PPN: "11000",
+		Detail: []model.PenjualanDetailRequest{{
+			IDProduct: s.product, IDSatuanInput: s.pcs, QtyInput: "10", HargaSatuanInput: "10000",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create penjualan kredit: %v", err)
+	}
+
+	postingPenjualan(t, testApp, s, penjualan.ID)
+
+	list, _, err := testApp.pelanggan.Piutang(ctx(), &model.ListPiutangPelangganRequest{
+		IDPelanggan: s.pelanggan,
+		PageRequest: model.PageRequest{Page: 1, Size: 20},
+	})
+	if err != nil {
+		t.Fatalf("piutang pelanggan: %v", err)
+	}
+
+	if len(list) != 1 {
+		t.Fatalf("piutang = %d baris, want 1", len(list))
+	}
+	if list[0].Total != "111000.00" || list[0].SisaPiutang != "111000.00" {
+		t.Errorf("total/sisa_piutang = %q/%q, want 111000.00 keduanya — PPN ikut ditagih",
+			list[0].Total, list[0].SisaPiutang)
+	}
+}
+
+// A negative ppn is refused by name, before penjualan_ppn_check ever sees it.
+func TestPenjualanPPNNegatifDitolak(t *testing.T) {
+	testApp, s := stokAwalPenjualan(t, newApp(t), "100")
+
+	_, err := testApp.penjualan.Create(ctx(), &model.CreatePenjualanRequest{
+		ActorID: s.actor, Tanggal: "2026-08-15", IDRuang: s.ruang, PPN: "-1000",
+		Detail: []model.PenjualanDetailRequest{{
+			IDProduct: s.product, IDSatuanInput: s.pcs, QtyInput: "10", HargaSatuanInput: "10000",
+		}},
+	})
+	if err == nil {
+		t.Fatal("ppn negatif seharusnya ditolak")
+	}
+}
+
+// PATCH recomputes total against the stored subtotal, the same way diskon_nota and
+// pembulatan already did.
+func TestPenjualanPatchPPNMenghitungUlangTotal(t *testing.T) {
+	testApp, s := stokAwalPenjualan(t, newApp(t), "100")
+
+	penjualan := buatPenjualanTunai(t, testApp, s, "10", "10000")
+
+	updated, err := testApp.penjualan.Update(ctx(), &model.UpdatePenjualanRequest{
+		ID: penjualan.ID, ActorID: s.actor,
+		PPN: model.Optional[string]{Present: true, Value: ptr("11000")},
+	})
+	if err != nil {
+		t.Fatalf("patch ppn: %v", err)
+	}
+
+	if updated.PPN != "11000.00" {
+		t.Errorf("ppn = %q, want 11000.00", updated.PPN)
+	}
+	if updated.Total != "111000.00" {
+		t.Errorf("total = %q, want 111000.00 setelah patch ppn", updated.Total)
+	}
+}
