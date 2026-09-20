@@ -148,9 +148,9 @@ var skemaOCRFaktur = &genai.Schema{
 		"no_faktur":      {Type: genai.TypeString, Nullable: ptrBool(true)},
 		"tanggal_faktur": {Type: genai.TypeString, Nullable: ptrBool(true), Description: "Tanggal pada dokumen, format bebas apa adanya yang tertulis."},
 		"nama_supplier":  {Type: genai.TypeString, Nullable: ptrBool(true)},
-		"diskon_nota":    {Type: genai.TypeString, Nullable: ptrBool(true)},
-		"ppn":            {Type: genai.TypeString, Nullable: ptrBool(true)},
-		"total":          {Type: genai.TypeString, Nullable: ptrBool(true)},
+		"diskon_nota":    {Type: genai.TypeString, Nullable: ptrBool(true), Description: "Rupiah bilangan bulat, hanya digit. Titik di kertas adalah pemisah ribuan: 5.000 ditulis 5000."},
+		"ppn":            {Type: genai.TypeString, Nullable: ptrBool(true), Description: "Rupiah bilangan bulat, hanya digit. Titik di kertas adalah pemisah ribuan: 5.000 ditulis 5000."},
+		"total":          {Type: genai.TypeString, Nullable: ptrBool(true), Description: "Rupiah bilangan bulat, hanya digit. Titik di kertas adalah pemisah ribuan: 5.000 ditulis 5000."},
 		"tanda_lunas":    {Type: genai.TypeString, Nullable: ptrBool(true), Description: "Cap atau tulisan seperti LUNAS/TUNAI/KREDIT jika ada, apa adanya."},
 		"baris": {
 			Type: genai.TypeArray,
@@ -164,8 +164,8 @@ var skemaOCRFaktur = &genai.Schema{
 					"satuan_terbaca":     {Type: genai.TypeString, Nullable: ptrBool(true)},
 					"id_satuan":          {Type: genai.TypeInteger, Nullable: ptrBool(true), Description: "id_satuan dari KATALOG PRODUK untuk id_product ini, atau null bila tidak yakin."},
 					"qty":                {Type: genai.TypeString, Description: "Angka apa adanya seperti tertulis, boleh format Indonesia."},
-					"harga_satuan":       {Type: genai.TypeString},
-					"diskon_baris":       {Type: genai.TypeString, Nullable: ptrBool(true)},
+					"harga_satuan":       {Type: genai.TypeString, Description: "Rupiah bilangan bulat, hanya digit. Titik di kertas adalah pemisah ribuan: 5.000 ditulis 5000."},
+					"diskon_baris":       {Type: genai.TypeString, Nullable: ptrBool(true), Description: "Rupiah bilangan bulat, hanya digit. Titik di kertas adalah pemisah ribuan: 5.000 ditulis 5000."},
 					"dicentang":          {Type: genai.TypeBoolean, Nullable: ptrBool(true), Description: "Hanya untuk faktur kedatangan: true jika ada tanda centang, false jika tidak ada, null jika tidak jelas terbaca."},
 					"qty_tulisan_tangan": {Type: genai.TypeString, Nullable: ptrBool(true), Description: "Angka tulisan tangan di baris itu, bila ada."},
 				},
@@ -201,6 +201,11 @@ func sistemPromptOCR(jenis JenisOCRFaktur, katalog []entity.Product) string {
 	sb.WriteString("- Vendor sering memakai nama/kode barangnya sendiri yang berbeda dari katalog kami; cocokkan berdasarkan arti barangnya, bukan kemiripan teks.\n")
 	sb.WriteString("- Jika tidak yakin baris itu produk yang mana di katalog, isi id_product dengan null. null lebih baik daripada tebakan yang salah.\n")
 	sb.WriteString("- id_satuan juga harus salah satu satuan yang terdaftar untuk id_product itu di katalog. Jika tidak yakin, isi null.\n\n")
+
+	sb.WriteString("ATURAN ANGKA UANG (WAJIB):\n")
+	sb.WriteString("- Harga, total, diskon, dan PPN adalah rupiah bilangan bulat. Titik pada angka uang adalah pemisah ribuan, BUKAN desimal: \"5.000\" berarti lima ribu, tulis 5000 (bukan 5.0 atau 5).\n")
+	sb.WriteString("- Tulis angka uang hanya sebagai digit tanpa titik, koma, spasi, atau simbol Rp. Contoh: \"Rp 1.254.000\" ditulis 1254000; \"12.500\" ditulis 12500.\n")
+	sb.WriteString("- Jangan menambahkan desimal (seperti \",00\" atau \".00\") pada angka uang. Ini tidak berlaku untuk qty, yang boleh berdesimal bila memang tertulis begitu.\n\n")
 
 	switch jenis {
 	case JenisOCRFakturKedatangan:

@@ -53,3 +53,52 @@ func TestParseAngkaIndonesia(t *testing.T) {
 		})
 	}
 }
+
+func TestParseUangIndonesia(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{name: "plain integer", input: "5000", want: "5000"},
+		{name: "single dot is thousands", input: "5.000", want: "5000"},
+		{name: "multiple dots", input: "1.254.000", want: "1254000"},
+		{name: "rp prefix", input: "Rp 1.254.000", want: "1254000"},
+		{name: "dot decimal comma zero", input: "1.254.000,00", want: "1254000"},
+		{name: "normalized dot zero zero", input: "5000.00", want: "5000"},
+		{name: "single dot two digits is still thousands", input: "5.50", want: "550"},
+		{name: "single dot one digit is still thousands", input: "5.5", want: "55"},
+		{name: "decimal comma kept", input: "1.254.000,50", want: "1254000.50"},
+		{name: "commas as grouping", input: "1,254,000", want: "1254000"},
+		{name: "negative", input: "-5.000", want: "-5000"},
+		{name: "empty is an error", input: "", wantErr: true},
+		{name: "not a number is an error", input: "abc", wantErr: true},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseUangIndonesia(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("parseUangIndonesia(%q) = %v, want error", tt.input, got)
+				}
+
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("parseUangIndonesia(%q) unexpected error: %v", tt.input, err)
+			}
+
+			want, err := parseNumeric(tt.want)
+			if err != nil {
+				t.Fatalf("invalid want %q: %v", tt.want, err)
+			}
+
+			if got.Cmp(want) != 0 {
+				t.Fatalf("parseUangIndonesia(%q) = %s, want %s", tt.input, got.RatString(), want.RatString())
+			}
+		})
+	}
+}
