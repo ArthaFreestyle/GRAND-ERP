@@ -680,4 +680,26 @@ CROSS JOIN users u
 WHERE lower(u.username) = 'admin'
 ON CONFLICT DO NOTHING;
 
+-- 4. Katalog per unit kerja (migrasi 000029).
+--
+-- Backfill migrasi hanya menjangkau produk yang SUDAH ada saat migrasi jalan. Di
+-- database baru migrasi selalu jalan sebelum seeder, jadi tanpa langkah ini ke-585
+-- produk di atas lahir dengan katalog kosong dan setiap dokumen ke ruang mana pun
+-- ditolak ("tidak ada di katalog unit kerja ruang ini").
+--
+-- Semua unit AKTIF, sama dengan default POST /product tanpa id_unit_kerja dan dengan
+-- backfill migrasinya. Hanya produk yang belum punya keanggotaan sama sekali yang
+-- diisi — bukan tiap produk seeder — supaya menjalankan ulang berkas ini tidak
+-- membatalkan penyempitan yang sengaja dilakukan lewat PUT /product/{id}/unit-kerja.
+INSERT INTO product_unit_kerja (id_product, id_unit_kerja, created_by)
+SELECT p.id, uk.id, u.id
+FROM product p
+JOIN seed_product s ON s.kode_barang = p.kode_barang
+CROSS JOIN unit_kerja uk
+CROSS JOIN users u
+WHERE uk.is_aktif
+  AND lower(u.username) = 'admin'
+  AND NOT EXISTS (SELECT 1 FROM product_unit_kerja x WHERE x.id_product = p.id)
+ON CONFLICT (id_product, id_unit_kerja) DO NOTHING;
+
 DROP TABLE seed_product;

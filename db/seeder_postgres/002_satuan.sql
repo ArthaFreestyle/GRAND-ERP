@@ -7,9 +7,7 @@
 -- keunikan satuan ada pada lower(nama), dan ON CONFLICT (nama) tidak cocok
 -- dengan indeks mana pun sehingga seeder gagal.
 INSERT INTO satuan (nama, is_aktif) VALUES
-    ('PCS',    TRUE),
-    ('BOX',    TRUE),
-    ('LUSIN',  TRUE),
-    ('KARTON', TRUE),
-    ('RIM',    TRUE)
+    ('PCS',  TRUE),
+    ('PACK', TRUE),
+    ('DUS',  TRUE)
 ON CONFLICT (lower(nama)) DO NOTHING;

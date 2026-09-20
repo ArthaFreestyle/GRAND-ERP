@@ -836,6 +836,15 @@ paths:
 
 
         `created_by` diambil dari token, tidak pernah dari body.
+
+
+        **Katalog per unit kerja.** Produk tetap satu baris global; yang per-unit hanya
+        keanggotaannya di `product_unit_kerja`, dan setiap dokumen yang memindahkan barang
+        menolak produk di luar katalog unit ruangnya. Tidak ada field untuk memilih unit: produk
+        baru masuk ke katalog **unit aktif sesi** (konteks dari token), atau ke **semua unit
+        aktif** bila sesinya global (`SUPERADMIN`, atau belum memilih konteks) — default yang
+        sama dengan backfill migrasi 000029. Sesi yang unit aktifnya sudah nonaktif ditolak 400.
+        Ubah kemudian lewat `PUT /product/{id}/unit-kerja`.
       requestBody:
         required: true
         content:
@@ -959,6 +968,61 @@ paths:
       responses:
         "201":
           description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/Product" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/product/{id}/unit-kerja:
+    put:
+      tags: [product]
+      summary: Ganti himpunan katalog unit kerja sebuah produk
+      operationId: setProductUnitKerja
+      description: >
+        Mengganti **seluruh** himpunan unit yang katalognya memuat produk ini — aturan yang
+        sama dengan `grants` pada user dan baris pada dokumen: `[]` mengosongkan, sebuah
+        daftar menyisakan tepat isinya, dan `null` atau field yang hilang ditolak 400
+        karena endpoint ini tidak punya "biarkan". Duplikat melebur.
+
+
+        Hanya keanggotaan **baru** yang wajib menyebut unit aktif; mengirim balik unit
+        nonaktif yang sudah memuat produk ini adalah cara mempertahankannya, bukan
+        permintaan menambahkannya.
+
+
+        **Mengeluarkan produk dari sebuah unit ditolak 409 selama ruang mana pun di unit itu
+        masih menyimpan stoknya** (`stok_akhir > 0`) — stok yang tidak diakui katalog mana
+        pun tidak bisa dijual, dihitung, atau dipindahkan dokumen apa pun, tapi tetap
+        tampil di laporan nilai persediaan. Kosongkan dulu dengan `mutasi` atau
+        `pemakaian`. Penolakan tidak mengubah apa pun; katalog tetap seperti semula.
+
+
+        Di dalam transaksi, baris keanggotaan dihapus **lebih dulu** baru stoknya dibaca.
+        Posting yang sedang berjalan menahan baris itu `FOR SHARE`, jadi pencabutan menunggu
+        posting itu commit lalu melihat stok yang ditulisnya — tidak ada celah tempat
+        sebuah posting menyelip di antara pemeriksaan dan pencabutan.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id_unit_kerja]
+              properties:
+                id_unit_kerja:
+                  type: array
+                  maxItems: 64
+                  items: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200":
+          description: OK — detail produk dengan `unit_kerja` yang baru.
           content:
             application/json:
               schema:
@@ -7398,6 +7462,14 @@ components:
           type: array
           description: Hanya pada endpoint detail. Terbaru lebih dulu.
           items: { $ref: "#/components/schemas/ProductHargaJual" }
+        unit_kerja:
+          type: array
+          description: >
+            Hanya pada endpoint detail. Unit yang katalognya memuat produk ini, termasuk
+            unit yang sudah nonaktif (keanggotaannya masih nyata dan masih perlu bisa
+            dicabut). **Produk yang tidak dimuat unit mana pun menjawab `[]`, bukan
+            menghilangkan kuncinya.**
+          items: { $ref: "#/components/schemas/ProductUnitKerja" }
         created_at: { type: string, format: date-time }
         created_by:
           type: integer
@@ -7407,6 +7479,16 @@ components:
             kolom pelaku.
         updated_at: { type: string, format: date-time }
         updated_by: { type: integer, format: int64, nullable: true }
+
+    ProductUnitKerja:
+      type: object
+      properties:
+        id_unit_kerja: { type: integer, format: int64 }
+        kode: { type: string, nullable: true }
+        nama: { type: string }
+        is_aktif:
+          type: boolean
+          description: Status **unit**-nya, bukan keanggotaannya.
 
     ProductSatuan:
       type: object

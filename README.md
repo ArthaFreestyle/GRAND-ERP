@@ -157,7 +157,7 @@ psql "$DSN" -f db/seeder_postgres/005_product.sql
 
 `003_role.sql` memasang tiga role yang berlaku sekarang — `SUPERADMIN`, `CASHIER`, `INVENTARIS`. Tanpa itu `user_role` tidak bisa diisi dan setiap user berakhir tanpa role. `004_superadmin.sql` memasang user pertama; tanpa itu tidak ada yang bisa login sehingga tidak ada yang bisa membuat user — lihat [Autentikasi](#autentikasi).
 
-`005_product.sql` memasang katalog awal 585 produk beserta baris satuan dasarnya (PCS, faktor 1) dan satu versi `product_harga_jual` yang berlaku sejak `2026-01-01`. **Ia tidak memasang stok sama sekali**, dan itu bukan kekurangan: stok hanya lahir dari `kartu_stok` lewat dokumen, jadi saldo awal dientri sebagai `stok_opname` atau `pembelian` setelah katalognya ada. Angka stok dari sumbernya juga tidak dipakai sebagai `stok_minimum` — itu titik pesan ulang, dan `0` di sana berarti "belum pernah diatur". Sumbernya tidak membawa satuan apa pun, jadi semua produk masuk sebagai PCS; satuan yang lebih besar ditambahkan lewat `PATCH /product/{id}` saat faktor konversinya benar-benar diketahui.
+`005_product.sql` memasang katalog awal 585 produk beserta baris satuan dasarnya (PCS, faktor 1) dan satu versi `product_harga_jual` yang berlaku sejak `2026-01-01`. **Ia tidak memasang stok sama sekali**, dan itu bukan kekurangan: stok hanya lahir dari `kartu_stok` lewat dokumen, jadi saldo awal dientri sebagai `stok_opname` atau `pembelian` setelah katalognya ada. Angka stok dari sumbernya juga tidak dipakai sebagai `stok_minimum` — itu titik pesan ulang, dan `0` di sana berarti "belum pernah diatur". Sumbernya tidak membawa satuan apa pun, jadi semua produk masuk sebagai PCS; satuan yang lebih besar ditambahkan lewat `PATCH /product/{id}` saat faktor konversinya benar-benar diketahui. Produknya juga dimasukkan ke katalog **setiap unit aktif** (`product_unit_kerja`, migrasi `000029`) — tanpa itu setiap dokumen ke ruang mana pun akan menolaknya; hanya produk yang belum punya keanggotaan sama sekali yang diisi, jadi menjalankan ulang seeder tidak membatalkan penyempitan lewat `PUT /product/{id}/unit-kerja`.
 
 Seeder ditulis idempoten (`ON CONFLICT DO NOTHING`), aman dijalankan ulang. Target konflik harus menyebut ekspresi indeks — `ON CONFLICT (lower(kode))`, bukan `(kode)` — karena migrasi `000009` memindahkan keunikan master ke `lower(...)`.
 
@@ -315,6 +315,19 @@ Beberapa hal lain yang tidak terlihat dari daftar endpoint:
 - Endpoint list **tidak** membawa `satuan` maupun `harga_jual`; mengambilnya berarti satu query per baris. Kuncinya hilang sama sekali, bukan array kosong, supaya bedanya dengan "produk ini memang tidak punya satuan" tetap jelas.
 - Tidak ada kolom stok di sini. `kartu_stok` satu-satunya sumber kebenaran stok, dan modul ini tidak menyentuhnya.
 - **Ini modul pertama yang benar-benar mengisi `created_by`/`updated_by`**, diambil dari token lewat `middleware.SessionFrom` — `product.created_by` `NOT NULL`, dan itulah yang membuat modul ini harus menunggu autentikasi.
+
+### Katalog per unit kerja (migrasi `000029`)
+
+`product` tetap satu baris global — `kode_barang`, satuan, dan harga jual tidak berubah. Yang per-unit hanya **keanggotaannya**: `product_unit_kerja (id_product, id_unit_kerja)`, tabel join tanpa `is_aktif`, sama seperti `user_role`. Sebelum ini satu-satunya kaitan produk ke unit kerja adalah stok (`kartu_stok` dipartisi per `(barang, ruang)` dan `ruang.id_unit_kerja` `NOT NULL`); tabel ini menjawab pertanyaan lain, **"produk ini boleh diperdagangkan di unit mana"**, sebelum ada satu pun stok.
+
+- **Dokumen menolak produk di luar katalog unit ruangnya, 400 dengan `kode_barang` yang bersangkutan.** Berlaku untuk `pembelian`, `penjualan`, `pemakaian`, `mutasi`, dan `stok_opname`; `penerimaan_susulan`/`retur_pembelian` mewarisi dari `pembelian` induknya. Dicek saat `Create`/`PUT .../detail` (pesan lebih cepat) **dan diulang di `Posting`** — produk bisa keluar dari katalog di antara mengetik draf dan memostingnya.
+- **Unitnya diambil dari ruang dokumen, bukan unit aktif sesi** — pilihan yang sama dengan nomor dokumen per unit. Sesi global (`SUPERADMIN`) tunduk pada katalog yang sama; ia melebarkan siapa yang boleh bertindak, bukan produk apa yang boleh diperdagangkan sebuah unit.
+- **`mutasi` memeriksa kedua ruang.** Barang yang masuk ke unit yang tidak memuat produknya akan jadi stok yang tak bisa dijual, dihitung, atau dipindahkan dokumen mana pun — jadi tujuan diperiksa juga, berbeda dari asimetri sumber-saja pada otorisasi `id_ruang`. Mutasi lintas unit tetap boleh, asal unit tujuan memuat produknya.
+- **`stok_opname` hanya memeriksa selisih lebih.** Hanya barang yang muncul dari ketiadaan yang bisa menaruh stok di belakang produk yang tidak diakui katalog; selisih kurang butuh saldo, dan saldo sudah berada di dalam katalog. Baris ketikan tangan di `PUT .../detail` diperiksa semua.
+- **Mengeluarkan produk dari sebuah unit ditolak 409 selama ruang mana pun di unit itu masih menyimpan stoknya** — bentuk yang sama dengan menonaktifkan `ruang` yang masih berisi. Kosongkan dulu dengan `mutasi` atau `pemakaian`. Di dalam transaksi, baris keanggotaan dihapus *lebih dulu* baru stoknya dibaca; posting menahan baris itu `FOR SHARE`, jadi pencabutan menunggu posting yang berjalan lalu melihat stok yang ditulisnya.
+- **Unit baru mulai dengan katalog kosong.** Itu inti katalog per unit; produk baru masuk ke katalog **unit aktif sesi** yang membuatnya (tanpa field di body; sesi global seperti `SUPERADMIN` memasukkannya ke semua unit *aktif saat itu*), dan katalog produk yang sudah ada diubah lewat `PUT /product/{id}/unit-kerja`. Backfill migrasi memasukkan setiap produk yang ada ke setiap unit aktif, ditambah unit mana pun yang sudah memegang `kartu_stok` produk itu, supaya invarian "tidak ada stok tanpa katalog" berlaku sejak hari pertama.
+- `GET /pos/product` hanya menawarkan produk katalog unit **ruang yang diminta**, jadi layar menawarkan persis apa yang nanti diterima notanya. `GET /product` (daftar master) sengaja tidak disaring.
+- **Belum ada:** `PUT .../unit-kerja` dijaga `INVENTARIS` tanpa batas unit — sesi yang aktif di unit A bisa mengatur katalog unit B, sama seperti `POST /ruang` yang tidak membatasi `id_unit_kerja`.
 
 ## Pembelian: faktur, penerimaan, dan posting stok
 
@@ -1442,6 +1455,7 @@ Matikan dengan `web.swagger: false` di `config.json`, atau `WEB_SWAGGER=false`. 
 | `GET` | `/api/v1/product/{id}` | Detail, dengan satuan dan riwayat harga jual |
 | `PATCH` | `/api/v1/product/{id}` | Update `nama`, `stok_minimum`, `is_aktif` |
 | `POST` | `/api/v1/product/{id}/satuan` | Tambah satuan konversi |
+| `PUT` | `/api/v1/product/{id}/unit-kerja` | Ganti seluruh himpunan katalog unit kerja produk; mengeluarkannya dari unit yang masih menyimpan stoknya → 409 |
 | `GET` | `/api/v1/product/{id}/harga-jual` | Versi harga yang berlaku per satuan pada satu `tanggal` (default hari ini WIB) |
 | `POST` | `/api/v1/product/{id}/harga-jual` | Buka versi harga jual baru |
 | `PATCH` | `/api/v1/product/{id}/harga-jual/{id_harga}` | Koreksi `harga` saja; ditolak 409 kalau versinya sudah dipakai dokumen |

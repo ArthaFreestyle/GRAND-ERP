@@ -710,8 +710,13 @@ func (r *ProductRepository) SearchDaftarHargaJual(ctx context.Context, db DBTX, 
 // was left open on this one screen.
 const posProductFrom = `FROM product p`
 
+// The EXISTS is the per-unit catalog (product_unit_kerja): a product the room's unit
+// does not carry is not offered at its counter, because periksaKatalogRuang would refuse
+// the nota it ends up on anyway. An EXISTS, never a join — a join would only be safe
+// while the primary key made the pair unique, and this way it cannot multiply the page.
 const posProductFilter = `
 	WHERE p.is_aktif
+	  AND EXISTS (SELECT 1 FROM product_unit_kerja puk WHERE puk.id_product = p.id AND puk.id_unit_kerja = $2)
 	  AND ($1 = '' OR p.nama ILIKE '%' || $1 || '%' OR p.kode_barang ILIKE '%' || $1 || '%')`
 
 const posProductColumns = `p.id, p.kode_barang, p.nama`
@@ -724,12 +729,12 @@ const posProductColumns = `p.id, p.kode_barang, p.nama`
 // not the ILIKE-escaped one: EscapeLike turns a literal "100%" into "100\%", and
 // comparing that against a stored kode_barang would never equal it. A scanned or
 // typed code has to win the sort on its own literal value.
-func (r *ProductRepository) SearchPOS(ctx context.Context, db DBTX, search string, limit, offset int) ([]entity.ProductPOS, int64, error) {
+func (r *ProductRepository) SearchPOS(ctx context.Context, db DBTX, search string, idUnitKerja int64, limit, offset int) ([]entity.ProductPOS, int64, error) {
 	escaped := EscapeLike(search)
 
 	var total int64
 	if err := db.QueryRowContext(
-		ctx, `SELECT COUNT(*) `+posProductFrom+posProductFilter, escaped,
+		ctx, `SELECT COUNT(*) `+posProductFrom+posProductFilter, escaped, idUnitKerja,
 	).Scan(&total); err != nil {
 		return nil, 0, fmt.Errorf("count pos product: %w", err)
 	}
@@ -743,10 +748,10 @@ func (r *ProductRepository) SearchPOS(ctx context.Context, db DBTX, search strin
 	// back. The exact-match clause only ever reorders ties at the very top; it
 	// changes nothing about that guarantee.
 	query := `SELECT ` + posProductColumns + ` ` + posProductFrom + posProductFilter + `
-		ORDER BY (lower(p.kode_barang) = lower($2)) DESC, p.nama, p.id
-		LIMIT $3 OFFSET $4`
+		ORDER BY (lower(p.kode_barang) = lower($3)) DESC, p.nama, p.id
+		LIMIT $4 OFFSET $5`
 
-	rows, err := db.QueryContext(ctx, query, escaped, search, limit, offset)
+	rows, err := db.QueryContext(ctx, query, escaped, idUnitKerja, search, limit, offset)
 	if err != nil {
 		return nil, 0, fmt.Errorf("select pos product: %w", err)
 	}
@@ -919,4 +924,217 @@ func (r *ProductRepository) FindKatalogOCR(ctx context.Context, db DBTX) ([]enti
 	}
 
 	return katalog, nil
+}
+
+// FindUnitKerja lists the units whose catalog holds a product, retired units included
+// — the membership is still real, and hiding it would leave no way to see (or remove)
+// a product's link to a unit that has since been switched off.
+func (r *ProductRepository) FindUnitKerja(ctx context.Context, db DBTX, productID int64) ([]entity.ProductUnitKerja, error) {
+	const query = `
+		SELECT puk.id_product, puk.id_unit_kerja, uk.kode, uk.nama, uk.is_aktif
+		FROM product_unit_kerja puk
+		JOIN unit_kerja uk ON uk.id = puk.id_unit_kerja
+		WHERE puk.id_product = $1
+		ORDER BY uk.nama, uk.id`
+
+	rows, err := db.QueryContext(ctx, query, productID)
+	if err != nil {
+		return nil, fmt.Errorf("select product_unit_kerja: %w", err)
+	}
+	defer rows.Close()
+
+	list := make([]entity.ProductUnitKerja, 0, 4)
+
+	for rows.Next() {
+		var item entity.ProductUnitKerja
+
+		if err := rows.Scan(
+			&item.IDProduct, &item.IDUnitKerja, &item.KodeUnitKerja, &item.NamaUnitKerja, &item.IsAktifUnitKerja,
+		); err != nil {
+			return nil, fmt.Errorf("scan product_unit_kerja: %w", err)
+		}
+
+		list = append(list, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate product_unit_kerja: %w", err)
+	}
+
+	return list, nil
+}
+
+// InsertUnitKerja adds a product to the given units' catalogs. ON CONFLICT DO NOTHING:
+// a membership that already exists is the state the caller asked for, not an error,
+// and keeping the first row keeps created_at/created_by saying when it began.
+func (r *ProductRepository) InsertUnitKerja(ctx context.Context, db DBTX, productID int64, unitIDs []int64, actorID *int64) error {
+	if len(unitIDs) == 0 {
+		return nil
+	}
+
+	const query = `
+		INSERT INTO product_unit_kerja (id_product, id_unit_kerja, created_by)
+		SELECT $1, u, $3 FROM unnest($2::BIGINT[]) AS u
+		ON CONFLICT (id_product, id_unit_kerja) DO NOTHING`
+
+	if _, err := db.ExecContext(ctx, query, productID, unitIDs, actorID); err != nil {
+		return fmt.Errorf("insert product_unit_kerja: %w", err)
+	}
+
+	return nil
+}
+
+// DeleteUnitKerjaSelain removes every membership of a product whose unit is NOT in
+// keep, and returns the units it removed so the caller can check none of them still
+// holds stock.
+//
+// The removal has to happen BEFORE that check, not after. The catalog check in a
+// posting reads these rows FOR SHARE (FindDiluarKatalog), so this DELETE queues behind
+// any posting still running and only proceeds once its stock is committed — which is
+// then what the caller's stock check sees. Reading first and deleting second would
+// leave a window in which a posting slips in between.
+func (r *ProductRepository) DeleteUnitKerjaSelain(ctx context.Context, db DBTX, productID int64, keep []int64) ([]int64, error) {
+	const query = `
+		DELETE FROM product_unit_kerja
+		WHERE id_product = $1 AND NOT (id_unit_kerja = ANY($2::BIGINT[]))
+		RETURNING id_unit_kerja`
+
+	rows, err := db.QueryContext(ctx, query, productID, keep)
+	if err != nil {
+		return nil, fmt.Errorf("delete product_unit_kerja: %w", err)
+	}
+	defer rows.Close()
+
+	removed := make([]int64, 0, 2)
+
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan deleted product_unit_kerja: %w", err)
+		}
+
+		removed = append(removed, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate deleted product_unit_kerja: %w", err)
+	}
+
+	return removed, nil
+}
+
+// FindDiluarKatalog returns the kode_barang of every product in productIDs that is NOT
+// in the given unit's catalog, sorted. An id naming no product at all is left out —
+// that failure belongs to the foreign key, the same division periksaRuangUnitAktif
+// makes for an unknown room.
+//
+// FOR SHARE on the membership rows that DO exist is the point of reading them this
+// way: it makes a concurrent removal (DeleteUnitKerjaSelain) wait for this transaction,
+// so "the product was in the catalog when this document posted" stays true until the
+// document commits, and the removal's own stock check then sees the stock it wrote.
+// Two shares never block each other, so postings do not queue behind one another.
+func (r *ProductRepository) FindDiluarKatalog(ctx context.Context, db DBTX, idUnitKerja int64, productIDs []int64) ([]string, error) {
+	if len(productIDs) == 0 {
+		return nil, nil
+	}
+
+	const dalamKatalog = `
+		SELECT id_product FROM product_unit_kerja
+		WHERE id_unit_kerja = $1 AND id_product = ANY($2::BIGINT[])
+		FOR SHARE`
+
+	rows, err := db.QueryContext(ctx, dalamKatalog, idUnitKerja, productIDs)
+	if err != nil {
+		return nil, fmt.Errorf("select katalog unit kerja: %w", err)
+	}
+
+	ada := make(map[int64]struct{}, len(productIDs))
+
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan katalog unit kerja: %w", err)
+		}
+
+		ada[id] = struct{}{}
+	}
+
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("iterate katalog unit kerja: %w", err)
+	}
+	rows.Close()
+
+	hilang := make([]int64, 0, len(productIDs))
+	seen := make(map[int64]struct{}, len(productIDs))
+
+	for _, id := range productIDs {
+		if _, ok := ada[id]; ok {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+
+		seen[id] = struct{}{}
+		hilang = append(hilang, id)
+	}
+
+	if len(hilang) == 0 {
+		return nil, nil
+	}
+
+	const kode = `SELECT kode_barang FROM product WHERE id = ANY($1::BIGINT[]) ORDER BY kode_barang, id`
+
+	kodeRows, err := db.QueryContext(ctx, kode, hilang)
+	if err != nil {
+		return nil, fmt.Errorf("select kode barang diluar katalog: %w", err)
+	}
+	defer kodeRows.Close()
+
+	daftar := make([]string, 0, len(hilang))
+
+	for kodeRows.Next() {
+		var k string
+		if err := kodeRows.Scan(&k); err != nil {
+			return nil, fmt.Errorf("scan kode barang diluar katalog: %w", err)
+		}
+
+		daftar = append(daftar, k)
+	}
+
+	if err := kodeRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate kode barang diluar katalog: %w", err)
+	}
+
+	return daftar, nil
+}
+
+// IDUnitKerjaAktifSemua returns every active unit's id — the default catalog of a
+// product created without naming any, matching what migration 000029 did to the
+// products that already existed.
+func (r *ProductRepository) IDUnitKerjaAktifSemua(ctx context.Context, db DBTX) ([]int64, error) {
+	rows, err := db.QueryContext(ctx, `SELECT id FROM unit_kerja WHERE is_aktif ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("select unit kerja aktif: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0, 4)
+
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan unit kerja aktif: %w", err)
+		}
+
+		ids = append(ids, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate unit kerja aktif: %w", err)
+	}
+
+	return ids, nil
 }

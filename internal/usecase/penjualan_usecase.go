@@ -138,6 +138,12 @@ func (c *PenjualanUseCase) Create(ctx context.Context, request *model.CreatePenj
 		return nil, err
 	}
 
+	// Friendlier message sooner; Posting repeats it, since the catalog can change in between.
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, request.IDRuang,
+		idProductBaris(request.Detail, func(b *model.PenjualanDetailRequest) int64 { return b.IDProduct })); err != nil {
+		return nil, err
+	}
+
 	nomor, err := nomorDokumenUntukRuang(
 		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
 		repository.PrefixPenjualan, tanggal, request.IDRuang,
@@ -345,6 +351,11 @@ func (c *PenjualanUseCase) ReplaceDetail(ctx context.Context, request *model.Rep
 		return nil, err
 	}
 
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, penjualan.IDRuang,
+		idProductBaris(request.Detail, func(b *model.PenjualanDetailRequest) int64 { return b.IDProduct })); err != nil {
+		return nil, err
+	}
+
 	if err := c.PenjualanRepository.DeleteDetail(ctx, tx, request.ID); err != nil {
 		return nil, err
 	}
@@ -411,6 +422,14 @@ func (c *PenjualanUseCase) Posting(ctx context.Context, request *model.PostingPe
 
 	if len(detail) == 0 {
 		return nil, model.Invalid("penjualan tanpa baris tidak bisa diposting")
+	}
+
+	// Repeated from draft time: a product can leave the unit's catalog while the nota
+	// sits as a draft. Reads the membership FOR SHARE, so a removal racing this posting
+	// waits for it and then sees the stock it wrote.
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, penjualan.IDRuang,
+		idProductBaris(detail, func(b *entity.PenjualanDetail) int64 { return b.IDProduct })); err != nil {
+		return nil, err
 	}
 
 	if err := c.kunciJalurStok(ctx, tx, penjualan.IDRuang, detail, penjualan.Tanggal); err != nil {

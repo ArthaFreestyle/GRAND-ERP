@@ -99,7 +99,7 @@ func Bootstrap(config *BootstrapConfig) {
 	// only the resource they answer for belongs to product.
 	productUseCase := usecase.NewProductUseCase(
 		config.DB, config.Log, config.Validate, productRepository, pembelianRepository,
-		kartuStokRepository, ruangRepository,
+		kartuStokRepository, ruangRepository, unitKerjaRepository,
 	)
 	// PeriodeUseCase is book closing. It is the module closest to master data — no
 	// number, no lines, no posting — and it holds one repository, because closing a
@@ -209,13 +209,13 @@ func Bootstrap(config *BootstrapConfig) {
 	// StokOpnameUseCase is the seventh module to write kartu_stok, and the only one
 	// whose Posting/Batal need RuangRepository for its exclusive/shared ruang: lock
 	// rather than only the narrow read every other module borrows it for — isu #15.
-	// It holds no ProductRepository: unlike every other document, a count is always
-	// in the base unit, compared directly against kartu_stok, so there is no
-	// conversion factor to resolve.
+	// It borrows ProductRepository for the catalog check alone: unlike every other
+	// document, a count is always in the base unit, compared directly against
+	// kartu_stok, so there is no conversion factor to resolve.
 	stokOpnameUseCase := usecase.NewStokOpnameUseCase(
 		config.DB, config.Log, config.Validate,
 		stokOpnameRepository, kartuStokRepository, counterRepository,
-		periodeRepository, ruangRepository, unitKerjaRepository,
+		periodeRepository, ruangRepository, unitKerjaRepository, productRepository,
 	)
 	// LaporanUseCase is isu #22 fase 3: three reports belonging to no single
 	// module's resource, so it borrows KartuStokRepository (nilai persediaan,

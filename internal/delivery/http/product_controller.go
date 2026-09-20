@@ -65,6 +65,7 @@ func (c *ProductController) Create(ctx fiber.Ctx) error {
 	}
 
 	request.ActorID = actor
+	request.AktifIDUnitKerja = aktifIDUnitKerja(ctx)
 
 	response, err := c.UseCase.Create(ctx.Context(), request)
 	if err != nil {
@@ -142,6 +143,35 @@ func (c *ProductController) AddSatuan(ctx fiber.Ctx) error {
 	}
 
 	return ctx.Status(fiber.StatusCreated).JSON(model.WebResponse[*model.ProductResponse]{Data: response})
+}
+
+// SetUnitKerja replaces which unit catalogs the product is in. 200, not 201: it creates
+// no resource of its own, it restates a set.
+func (c *ProductController) SetUnitKerja(ctx fiber.Ctx) error {
+	id, err := strconv.ParseInt(ctx.Params("id"), 10, 64)
+	if err != nil {
+		return model.Invalid("id must be an integer")
+	}
+
+	request := new(model.SetProductUnitKerjaRequest)
+	if err := ctx.Bind().Body(request); err != nil {
+		return model.Invalid("malformed request body")
+	}
+
+	actor, err := actorID(ctx)
+	if err != nil {
+		return err
+	}
+
+	request.IDProduct = id
+	request.ActorID = actor
+
+	response, err := c.UseCase.SetUnitKerja(ctx.Context(), request)
+	if err != nil {
+		return err
+	}
+
+	return ctx.JSON(model.WebResponse[*model.ProductResponse]{Data: response})
 }
 
 func (c *ProductController) AddHargaJual(ctx fiber.Ctx) error {

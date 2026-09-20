@@ -387,6 +387,7 @@ func TestKesehatanStokRuangUnitLainTidakIkut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create unit kerja: %v", err)
 	}
+	masukKatalog(t, f.product, unitLain.ID)
 	ruangUnitLain := ruangLain(t, testApp, f, "Gudang Unit Lain", unitLain.ID)
 
 	beliKe(t, testApp, f, f.ruang, f.product, tanggalHariLalu(0), "100")

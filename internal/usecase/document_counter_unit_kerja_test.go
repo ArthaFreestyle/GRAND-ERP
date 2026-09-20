@@ -30,6 +30,7 @@ func TestDocumentCounterDuaUnitTidakBertabrakanDanMulaiDariSatu(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create unit kedua: %v", err)
 	}
+	masukKatalog(t, f.product, unitKedua.ID)
 	ruangKedua, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
 		ActorID: f.actor, NamaRuang: "Gudang Kedua Counter", IDUnitKerja: unitKedua.ID,
 	})
@@ -109,6 +110,7 @@ func TestDocumentCounterUnitTanpaKodeDitolakSaatMenerbitkanNomor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create unit tanpa kode: %v", err)
 	}
+	masukKatalog(t, f.product, unitTanpaKode.ID)
 	ruangTanpaKode, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
 		ActorID: f.actor, NamaRuang: "Gudang Tanpa Kode", IDUnitKerja: unitTanpaKode.ID,
 	})

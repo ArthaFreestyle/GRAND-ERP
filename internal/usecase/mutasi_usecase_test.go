@@ -40,6 +40,7 @@ func stokAwalMutasi(t *testing.T, testApp *app, qty string) (*app, mutasiSetup) 
 	if err != nil {
 		t.Fatalf("create unit kerja tujuan: %v", err)
 	}
+	masukKatalog(t, f.product, unitTujuan.ID)
 
 	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
 	// gets its own unit_kerja rather than reusing the fixture's.
@@ -182,6 +183,7 @@ func TestMutasiKekalMeskiHargaPokokTidakBulat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create unit kerja tujuan: %v", err)
 	}
+	masukKatalog(t, f.product, unitTujuan.ID)
 
 	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
 	// gets its own unit_kerja rather than reusing the fixture's.
@@ -383,6 +385,7 @@ func TestBatalMutasiPeriodeTutupMasukPeriodeBerjalan(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create unit kerja tujuan: %v", err)
 	}
+	masukKatalog(t, f.product, unitTujuan.ID)
 
 	// Cross-unit transfers are allowed (isu #12 fase 1), so tujuan deliberately
 	// gets its own unit_kerja rather than reusing the fixture's.

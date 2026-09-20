@@ -147,6 +147,7 @@ func TestPembelianListOnlyShowsActiveUnitDocuments(t *testing.T) {
 	inside := draftSederhana(t, testApp, f, "10", nil, nil)
 
 	unitLain := createUnit(t, testApp, "Unit Lain Pembelian List")
+	masukKatalog(t, f.product, unitLain)
 	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Gudang Lain Pembelian", IDUnitKerja: unitLain,
 	})

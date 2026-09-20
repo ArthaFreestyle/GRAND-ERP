@@ -1024,3 +1024,55 @@ func scanKartuStok(row rowScanner, kartu *entity.KartuStok) error {
 		&kartu.CreatedBy, &kartu.CreatedAt,
 	)
 }
+
+// UnitDenganSaldoPositif returns, from the given units, those in which this product
+// still has a positive balance in some room — the guard behind taking a product out of
+// a unit's catalog, the same reasoning as HasSaldoPositif for retiring a ruang.
+//
+// Taking it out while goods remain would leave stock that no catalog admits, which
+// no document could then move, count, or sell. The remedy is a mutasi or a pemakaian
+// that empties the unit's rooms first.
+//
+// Same DISTINCT ON ... ORDER BY id DESC reading of "current balance" that
+// HasSaldoPositif and SaldoRuang take, partitioned the other way round: one product
+// across rooms rather than one room across products.
+func (r *KartuStokRepository) UnitDenganSaldoPositif(ctx context.Context, db DBTX, idBarang int64, unitIDs []int64) ([]int64, error) {
+	if len(unitIDs) == 0 {
+		return nil, nil
+	}
+
+	const query = `
+		SELECT DISTINCT r.id_unit_kerja
+		FROM (
+			SELECT DISTINCT ON (id_ruang) id_ruang, stok_akhir
+			FROM kartu_stok
+			WHERE id_barang = $1
+			ORDER BY id_ruang, id DESC
+		) saldo
+		JOIN ruang r ON r.id = saldo.id_ruang
+		WHERE saldo.stok_akhir > 0 AND r.id_unit_kerja = ANY($2::BIGINT[])
+		ORDER BY r.id_unit_kerja`
+
+	rows, err := db.QueryContext(ctx, query, idBarang, unitIDs)
+	if err != nil {
+		return nil, fmt.Errorf("select unit dengan saldo positif: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0, 2)
+
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan unit dengan saldo positif: %w", err)
+		}
+
+		ids = append(ids, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate unit dengan saldo positif: %w", err)
+	}
+
+	return ids, nil
+}

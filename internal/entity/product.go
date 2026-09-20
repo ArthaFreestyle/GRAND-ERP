@@ -27,6 +27,7 @@ type Product struct {
 	NamaSatuanDasar string
 	Satuan          []ProductSatuan
 	HargaJual       []ProductHargaJual
+	UnitKerja       []ProductUnitKerja
 }
 
 // ProductSatuan maps product_satuan: how many base units one alternative unit holds.
@@ -106,4 +107,19 @@ type DaftarHargaJual struct {
 	Harga         *string
 	BerlakuDari   *time.Time
 	BerlakuSampai *time.Time
+}
+
+// ProductUnitKerja maps product_unit_kerja — one product's membership in one unit
+// kerja's catalog. Not a document and not a master: a join row like user_role, so it
+// carries no is_aktif and is hard-deleted when a product leaves a unit.
+type ProductUnitKerja struct {
+	IDProduct   int64
+	IDUnitKerja int64
+
+	// The three below come from a join on unit_kerja, not from product_unit_kerja.
+	// Kode is nullable because unit_kerja.kode is; IsAktifUnitKerja is reported so a
+	// catalog screen can tell a live membership from one in a retired unit.
+	KodeUnitKerja    *string
+	NamaUnitKerja    string
+	IsAktifUnitKerja bool
 }
