@@ -100,6 +100,10 @@ func (r *KartuStokRepository) KesehatanStokProduk(
 //     yesterday (isu #6) — that is not the goods moving, and must not hide them.
 //   - When retur_penjualan exists, RETUR_PENJUALAN must stay out of the demand list:
 //     goods coming back are the opposite of demand.
+//   - SALDO_AWAL (isu #43) is an ARRIVAL and never demand. It is not in the demand list
+//     below, and it satisfies the arrival predicate on its own (stok_masuk > 0, not a
+//     reversal, not MUTASI_MASUK) — so migrated goods that have not sold in the window
+//     are genuinely dead stock. Do not add it to the demand list.
 //
 // Arrival ("kedatangan") gives goods that only just came in a grace period: stock
 // is dead only if the product's FIRST arrival into the unit is older than the

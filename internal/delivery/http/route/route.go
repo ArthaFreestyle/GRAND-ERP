@@ -42,6 +42,7 @@ type RouteConfig struct {
 	ReturController        *deliveryhttp.ReturPembelianController
 	MutasiController       *deliveryhttp.MutasiController
 	PemakaianController    *deliveryhttp.PemakaianController
+	SaldoAwalController    *deliveryhttp.SaldoAwalController
 	PenjualanController    *deliveryhttp.PenjualanController
 	PembayaranController   *deliveryhttp.PembayaranUtangController
 	PenerimaanController   *deliveryhttp.PenerimaanPembayaranController
@@ -446,6 +447,22 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Post("/pemakaian/:id/tolak", superadmin, c.PemakaianController.Tolak)
 	api.Post("/pemakaian/:id/posting", superadmin, c.PemakaianController.Posting)
 	api.Post("/pemakaian/:id/batal", superadmin, c.PemakaianController.Batal)
+
+	// saldo_awal (isu #43) is the eighth module to write kartu_stok: opening stock for a
+	// unit that migrated in already holding goods, at a cost the operator types. It
+	// keeps the full approval flow, so the split follows pembelian — INVENTARIS types
+	// and submits, SUPERADMIN rejects, posts and voids. Voiding is SUPERADMIN-only for
+	// a further reason: it permanently closes the (barang, ruang) pair to any new
+	// saldo_awal. Reads are open to any authenticated caller, scoped by active unit.
+	api.Get("/saldo_awal", c.SaldoAwalController.List)
+	api.Get("/saldo_awal/:id", c.SaldoAwalController.Get)
+	api.Post("/saldo_awal", inventaris, c.SaldoAwalController.Create)
+	api.Patch("/saldo_awal/:id", inventaris, c.SaldoAwalController.Update)
+	api.Put("/saldo_awal/:id/detail", inventaris, c.SaldoAwalController.ReplaceDetail)
+	api.Post("/saldo_awal/:id/ajukan", inventaris, c.SaldoAwalController.Ajukan)
+	api.Post("/saldo_awal/:id/tolak", superadmin, c.SaldoAwalController.Tolak)
+	api.Post("/saldo_awal/:id/posting", superadmin, c.SaldoAwalController.Posting)
+	api.Post("/saldo_awal/:id/batal", superadmin, c.SaldoAwalController.Batal)
 
 	// penjualan is the sixth module to write kartu_stok, and the first whose goods
 	// leave to an outside party with money moving on the other side — isu #10. It

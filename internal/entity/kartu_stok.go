@@ -48,6 +48,14 @@ const (
 	// 'PEMBATALAN_PEMAKAIAN' value.
 	JenisTransaksiSOSurplus = "SO_SURPLUS"
 	JenisTransaksiSODefisit = "SO_DEFISIT"
+	// JenisTransaksiSaldoAwal is the eighth document to write kartu_stok (isu #43):
+	// opening stock for a unit_kerja that migrated in already holding goods. It gets its
+	// own value rather than riding on SO_SURPLUS because laporan/pergerakan groups by
+	// jenis_transaksi, and a migration must not read as a finding of a count. Added by
+	// migration 000030 — ALTER TYPE ... ADD VALUE, which cannot be undone.
+	//
+	// Its cancellation reuses JenisTransaksiPembatalanTransaksi, like every other writer.
+	JenisTransaksiSaldoAwal = "SALDO_AWAL"
 )
 
 // Ref tables recorded on kartu_stok. Paired with ref_id_transaksi they say which
@@ -74,6 +82,9 @@ const (
 	// (migration 000023) compares ref_table against to let an opname post its
 	// own adjustment into the very room it is freezing.
 	RefTableStokOpname = "stok_opname"
+	// RefTableSaldoAwal is the eighth document to write kartu_stok — see
+	// JenisTransaksiSaldoAwal.
+	RefTableSaldoAwal = "saldo_awal"
 )
 
 // KartuStok maps the kartu_stok table: the only source of truth for stock and

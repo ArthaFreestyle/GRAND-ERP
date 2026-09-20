@@ -52,6 +52,7 @@ func Bootstrap(config *BootstrapConfig) {
 	penerimaanRepository := repository.NewPenerimaanPembayaranRepository()
 	mutasiRepository := repository.NewMutasiRepository()
 	pemakaianRepository := repository.NewPemakaianRepository()
+	saldoAwalRepository := repository.NewSaldoAwalRepository()
 	penjualanRepository := repository.NewPenjualanRepository()
 	dokumenRepository := repository.NewDokumenRepository()
 	periodeRepository := repository.NewPeriodeRepository()
@@ -173,6 +174,15 @@ func Bootstrap(config *BootstrapConfig) {
 	pemakaianUseCase := usecase.NewPemakaianUseCase(
 		config.DB, config.Log, config.Validate,
 		pemakaianRepository, productRepository, kartuStokRepository, counterRepository,
+		periodeRepository, ruangRepository, stokOpnameRepository, unitKerjaRepository,
+	)
+	// SaldoAwalUseCase (isu #43) reads kartu_stok's history through
+	// PernahBergerak — the fence — so it holds KartuStokRepository like every stock
+	// writer, plus the same RuangRepository/StokOpnameRepository borrows pemakaian has
+	// for LockShared and periksaRuangBeku's message.
+	saldoAwalUseCase := usecase.NewSaldoAwalUseCase(
+		config.DB, config.Log, config.Validate,
+		saldoAwalRepository, productRepository, kartuStokRepository, counterRepository,
 		periodeRepository, ruangRepository, stokOpnameRepository, unitKerjaRepository,
 	)
 	// PenjualanUseCase's PelangganRepository is borrowed for exactly one narrow
@@ -329,6 +339,7 @@ func Bootstrap(config *BootstrapConfig) {
 	returController := deliveryhttp.NewReturPembelianController(config.Log, returUseCase)
 	mutasiController := deliveryhttp.NewMutasiController(config.Log, mutasiUseCase)
 	pemakaianController := deliveryhttp.NewPemakaianController(config.Log, pemakaianUseCase)
+	saldoAwalController := deliveryhttp.NewSaldoAwalController(config.Log, saldoAwalUseCase)
 	penjualanController := deliveryhttp.NewPenjualanController(config.Log, penjualanUseCase)
 	pembayaranController := deliveryhttp.NewPembayaranUtangController(config.Log, pembayaranUseCase)
 	penerimaanController := deliveryhttp.NewPenerimaanPembayaranController(config.Log, penerimaanUseCase)
@@ -358,6 +369,7 @@ func Bootstrap(config *BootstrapConfig) {
 		ReturController:        returController,
 		MutasiController:       mutasiController,
 		PemakaianController:    pemakaianController,
+		SaldoAwalController:    saldoAwalController,
 		PenjualanController:    penjualanController,
 		PembayaranController:   pembayaranController,
 		PenerimaanController:   penerimaanController,
