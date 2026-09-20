@@ -2,6 +2,7 @@ package usecase
 
 import (
 	"math/big"
+	"regexp"
 	"strings"
 
 	"Arthafreestyle/ERP/internal/model"
@@ -76,6 +77,65 @@ func parseAngkaIndonesia(text string) (*big.Rat, error) {
 			bersih = bagian[0] + bagian[1]
 		}
 	}
+
+	if negatif {
+		bersih = "-" + bersih
+	}
+
+	return parseNumeric(bersih)
+}
+
+var (
+	// uangDesimalKosong matches a trailing zero-only fraction (",00", ".0") that carries
+	// no value and is simply dropped.
+	uangDesimalKosong = regexp.MustCompile(`[.,]0{1,2}$`)
+	// uangDesimalKoma matches a trailing Indonesian decimal comma with one or two digits.
+	uangDesimalKoma = regexp.MustCompile(`,\d{1,2}$`)
+)
+
+// parseUangIndonesia normalizes a rupiah figure (harga, diskon, PPN, total) as it is
+// written on paper. Unlike parseAngkaIndonesia it never guesses that a dot is a
+// decimal point: money on these documents is whole rupiah, so "5.000" is 5000 and
+// "5.50" is 550 — every dot is thousands grouping.
+//
+// Rules, in order:
+//
+//  1. A trailing zero-only fraction (",00", ".00", ".0") is dropped.
+//  2. A trailing ",d" or ",dd" is a decimal comma (Indonesian style) and kept.
+//  3. Every remaining '.' and ',' is thousands grouping and stripped.
+//
+// Quantities must keep using parseAngkaIndonesia, where 2.5 kg is legitimate.
+func parseUangIndonesia(text string) (*big.Rat, error) {
+	bersih := strings.TrimSpace(text)
+	bersih = strings.TrimSpace(strings.TrimPrefix(strings.ToUpper(bersih), "RP"))
+	bersih = strings.ReplaceAll(bersih, " ", "")
+
+	if bersih == "" {
+		return nil, model.Invalid("angka kosong")
+	}
+
+	negatif := false
+
+	switch {
+	case strings.HasPrefix(bersih, "-"):
+		negatif = true
+		bersih = bersih[1:]
+	case strings.HasPrefix(bersih, "+"):
+		bersih = bersih[1:]
+	}
+
+	pecahan := ""
+
+	switch {
+	case uangDesimalKosong.MatchString(bersih):
+		bersih = uangDesimalKosong.ReplaceAllString(bersih, "")
+	case uangDesimalKoma.MatchString(bersih):
+		i := strings.LastIndex(bersih, ",")
+		pecahan = "." + bersih[i+1:]
+		bersih = bersih[:i]
+	}
+
+	bersih = strings.NewReplacer(".", "", ",", "").Replace(bersih) + pecahan
 
 	if negatif {
 		bersih = "-" + bersih

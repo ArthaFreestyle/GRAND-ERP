@@ -251,7 +251,7 @@ func (c *OCRPembelianUseCase) susunUsulan(
 	var totalTerbacaStr *string
 
 	if hasil.Total != nil && strings.TrimSpace(*hasil.Total) != "" {
-		if t, err := parseAngkaIndonesia(*hasil.Total); err == nil {
+		if t, err := parseUangIndonesia(*hasil.Total); err == nil {
 			t = roundNumeric(t, skalaUang)
 			formatted := formatNumeric(t, skalaUang)
 			totalTerbacaStr = &formatted
@@ -382,7 +382,7 @@ func susunBarisOCR(
 		)}}
 	}
 
-	harga, err := parseAngkaIndonesia(*b.HargaSatuan)
+	harga, err := parseUangIndonesia(*b.HargaSatuan)
 	if err != nil || harga.Sign() < 0 {
 		return barisOCRSiap{peringatan: []string{fmt.Sprintf(
 			"baris %d: harga_satuan tidak terbaca sebagai angka yang valid, baris tidak dikenali", b.Urutan,
@@ -401,7 +401,7 @@ func susunBarisOCR(
 	diskon := new(big.Rat)
 
 	if b.DiskonBaris != nil && strings.TrimSpace(*b.DiskonBaris) != "" {
-		if d, err := parseAngkaIndonesia(*b.DiskonBaris); err == nil && d.Sign() >= 0 {
+		if d, err := parseUangIndonesia(*b.DiskonBaris); err == nil && d.Sign() >= 0 {
 			diskon = d
 		} else {
 			peringatan = append(peringatan, fmt.Sprintf("baris %d: diskon_baris tidak terbaca, diisi 0", b.Urutan))
@@ -491,7 +491,7 @@ func angkaOpsional(v *string, peringatan *[]string, nama string) *big.Rat {
 		return new(big.Rat)
 	}
 
-	n, err := parseAngkaIndonesia(*v)
+	n, err := parseUangIndonesia(*v)
 	if err != nil {
 		*peringatan = append(*peringatan, fmt.Sprintf("%s pada dokumen tidak terbaca sebagai angka, diisi 0", nama))
 
