@@ -105,6 +105,7 @@ type app struct {
 	retur        *usecase.ReturPembelianUseCase
 	mutasi       *usecase.MutasiUseCase
 	pemakaian    *usecase.PemakaianUseCase
+	saldoAwal    *usecase.SaldoAwalUseCase
 	penjualan    *usecase.PenjualanUseCase
 	pembayaran   *usecase.PembayaranUtangUseCase
 	penerimaan   *usecase.PenerimaanPembayaranUseCase
@@ -263,6 +264,12 @@ func newApp(t *testing.T) *app {
 			kartuStokRepository, counterRepository, periodeRepository,
 			ruangRepository, stokOpnameRepository, unitKerjaRepository,
 		),
+		saldoAwal: usecase.NewSaldoAwalUseCase(
+			testDB, log, validate,
+			repository.NewSaldoAwalRepository(), productRepository,
+			kartuStokRepository, counterRepository, periodeRepository,
+			ruangRepository, stokOpnameRepository, unitKerjaRepository,
+		),
 		penjualan: usecase.NewPenjualanUseCase(
 			testDB, log, validate,
 			penjualanRepository, productRepository, repository.NewPelangganRepository(),
@@ -397,6 +404,10 @@ func truncateMaster(t *testing.T) {
 		// itself fails on the foreign key. stok_opname_detail before stok_opname for
 		// the ordinary child-before-parent reason.
 		"stok_opname_detail", "stok_opname",
+		// saldo_awal_detail.id_kartu_stok points AT kartu_stok too (isu #43) — the same
+		// reversed side stok_opname_detail sits on, so it goes here with it, before
+		// kartu_stok, or the wipe fails on the foreign key.
+		"saldo_awal_detail", "saldo_awal",
 		// Children before parents. kartu_stok references product, ruang, satuan and
 		// users; penerimaan_susulan_detail references pembelian_detail, so it has to
 		// go before it.

@@ -955,3 +955,122 @@ func TestPresensiSayaTidakDisaringUnitKerja(t *testing.T) {
 		t.Fatalf("riwayat sendiri kehilangan hari di unit lain: %d baris", len(riwayat))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// saldo_awal (isu #43) — same shape as pemakaian and penjualan: id_ruang checked on the
+// write side (fase 5), the read side scoped by the room's unit (fase 6), and the write
+// path's own re-read never scoped.
+// ---------------------------------------------------------------------------
+
+func TestSaldoAwalCreateRejectsRuangOutsideActiveUnit(t *testing.T) {
+	testApp, s := saldoAwalFixture(t)
+	unitLain := createUnit(t, testApp, "Unit Lain Saldo Awal Create")
+
+	_, err := testApp.saldoAwal.Create(ctx(), &model.CreateSaldoAwalRequest{
+		ActorID: s.actor, AktifIDUnitKerja: &unitLain,
+		Tanggal: "2026-08-11", IDRuang: s.ruang, Alasan: "migrasi",
+	})
+
+	assertKind(t, err, model.KindForbidden)
+}
+
+func TestSaldoAwalUpdateRejectsMovingRuangOutsideActiveUnit(t *testing.T) {
+	testApp, s := saldoAwalFixture(t)
+	created := buatSaldoAwal(t, testApp, s, "2026-08-11")
+
+	unitLain := createUnit(t, testApp, "Unit Lain Saldo Awal Update")
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		ActorID: s.actor, NamaRuang: "Gudang Lain Saldo Awal Update", IDUnitKerja: unitLain,
+	})
+	if err != nil {
+		t.Fatalf("create ruang lain: %v", err)
+	}
+
+	_, err = testApp.saldoAwal.Update(ctx(), &model.UpdateSaldoAwalRequest{
+		ID: created.ID, ActorID: s.actor, AktifIDUnitKerja: &s.unitKerja,
+		IDRuang: model.Optional[int64]{Present: true, Value: &ruangLain.ID},
+	})
+
+	assertKind(t, err, model.KindForbidden)
+}
+
+func TestSaldoAwalGetHidesDocumentOutsideActiveUnit(t *testing.T) {
+	testApp, s := saldoAwalFixture(t)
+	created := buatSaldoAwal(t, testApp, s, "2026-08-11")
+
+	unitLain := createUnit(t, testApp, "Unit Lain Saldo Awal Get")
+
+	_, err := testApp.saldoAwal.Get(ctx(), &model.GetSaldoAwalRequest{
+		ID: created.ID, AktifIDUnitKerja: &unitLain,
+	})
+	assertKind(t, err, model.KindNotFound)
+
+	response, err := testApp.saldoAwal.Get(ctx(), &model.GetSaldoAwalRequest{
+		ID: created.ID, AktifIDUnitKerja: &s.unitKerja,
+	})
+	if err != nil {
+		t.Fatalf("get saldo_awal di dalam unit aktif: %v", err)
+	}
+	if response.ID != created.ID {
+		t.Fatalf("got saldo_awal %d, want %d", response.ID, created.ID)
+	}
+}
+
+func TestSaldoAwalListOnlyShowsActiveUnitDocuments(t *testing.T) {
+	testApp, s := saldoAwalFixture(t)
+	inside := buatSaldoAwal(t, testApp, s, "2026-08-11")
+
+	unitLain := createUnit(t, testApp, "Unit Lain Saldo Awal List")
+	ruangLain, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
+		ActorID: s.actor, NamaRuang: "Gudang Lain Saldo Awal List", IDUnitKerja: unitLain,
+	})
+	if err != nil {
+		t.Fatalf("create ruang lain: %v", err)
+	}
+
+	outside, err := testApp.saldoAwal.Create(ctx(), &model.CreateSaldoAwalRequest{
+		ActorID: s.actor, Tanggal: "2026-08-11", IDRuang: ruangLain.ID, Alasan: "migrasi unit lain",
+	})
+	if err != nil {
+		t.Fatalf("create saldo_awal di unit lain: %v", err)
+	}
+
+	list, paging, err := testApp.saldoAwal.Search(ctx(), &model.ListSaldoAwalRequest{AktifIDUnitKerja: &s.unitKerja})
+	if err != nil {
+		t.Fatalf("search saldo_awal: %v", err)
+	}
+
+	seen := map[int64]bool{}
+	for _, d := range list {
+		seen[d.ID] = true
+	}
+	if !seen[inside.ID] {
+		t.Fatal("document inside the active unit is missing from its own scoped list")
+	}
+	if seen[outside.ID] {
+		t.Fatal("document from a different unit leaked into a scoped list")
+	}
+	if paging.TotalItem != 1 {
+		t.Fatalf("total_item = %d, want 1 (the COUNT must share the scoped FROM)", paging.TotalItem)
+	}
+}
+
+// A write action's own re-read is never scoped by AktifIDUnitKerja: a caller who just
+// acted on a document is by construction allowed to see the result of their own action.
+func TestSaldoAwalWritePathReReadNotScopedByActiveUnit(t *testing.T) {
+	testApp, s := saldoAwalFixture(t)
+	created := buatSaldoAwal(t, testApp, s, "2026-08-11")
+
+	unitLain := createUnit(t, testApp, "Unit Lain Saldo Awal ReRead")
+
+	response, err := testApp.saldoAwal.Update(ctx(), &model.UpdateSaldoAwalRequest{
+		ID: created.ID, ActorID: s.actor, AktifIDUnitKerja: &unitLain,
+		Alasan: model.Optional[string]{Present: true, Value: ptr("revisi")},
+	})
+	if err != nil {
+		t.Fatalf("update saldo_awal yang tidak menyentuh id_ruang: %v", err)
+	}
+	if response.Alasan != "revisi" {
+		t.Errorf("alasan = %q, want revisi", response.Alasan)
+	}
+}

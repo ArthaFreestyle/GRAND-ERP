@@ -510,6 +510,7 @@ const riwayatKartuStokNomorDokumen = `
 			WHEN 'pemakaian'          THEN (SELECT nomor FROM pemakaian          WHERE id = ks.ref_id_transaksi)
 			WHEN 'penjualan'          THEN (SELECT nomor FROM penjualan          WHERE id = ks.ref_id_transaksi)
 			WHEN 'stok_opname'        THEN (SELECT nomor FROM stok_opname        WHERE idstok_opname = ks.ref_id_transaksi)
+			WHEN 'saldo_awal'         THEN (SELECT nomor FROM saldo_awal         WHERE id = ks.ref_id_transaksi)
 		END`
 
 // riwayatKartuStokColumns names every projected column for the row query. si is
@@ -1072,6 +1073,58 @@ func (r *KartuStokRepository) UnitDenganSaldoPositif(ctx context.Context, db DBT
 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate unit dengan saldo positif: %w", err)
+	}
+
+	return ids, nil
+}
+
+// PernahBergerak returns which of the given products already have ANY kartu_stok row
+// in idRuang — the fence saldo_awal (isu #43) stands behind: one (barang, ruang) for
+// life. One query for the whole basket (unnest, the FindFaktorBatch / SaldoBatch
+// shape), so the caller can name every offender at once instead of one per round.
+//
+// "Any row" is literal: a row written by pembelian, mutasi or any other module, this
+// module's own earlier posting, and — deliberately — a reversing row too. Once a room
+// has history for a product an opening balance is no longer a truthful answer; the
+// truthful one is stok_opname, which by then has an id_kartu_stok_cutoff to point at.
+//
+// It must be read AFTER KunciSaldo holds the advisory lock for every pair asked
+// about: called before, the answer is about a past that can change before the first
+// row is written. Ordered by id so the message is stable.
+func (r *KartuStokRepository) PernahBergerak(ctx context.Context, db DBTX, productIDs []int64, idRuang int64) ([]int64, error) {
+	if len(productIDs) == 0 {
+		return []int64{}, nil
+	}
+
+	const query = `
+		SELECT p.id_barang
+		FROM unnest($1::BIGINT[]) AS p(id_barang)
+		WHERE EXISTS (
+			SELECT 1 FROM kartu_stok ks
+			WHERE ks.id_barang = p.id_barang AND ks.id_ruang = $2
+		)
+		ORDER BY p.id_barang`
+
+	rows, err := db.QueryContext(ctx, query, productIDs, idRuang)
+	if err != nil {
+		return nil, fmt.Errorf("select pernah bergerak kartu_stok: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]int64, 0, len(productIDs))
+
+	for rows.Next() {
+		var id int64
+
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan pernah bergerak kartu_stok: %w", err)
+		}
+
+		ids = append(ids, id)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pernah bergerak kartu_stok: %w", err)
 	}
 
 	return ids, nil

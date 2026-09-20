@@ -18,6 +18,7 @@ const (
 	PrefixPenjualan            = "PJ"
 	PrefixStokOpname           = "SO"
 	PrefixPenerimaanPembayaran = "PP"
+	PrefixSaldoAwal            = "SA"
 )
 
 // DocumentCounterRepository hands out the per-month sequence behind every document

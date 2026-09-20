@@ -45,6 +45,9 @@ var RefTableDokumen = map[string]string{
 	// penjualan: a signed nota or a customer's proof of payment belongs to the sale
 	// it settles. Isu #10 asked for exactly this one line — see CLAUDE.md.
 	"penjualan": "status",
+	// saldo_awal: the cost on this document is TYPED, so a signed handover report or
+	// a signed count sheet is the only external evidence behind the number (isu #43).
+	"saldo_awal": "status",
 }
 
 // ErrRefTableTidakDikenal reports a ref_table outside RefTableDokumen.

@@ -216,6 +216,7 @@ tags:
   - name: penjualan
   - name: penerimaan-pembayaran
   - name: stok-opname
+  - name: saldo-awal
   - name: product
   - name: laporan
   - name: periode
@@ -3882,6 +3883,365 @@ paths:
                 type: object
                 properties:
                   data: { $ref: "#/components/schemas/Pemakaian" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/saldo_awal:
+    get:
+      tags: [saldo-awal]
+      summary: List dokumen saldo awal
+      operationId: listSaldoAwal
+      description: >
+        Tidak menyertakan `detail`; kuncinya hilang sama sekali, bukan array kosong.
+        `search` mencocokkan nomor dokumen maupun alasannya. Disaring oleh unit_kerja
+        aktif sesi: dokumen yang ruangnya di luar unit itu hilang dari halaman begitu
+        saja, tidak pernah 404.
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/Size"
+        - name: search
+          in: query
+          schema: { type: string, maxLength: 255 }
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [DRAFT, DIAJUKAN, POSTED, BATAL]
+        - name: id_ruang
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: tanggal_dari
+          in: query
+          schema: { type: string, format: date }
+        - name: tanggal_sampai
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        "200":
+          description: Halaman hasil
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/SaldoAwal" }
+                  paging: { $ref: "#/components/schemas/PageMetadata" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+    post:
+      tags: [saldo-awal]
+      summary: Buat draft saldo awal
+      operationId: createSaldoAwal
+      description: >
+        Stok pembukaan untuk unit kerja yang baru migrasi dan sudah memegang barang di
+        raknya sebelum baris pertama masuk ke sistem. Nomor diambil dari
+        `document_counter` dengan prefix `SA`, dikunci pada unit pemilik ruang
+        dokumennya.
+
+
+        **Satu `(barang, ruang)` seumur hidup.** Barang yang sudah punya baris
+        `kartu_stok` apa pun di ruang itu — dari `pembelian`, `mutasi`, `saldo_awal`
+        sebelumnya, atau baris pembaliknya — ditolak 409 dengan pesan yang menyebut
+        `kode_barang`, ruangnya, dan `stok_opname` sebagai jalan yang benar. Pemeriksaan
+        di sini hanya untuk pesan yang lebih dini; yang menentukan ada di `posting`.
+
+
+        `detail` boleh kosong di sini, tetapi mengajukan menolak dokumen tanpa baris.
+        Produk yang sama **tidak** boleh muncul dua kali dalam satu dokumen. Produk di
+        luar katalog unit pemilik ruang ditolak 400.
+
+
+        Role: `INVENTARIS`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tanggal, id_ruang, alasan]
+              properties:
+                tanggal:
+                  type: string
+                  format: date
+                  description: Tanggal cutover migrasi; baris `kartu_stok` bertanggal ini.
+                id_ruang: { type: integer, format: int64, minimum: 1 }
+                alasan:
+                  type: string
+                  maxLength: 1000
+                  description: Wajib dan tidak boleh dikosongkan lewat `PATCH`.
+                detail:
+                  type: array
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/SaldoAwalDetailInput" }
+      responses:
+        "201":
+          description: Draft dibuat
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SaldoAwal" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/saldo_awal/{id}:
+    get:
+      tags: [saldo-awal]
+      summary: Detail saldo awal beserta barisnya
+      operationId: getSaldoAwal
+      description: 404 juga untuk dokumen yang ruangnya di luar unit_kerja aktif.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SaldoAwal" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+
+    patch:
+      tags: [saldo-awal]
+      summary: Ubah header saldo awal
+      operationId: updateSaldoAwal
+      description: >
+        **Hanya saat `DRAFT`.** Ketiga kolomnya `NOT NULL`: boleh diubah, tidak boleh
+        dikosongkan — `null` eksplisit dan `alasan` yang hanya spasi ditolak 400.
+        `alasan` adalah satu-satunya catatan mengapa nilai persediaan diciptakan tanpa
+        dokumen di belakangnya.
+
+
+        Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tanggal: { type: string, format: date }
+                id_ruang: { type: integer, format: int64, minimum: 1 }
+                alasan: { type: string, maxLength: 1000 }
+      responses:
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SaldoAwal" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/saldo_awal/{id}/detail:
+    put:
+      tags: [saldo-awal]
+      summary: Ganti seluruh baris saldo awal
+      operationId: replaceSaldoAwalDetail
+      description: >
+        **Hanya saat `DRAFT`.** Barisnya diganti sekaligus — inilah bentuk yang dipakai
+        mengetik 500 SKU, sehingga pengunggah CSV/Excel adalah pekerjaan sisi klien,
+        bukan modul ini. `detail` wajib berisi minimal satu baris.
+
+
+        `nilai_masuk` tiap baris adalah `qty_input × harga_satuan_input` dari angka yang
+        diketik, dibulatkan sekali. `harga_satuan_input` nol, negatif, atau lebih dari
+        dua desimal ditolak 400; `qty_input` × `faktor_konversi` harus bilangan bulat.
+
+
+        Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [detail]
+              properties:
+                detail:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items: { $ref: "#/components/schemas/SaldoAwalDetailInput" }
+      responses:
+        "200":
+          description: Baris diganti
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SaldoAwal" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/saldo_awal/{id}/ajukan:
+    post:
+      tags: [saldo-awal]
+      summary: Ajukan draft saldo awal
+      operationId: ajukanSaldoAwal
+      description: >
+        `DRAFT` → `DIAJUKAN`. Menolak dokumen tanpa baris. Tidak membawa body.
+
+
+        Role: `INVENTARIS`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diajukan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SaldoAwal" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/saldo_awal/{id}/tolak:
+    post:
+      tags: [saldo-awal]
+      summary: Tolak saldo awal
+      operationId: tolakSaldoAwal
+      description: >
+        `DIAJUKAN` → `DRAFT`, dengan `alasan_tolak` — mengikuti `pembelian`, bukan
+        `pemakaian`: penolakan di sini berarti hitung ulang karena angkanya tidak cocok,
+        koreksi kertas, bukan keputusan bisnis.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan]
+              properties:
+                alasan: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Dikembalikan ke DRAFT
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SaldoAwal" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/saldo_awal/{id}/posting:
+    post:
+      tags: [saldo-awal]
+      summary: Posting saldo awal ke kartu stok
+      operationId: postingSaldoAwal
+      description: >
+        `DIAJUKAN` → `POSTED`. Menulis satu baris `kartu_stok` masuk per baris detail:
+        `jenis_transaksi = 'SALDO_AWAL'`, `stok_masuk = qty_dasar`, `nilai_masuk` persis
+        `qty_input × harga_satuan_input`. `total_nilai` header dijumlahkan sekali
+        setelah loop.
+
+
+        **Pagarnya ada di sini.** Setelah kunci periode, ruang, dan saldo tiap
+        `(barang, ruang)` dipegang, posting ditolak **409** bila `kartu_stok` sudah
+        punya baris **apa pun** untuk pasangan itu — termasuk yang ditulis modul ini
+        sendiri dan baris pembaliknya. Dua draft boleh sama-sama mengklaim pasangan
+        yang sama (draft bukan posting); yang pertama diposting lolos, yang kedua
+        ditolak di sini.
+
+
+        Baris bertanggal `tanggal` dokumen, bukan hari ini, sehingga posting ditolak
+        400 bila periode yang memuat `tanggal` sudah `TUTUP`. Ruang yang dibekukan
+        `stok_opname` terbuka ditolak 409. Produk yang sudah keluar dari katalog unit
+        ruang sejak draft diketik ditolak 400.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: Diposting
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SaldoAwal" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /api/v1/saldo_awal/{id}/batal:
+    post:
+      tags: [saldo-awal]
+      summary: Batalkan saldo awal
+      operationId: batalSaldoAwal
+      description: >
+        Dari `DRAFT`/`DIAJUKAN` hanya mengubah status — tidak ada baris `kartu_stok`
+        yang pernah ditulis, jadi pasangannya tetap terbuka untuk dokumen yang
+        dikoreksi. Dari `POSTED`: menambah baris pembalik `PEMBATALAN_TRANSAKSI`
+        bertanggal hari ini.
+
+
+        **Pembatalan dari `POSTED` menutup pintunya selamanya.** Baris pembalik adalah
+        riwayat, sehingga pasangan `(barang, ruang)` itu tidak pernah bisa diberi
+        saldo awal lagi. Ini pagarnya bekerja, bukan efek samping yang perlu
+        diperbaiki; saldo awal yang salah ketik dikoreksi dengan `stok_opname`, yang
+        sejak baris pembalik ada punya `id_kartu_stok_cutoff` untuk ditunjuk.
+
+
+        Jumlah selalu kembali seimbang, nilai tidak selalu: baris keluarnya dinilai
+        trigger pada rata-rata bergerak ruang saat itu, dan barang saldo awal sudah
+        tercampur ke sana. Ditolak 400 bila barangnya sudah keluar dari ruang —
+        catat pengeluarannya dengan `pemakaian`, `penjualan`, atau `mutasi` yang
+        sesuai. Ruang yang dibekukan `stok_opname` terbuka ditolak 409.
+
+
+        Role: `SUPERADMIN`.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alasan_batal]
+              properties:
+                alasan_batal: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Dibatalkan
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/SaldoAwal" }
         "400": { $ref: "#/components/responses/ValidationError" }
         "404": { $ref: "#/components/responses/Error" }
         "409": { $ref: "#/components/responses/Error" }
@@ -8655,6 +9015,126 @@ components:
           format: int64
           minimum: 0
           description: Diperiksa terhadap `qty_dasar` baris itu sendiri di usecase.
+
+    SaldoAwal:
+      type: object
+      description: >
+        Stok pembukaan untuk unit kerja yang baru migrasi. Dokumen kedelapan yang
+        menulis `kartu_stok`, dan **satu-satunya yang harga pokoknya diketik** —
+        karena itu yang menentukan bukan alurnya melainkan pagarnya: satu
+        `(barang, ruang)` seumur hidup, dan saldo awal yang salah ketik tidak bisa
+        diulang (koreksinya `stok_opname`).
+
+
+        Tidak ada supplier, tidak ada utang, tidak ada total yang ditagihkan: tidak ada
+        lawan transaksi sama sekali. Satu-satunya angka uang adalah nilai yang masuk
+        ke persediaan.
+
+
+        Alurnya `DRAFT → DIAJUKAN → POSTED → BATAL`, dengan `DIAJUKAN → DRAFT` pada
+        penolakan — kendali dua orang wajib karena dokumen ini menciptakan nilai dari
+        tidak ada apa-apa.
+      properties:
+        id: { type: integer, format: int64 }
+        nomor:
+          type: string
+          description: Seri sendiri, prefix `SA`.
+          example: SA/KODE/2026/08/0001
+        tanggal:
+          type: string
+          format: date-time
+          description: Tanggal cutover; baris `kartu_stok` bertanggal ini, bukan hari ini.
+        id_ruang: { type: integer, format: int64 }
+        nama_ruang: { type: string }
+        alasan: { type: string }
+        status:
+          type: string
+          enum: [DRAFT, DIAJUKAN, POSTED, BATAL]
+        total_nilai:
+          type: string
+          nullable: true
+          description: Null sampai `POSTED`. Jumlah `nilai_masuk` seluruh baris.
+          example: "352.50"
+        detail:
+          type: array
+          description: Hanya pada endpoint detail. Kuncinya hilang pada list.
+          items: { $ref: "#/components/schemas/SaldoAwalDetail" }
+        created_by: { type: integer, format: int64 }
+        created_at: { type: string, format: date-time }
+        diajukan_oleh: { type: integer, format: int64, nullable: true }
+        diajukan_pada: { type: string, format: date-time, nullable: true }
+        disetujui_oleh: { type: integer, format: int64, nullable: true }
+        disetujui_pada: { type: string, format: date-time, nullable: true }
+        posted_at: { type: string, format: date-time, nullable: true }
+        dibatalkan_oleh: { type: integer, format: int64, nullable: true }
+        alasan_batal: { type: string, nullable: true }
+        alasan_tolak: { type: string, nullable: true }
+
+    SaldoAwalDetail:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        id_product: { type: integer, format: int64 }
+        kode_barang: { type: string }
+        nama_product: { type: string }
+        qty_input: { type: string, example: "3.0000" }
+        id_satuan_input: { type: integer, format: int64 }
+        nama_satuan: { type: string }
+        faktor_konversi: { type: integer, format: int64 }
+        qty_dasar: { type: integer, format: int64, example: 36 }
+        nama_satuan_dasar: { type: string }
+        harga_satuan_input:
+          type: string
+          description: Harga per satuan input, sebagaimana diketik.
+          example: "100.00"
+        harga_pokok_satuan_dasar:
+          type: string
+          description: >
+            `harga_satuan_input / faktor_konversi`, dibulatkan sekali. Hanya
+            diturunkan supaya baris bisa dibaca per satuan dasar — nilai yang masuk ke
+            stok tidak lewat pembagian ini.
+          example: "8.3333"
+        nilai_masuk:
+          type: string
+          description: >
+            `qty_input × harga_satuan_input`, dari angka yang diketik dan dibulatkan
+            sekali — bukan `qty_dasar × harga_pokok_satuan_dasar` (300.00, bukan 299.99).
+          example: "300.00"
+        id_kartu_stok:
+          type: integer
+          format: int64
+          nullable: true
+          description: Null sampai diposting; diisi dari `RETURNING` baris masuknya.
+
+    SaldoAwalDetailInput:
+      type: object
+      required: [id_product, id_satuan_input, qty_input, harga_satuan_input]
+      properties:
+        id_product:
+          type: integer
+          format: int64
+          minimum: 1
+          description: >
+            Tidak boleh muncul dua kali dalam satu dokumen — kuotanya "tepat satu,
+            selamanya", bukan saldo ruang. `saldo_awal_detail_baris_uidx` adalah
+            jaring pengaman.
+        id_satuan_input:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Harus terdaftar di `product_satuan` produk itu.
+        qty_input:
+          type: string
+          example: "3"
+          description: Lebih dari nol, paling banyak 4 desimal; kali `faktor_konversi` harus bilangan bulat.
+        harga_satuan_input:
+          type: string
+          example: "100.00"
+          description: >
+            Harga pokok yang diketik per satuan input. **Lebih dari nol, paling banyak
+            2 desimal.** Nol ditolak dengan sengaja: barang gratis akan menyeret
+            rata-rata bergerak ruang itu ke bawah secara permanen; bila memang perlu,
+            itu `pembelian` dengan diskon penuh.
 
     Penjualan:
       type: object
