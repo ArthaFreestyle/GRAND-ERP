@@ -34,7 +34,29 @@ func ProductToResponse(product *entity.Product) *model.ProductResponse {
 		response.HargaJual = ProductHargaJualToResponses(product.HargaJual)
 	}
 
+	if product.UnitKerja != nil {
+		unitKerja := ProductUnitKerjaToResponses(product.UnitKerja)
+		response.UnitKerja = &unitKerja
+	}
+
 	return response
+}
+
+// ProductUnitKerjaToResponses always returns a non-nil slice, so a product carried by no
+// unit serialises as [] rather than null.
+func ProductUnitKerjaToResponses(list []entity.ProductUnitKerja) []model.ProductUnitKerjaResponse {
+	responses := make([]model.ProductUnitKerjaResponse, len(list))
+
+	for i := range list {
+		responses[i] = model.ProductUnitKerjaResponse{
+			IDUnitKerja: list[i].IDUnitKerja,
+			Kode:        list[i].KodeUnitKerja,
+			Nama:        list[i].NamaUnitKerja,
+			IsAktif:     list[i].IsAktifUnitKerja,
+		}
+	}
+
+	return responses
 }
 
 func ProductToResponses(list []entity.Product) []model.ProductResponse {

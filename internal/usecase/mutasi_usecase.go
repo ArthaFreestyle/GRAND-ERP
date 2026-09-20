@@ -130,6 +130,12 @@ func (c *MutasiUseCase) Create(ctx context.Context, request *model.CreateMutasiR
 		return nil, err
 	}
 
+	// Friendlier message sooner; Posting repeats it, since the catalog can change in between.
+	if err := c.periksaKatalog(ctx, tx, request.IDRuangAsal, request.IDRuangTujuan,
+		idProductBaris(request.Detail, func(b *model.MutasiDetailRequest) int64 { return b.IDProduct })); err != nil {
+		return nil, err
+	}
+
 	nomor, err := nomorDokumenUntukRuang(
 		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
 		repository.PrefixMutasi, tanggal, request.IDRuangAsal,
@@ -303,6 +309,20 @@ func (c *MutasiUseCase) Update(ctx context.Context, request *model.UpdateMutasiR
 	return c.detail(ctx, c.DB, request.ID, nil)
 }
 
+// periksaKatalog holds a transfer's lines to BOTH rooms' catalogs. Goods leaving a room
+// that does not carry the product cannot exist, but goods ARRIVING in one that does not
+// would land as stock no catalog admits — no document could then sell, count, or move
+// it — so the destination is checked too, unlike the source-only asymmetry
+// periksaRuangUnitAktif applies to authority. Crossing units is still allowed (fase 1);
+// it just requires the destination unit to carry the product.
+func (c *MutasiUseCase) periksaKatalog(ctx context.Context, tx repository.DBTX, idRuangAsal, idRuangTujuan int64, productIDs []int64) error {
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, idRuangAsal, productIDs); err != nil {
+		return err
+	}
+
+	return periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, idRuangTujuan, productIDs)
+}
+
 // ReplaceDetail swaps the whole line set of a DRAFT.
 func (c *MutasiUseCase) ReplaceDetail(ctx context.Context, request *model.ReplaceMutasiDetailRequest) (*model.MutasiResponse, error) {
 	if err := c.Validate.Struct(request); err != nil {
@@ -317,7 +337,13 @@ func (c *MutasiUseCase) ReplaceDetail(ctx context.Context, request *model.Replac
 		_ = tx.Rollback()
 	}()
 
-	if _, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusMutasiDraft); err != nil {
+	draft, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusMutasiDraft)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := c.periksaKatalog(ctx, tx, draft.IDRuangAsal, draft.IDRuangTujuan,
+		idProductBaris(request.Detail, func(b *model.MutasiDetailRequest) int64 { return b.IDProduct })); err != nil {
 		return nil, err
 	}
 
@@ -401,6 +427,14 @@ func (c *MutasiUseCase) Posting(ctx context.Context, request *model.PostingMutas
 
 	if len(detail) == 0 {
 		return nil, model.Invalid("mutasi tanpa baris tidak bisa diposting")
+	}
+
+	// Repeated from draft time: a product can leave either unit's catalog while the
+	// document waits. Reads the membership FOR SHARE, so a removal racing this posting
+	// waits for it and then sees the stock it wrote.
+	if err := c.periksaKatalog(ctx, tx, mutasi.IDRuangAsal, mutasi.IDRuangTujuan,
+		idProductBaris(detail, func(b *entity.MutasiDetail) int64 { return b.IDProduct })); err != nil {
+		return nil, err
 	}
 
 	if err := c.kunciJalurStok(ctx, tx, mutasi, detail, mutasi.Tanggal); err != nil {

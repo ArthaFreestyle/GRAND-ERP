@@ -96,6 +96,7 @@ func mutasiScopeFixture(t *testing.T, testApp *app) (f fixture, unitTujuan, tuju
 
 	f = pembelianFixture(t, testApp)
 	unitTujuan = createUnit(t, testApp, "Unit Tujuan Mutasi Scope")
+	masukKatalog(t, f.product, unitTujuan)
 	room, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{
 		ActorID:     f.actor,
 		NamaRuang:   "Toko Tujuan Scope",

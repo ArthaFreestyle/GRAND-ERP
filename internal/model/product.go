@@ -16,10 +16,26 @@ type ProductResponse struct {
 	Satuan    []ProductSatuanResponse    `json:"satuan,omitempty"`
 	HargaJual []ProductHargaJualResponse `json:"harga_jual,omitempty"`
 
+	// UnitKerja is the product's catalog membership, filled on detail reads only. A
+	// pointer to a slice rather than a slice: nil (a list read, where it is not
+	// fetched) drops the key, while a pointer to an empty slice — a product carried by
+	// no unit at all — still says `[]`, which `omitempty` on a plain slice cannot.
+	UnitKerja *[]ProductUnitKerjaResponse `json:"unit_kerja,omitempty"`
+
 	CreatedAt time.Time `json:"created_at"`
 	CreatedBy int64     `json:"created_by"`
 	UpdatedAt time.Time `json:"updated_at"`
 	UpdatedBy *int64    `json:"updated_by,omitempty"`
+}
+
+// ProductUnitKerjaResponse is one unit whose catalog holds the product. IsAktif is the
+// unit's, not the membership's — a retired unit's membership is still listed, so it
+// can still be seen and removed.
+type ProductUnitKerjaResponse struct {
+	IDUnitKerja int64   `json:"id_unit_kerja"`
+	Kode        *string `json:"kode,omitempty"`
+	Nama        string  `json:"nama"`
+	IsAktif     bool    `json:"is_aktif"`
 }
 
 type ProductSatuanResponse struct {
@@ -60,6 +76,13 @@ type CreateProductRequest struct {
 	IDSatuanDasar int64                        `json:"id_satuan_dasar" validate:"required,gt=0"`
 	StokMinimum   int64                        `json:"stok_minimum" validate:"min=0"`
 	Satuan        []CreateProductSatuanRequest `json:"satuan" validate:"omitempty,max=32,dive"`
+
+	// AktifIDUnitKerja is filled from the session's active grant by the controller,
+	// never from the body. It decides which catalog the product starts in: a session
+	// active in a unit starts it in that unit only; nil (a global session) starts it in
+	// every active unit. There is deliberately no body field for this — narrowing or
+	// widening afterwards is PUT /product/{id}/unit-kerja.
+	AktifIDUnitKerja *int64 `json:"-"`
 }
 
 // CreateProductSatuanRequest is one conversion row.
@@ -90,6 +113,19 @@ type UpdateProductRequest struct {
 	Nama        Optional[string] `json:"nama" validate:"omitempty,max=255"`
 	StokMinimum Optional[int64]  `json:"stok_minimum" validate:"omitempty,min=0"`
 	IsAktif     Optional[bool]   `json:"is_aktif"`
+}
+
+// SetProductUnitKerjaRequest replaces the whole set of unit catalogs a product is in.
+//
+// Replace, not add/remove — the same rule grants and product lines follow: `[]` empties
+// it, a list leaves exactly those, and an absent or null field is rejected (`required`
+// fails on a nil slice but passes an empty one) because there is no "leave alone" for
+// the only field this endpoint has. A unit already holding the product may be kept even
+// if it has since been retired; only a NEW membership must name an active unit.
+type SetProductUnitKerjaRequest struct {
+	IDProduct   int64   `json:"-" validate:"required,gt=0"`
+	ActorID     int64   `json:"-" validate:"required,gt=0"`
+	IDUnitKerja []int64 `json:"id_unit_kerja" validate:"required,max=64,dive,gt=0"`
 }
 
 // AddProductSatuanRequest adds one conversion unit to an existing product.

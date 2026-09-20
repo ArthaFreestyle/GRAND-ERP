@@ -114,6 +114,13 @@ func (c *PembelianUseCase) Create(ctx context.Context, request *model.CreatePemb
 		return nil, err
 	}
 
+	// A draft naming a product the room's unit does not carry is refused here for the
+	// friendlier message; Posting repeats it, since the catalog can change in between.
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, request.IDRuang,
+		idProductBaris(request.Detail, func(b *model.PembelianDetailRequest) int64 { return b.IDProduct })); err != nil {
+		return nil, err
+	}
+
 	if request.NoFakturSupplier != nil && *request.NoFakturSupplier != "" {
 		exists, err := c.PembelianRepository.ExistsFakturSupplier(
 			ctx, tx, request.IDSupplier, *request.NoFakturSupplier, 0,
@@ -311,6 +318,11 @@ func (c *PembelianUseCase) ReplaceDetail(ctx context.Context, request *model.Rep
 		return nil, err
 	}
 
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, pembelian.IDRuang,
+		idProductBaris(request.Detail, func(b *model.PembelianDetailRequest) int64 { return b.IDProduct })); err != nil {
+		return nil, err
+	}
+
 	// Safe only because the document is a DRAFT: a posted line is what
 	// retur_pembelian_detail points at and the source of cost for every reversal,
 	// so deleting one would erase the audit trail.
@@ -466,6 +478,14 @@ func (c *PembelianUseCase) Posting(ctx context.Context, request *model.PostingPe
 
 	if len(detail) == 0 {
 		return nil, model.Invalid("pembelian tanpa baris tidak bisa diposting")
+	}
+
+	// Repeated from draft time: a product can leave the unit's catalog while the
+	// document waits for approval. Reads the membership FOR SHARE, so a removal
+	// racing this posting waits for it and then sees the stock it wrote.
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, pembelian.IDRuang,
+		idProductBaris(detail, func(b *entity.PembelianDetail) int64 { return b.IDProduct })); err != nil {
+		return nil, err
 	}
 
 	baris, err := c.siapkanPosting(pembelian, detail)

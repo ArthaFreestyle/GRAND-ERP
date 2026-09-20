@@ -49,6 +49,10 @@ type StokOpnameUseCase struct {
 	// UnitKerjaRepository resolves the kode a document number carries — isu #21
 	// fase 1 — read off id_ruang, not the caller's active unit_kerja.
 	UnitKerjaRepository *repository.UnitKerjaRepository
+	// ProductRepository is borrowed for one narrow read only, periksaKatalogRuang. A
+	// count still resolves no conversion factor — it is always in the base unit — so
+	// this is not the reason every other document holds it.
+	ProductRepository *repository.ProductRepository
 }
 
 func NewStokOpnameUseCase(
@@ -61,6 +65,7 @@ func NewStokOpnameUseCase(
 	periodeRepository *repository.PeriodeRepository,
 	ruangRepository *repository.RuangRepository,
 	unitKerjaRepository *repository.UnitKerjaRepository,
+	productRepository *repository.ProductRepository,
 ) *StokOpnameUseCase {
 	return &StokOpnameUseCase{
 		DB:                   db,
@@ -72,6 +77,7 @@ func NewStokOpnameUseCase(
 		PeriodeRepository:    periodeRepository,
 		RuangRepository:      ruangRepository,
 		UnitKerjaRepository:  unitKerjaRepository,
+		ProductRepository:    productRepository,
 	}
 }
 
@@ -289,6 +295,14 @@ func (c *StokOpnameUseCase) ReplaceDetail(ctx context.Context, request *model.Re
 
 	opname, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusStokOpnameDraft)
 	if err != nil {
+		return nil, err
+	}
+
+	// TarikSaldo needs no such check — it only ever lists products the room already
+	// holds a balance row for. A hand-typed line is how a product the unit does not
+	// carry could arrive here at all.
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, opname.IDRuang,
+		idProductBaris(request.Detail, func(b *model.StokOpnameDetailRequest) int64 { return b.IDProduct })); err != nil {
 		return nil, err
 	}
 
@@ -521,6 +535,23 @@ func (c *StokOpnameUseCase) Posting(ctx context.Context, request *model.PostingS
 		if semuaDetail[i].StokSO != nil {
 			dihitung = append(dihitung, semuaDetail[i])
 		}
+	}
+
+	// Only a surplus brings goods into existence, so only a surplus can put stock behind
+	// a product the unit's catalog does not carry. A deficit needs a balance to draw
+	// down, which the catalog invariant already places inside it, and a zero selisih
+	// writes nothing. Reads the membership FOR SHARE, so a catalog removal racing this
+	// posting waits for it and then sees the stock it wrote.
+	lebih := make([]entity.StokOpnameDetail, 0, len(dihitung))
+	for i := range dihitung {
+		if dihitung[i].StokSelisihLebih > 0 {
+			lebih = append(lebih, dihitung[i])
+		}
+	}
+
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, opname.IDRuang,
+		idProductBaris(lebih, func(b *entity.StokOpnameDetail) int64 { return b.IDBarang })); err != nil {
+		return nil, err
 	}
 
 	if err := c.kunciJalurStok(ctx, tx, opname, dihitung); err != nil {

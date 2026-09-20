@@ -282,6 +282,12 @@ func (c *RouteConfig) setupAuthRoute() {
 	api.Patch("/product/:id", inventaris, c.ProductController.Update)
 	api.Post("/product/:id/satuan", inventaris, c.ProductController.AddSatuan)
 
+	// unit-kerja is the product's per-unit catalog: which units may trade it. It sits
+	// with INVENTARIS like the rest of this block — it is goods master data — and
+	// replaces the whole set (PUT), the rule grants and lines already follow. Taking a
+	// product out of a unit that still holds its stock is refused in the usecase.
+	api.Put("/product/:id/unit-kerja", inventaris, c.ProductController.SetUnitKerja)
+
 	// harga-jual (isu #8): GET resolves which version is in force, open to any
 	// authenticated caller like every other read; POST/PATCH/DELETE mutate the price
 	// list and sit with INVENTARIS same as the rest of this block. PATCH and DELETE

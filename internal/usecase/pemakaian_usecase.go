@@ -112,6 +112,12 @@ func (c *PemakaianUseCase) Create(ctx context.Context, request *model.CreatePema
 		return nil, err
 	}
 
+	// Friendlier message sooner; Posting repeats it, since the catalog can change in between.
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, request.IDRuang,
+		idProductBaris(request.Detail, func(b *model.PemakaianDetailRequest) int64 { return b.IDProduct })); err != nil {
+		return nil, err
+	}
+
 	nomor, err := nomorDokumenUntukRuang(
 		ctx, tx, c.CounterRepository, c.RuangRepository, c.UnitKerjaRepository,
 		repository.PrefixPemakaian, tanggal, request.IDRuang,
@@ -271,7 +277,13 @@ func (c *PemakaianUseCase) ReplaceDetail(ctx context.Context, request *model.Rep
 		_ = tx.Rollback()
 	}()
 
-	if _, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusPemakaianDraft); err != nil {
+	draft, err := c.kunciDenganStatus(ctx, tx, request.ID, entity.StatusPemakaianDraft)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, draft.IDRuang,
+		idProductBaris(request.Detail, func(b *model.PemakaianDetailRequest) int64 { return b.IDProduct })); err != nil {
 		return nil, err
 	}
 
@@ -512,6 +524,14 @@ func (c *PemakaianUseCase) Posting(ctx context.Context, request *model.PostingPe
 
 	if len(baris) == 0 {
 		return nil, model.Invalid("pemakaian tanpa baris yang disetujui tidak bisa diposting")
+	}
+
+	// Only the lines that actually move goods: a refused line (approved quantity 0)
+	// writes nothing, so its product's catalog membership is not this posting's business.
+	// Reads the membership FOR SHARE, so a removal racing this posting waits for it.
+	if err := periksaKatalogRuang(ctx, tx, c.RuangRepository, c.ProductRepository, pemakaian.IDRuang,
+		idProductBaris(baris, func(b *entity.PemakaianDetail) int64 { return b.IDProduct })); err != nil {
+		return nil, err
 	}
 
 	if err := c.kunciJalurStok(ctx, tx, pemakaian.IDRuang, baris, pemakaian.Tanggal); err != nil {

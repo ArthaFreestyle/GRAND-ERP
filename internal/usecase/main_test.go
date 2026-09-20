@@ -215,7 +215,7 @@ func newApp(t *testing.T) *app {
 		),
 		product: usecase.NewProductUseCase(
 			testDB, log, validate, productRepository, pembelianRepository,
-			kartuStokRepository, ruangRepository,
+			kartuStokRepository, ruangRepository, unitKerjaRepository,
 		),
 		user: usecase.NewUserUseCase(
 			testDB, log, validate, userRepository, roleRepository, unitKerjaRepository,
@@ -272,7 +272,7 @@ func newApp(t *testing.T) *app {
 		stokOpname: usecase.NewStokOpnameUseCase(
 			testDB, log, validate,
 			stokOpnameRepository, kartuStokRepository, counterRepository,
-			periodeRepository, ruangRepository, unitKerjaRepository,
+			periodeRepository, ruangRepository, unitKerjaRepository, productRepository,
 		),
 		pembayaran: usecase.NewPembayaranUtangUseCase(
 			testDB, log, validate,
@@ -444,7 +444,9 @@ func truncateMaster(t *testing.T) {
 		"penjualan_detail", "penjualan",
 		// product_harga_jual and product_satuan reference product; product
 		// references satuan and users, so it has to go before both.
-		"product_harga_jual", "product_satuan", "product",
+		// product_unit_kerja is a join row pointing at product, unit_kerja and users
+		// (created_by) and nothing points at it, so it goes before all three.
+		"product_unit_kerja", "product_harga_jual", "product_satuan", "product",
 		"supplier", "pelanggan", "ekspedisi", "satuan",
 		// ruang.id_unit_kerja references unit_kerja, so ruang has to go first.
 		// user_role.id_unit_kerja references unit_kerja too (isu #12 fase 3), so
@@ -459,6 +461,27 @@ func truncateMaster(t *testing.T) {
 }
 
 func ctx() context.Context { return context.Background() }
+
+// masukKatalog puts a product into the catalog of each given unit_kerja.
+//
+// A product created BEFORE a unit exists is not in that unit's catalog — a new unit
+// starts empty, which is the point of a per-unit catalog — and pembelianFixture creates
+// its product after its own unit but before any extra unit a test adds. A test that adds
+// a unit and then documents into one of its rooms needs this. Raw SQL rather than
+// ProductUseCase.SetUnitKerja, which replaces the whole set and so would need the
+// existing memberships restated; ON CONFLICT DO NOTHING keeps a repeat harmless.
+func masukKatalog(t *testing.T, idProduct int64, idUnitKerja ...int64) {
+	t.Helper()
+
+	for _, unit := range idUnitKerja {
+		if _, err := testDB.Exec(
+			`INSERT INTO product_unit_kerja (id_product, id_unit_kerja) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+			idProduct, unit,
+		); err != nil {
+			t.Fatalf("masukkan produk %d ke katalog unit %d: %v", idProduct, unit, err)
+		}
+	}
+}
 
 func ptr[T any](v T) *T { return &v }
 

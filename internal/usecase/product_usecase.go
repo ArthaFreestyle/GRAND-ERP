@@ -3,6 +3,9 @@ package usecase
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strconv"
+	"strings"
 	"time"
 
 	"Arthafreestyle/ERP/internal/entity"
@@ -67,6 +70,10 @@ type ProductUseCase struct {
 	PembelianRepository *repository.PembelianRepository
 	KartuStokRepository *repository.KartuStokRepository
 	RuangRepository     *repository.RuangRepository
+
+	// UnitKerjaRepository validates that a catalog membership names an active unit —
+	// the foreign key cannot tell a retired unit from a live one.
+	UnitKerjaRepository *repository.UnitKerjaRepository
 }
 
 func NewProductUseCase(
@@ -77,6 +84,7 @@ func NewProductUseCase(
 	pembelianRepository *repository.PembelianRepository,
 	kartuStokRepository *repository.KartuStokRepository,
 	ruangRepository *repository.RuangRepository,
+	unitKerjaRepository *repository.UnitKerjaRepository,
 ) *ProductUseCase {
 	return &ProductUseCase{
 		DB:                  db,
@@ -86,6 +94,7 @@ func NewProductUseCase(
 		PembelianRepository: pembelianRepository,
 		KartuStokRepository: kartuStokRepository,
 		RuangRepository:     ruangRepository,
+		UnitKerjaRepository: unitKerjaRepository,
 	}
 }
 
@@ -120,6 +129,11 @@ func (c *ProductUseCase) Create(ctx context.Context, request *model.CreateProduc
 		return nil, model.Conflict("kode barang sudah dipakai")
 	}
 
+	unitKerjaAwal, err := c.unitKerjaAwal(ctx, tx, request.AktifIDUnitKerja)
+	if err != nil {
+		return nil, err
+	}
+
 	product := &entity.Product{
 		KodeBarang:    request.KodeBarang,
 		Nama:          request.Nama,
@@ -149,6 +163,11 @@ func (c *ProductUseCase) Create(ctx context.Context, request *model.CreateProduc
 		}
 	}
 
+	actor := request.ActorID
+	if err := c.ProductRepository.InsertUnitKerja(ctx, tx, product.ID, unitKerjaAwal, &actor); err != nil {
+		return nil, invalidOnForeignKey(err, "id_unit_kerja tidak ada di tabel unit_kerja")
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -156,6 +175,149 @@ func (c *ProductUseCase) Create(ctx context.Context, request *model.CreateProduc
 	// Re-read so the response carries the base unit's name and the stored rows rather
 	// than what was sent.
 	return c.detail(ctx, product.ID)
+}
+
+// unitKerjaAwal resolves the catalog a new product starts in from the caller's active
+// unit_kerja, never from the body: a session active in a unit starts the product in that
+// unit only, and a global session (aktif == nil — SUPERADMIN, or no active context) starts
+// it in every ACTIVE unit, the same default migration 000029 gave the products that
+// already existed.
+//
+// A scoped start is the point of a per-unit catalog: what INVENTARIS of one outlet adds is
+// not silently sold at every other outlet. Widening later is PUT /product/{id}/unit-kerja.
+// The session's unit is checked active because a grant embedded in a token outlives the
+// unit being retired; the foreign key alone would accept it.
+func (c *ProductUseCase) unitKerjaAwal(ctx context.Context, tx repository.DBTX, aktif *int64) ([]int64, error) {
+	if aktif == nil {
+		return c.ProductRepository.IDUnitKerjaAktifSemua(ctx, tx)
+	}
+
+	ada, err := c.UnitKerjaRepository.CountActiveByIDs(ctx, tx, []int64{*aktif})
+	if err != nil {
+		return nil, err
+	}
+	if ada != 1 {
+		return nil, model.Invalid("unit kerja aktif sesi ini sudah nonaktif; pilih konteks lain lewat switch-context")
+	}
+
+	return []int64{*aktif}, nil
+}
+
+// uniqueInt64 keeps the first occurrence of each id, in order. CountActiveByIDs compares
+// a count against the number of ids, so a duplicate would wrongly reject a valid request.
+func uniqueInt64(ids []int64) []int64 {
+	seen := make(map[int64]struct{}, len(ids))
+	unik := make([]int64, 0, len(ids))
+
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+
+		seen[id] = struct{}{}
+		unik = append(unik, id)
+	}
+
+	return unik
+}
+
+// SetUnitKerja replaces the set of unit catalogs a product is in.
+//
+// Taking a product OUT of a unit is refused 409 while any room of that unit still holds
+// it (stok_akhir > 0) — the same shape as retiring a ruang that still holds stock. Stock
+// no catalog admits could not be sold, counted, or moved by any document, and would still
+// sit on the inventory value report. Empty the unit's rooms with a mutasi or a pemakaian
+// first.
+//
+// The order inside the transaction is the guarantee, not a style: the membership rows are
+// DELETEd first and the stock read afterwards. A posting in flight holds those rows FOR
+// SHARE (periksaKatalogRuang), so the DELETE waits until it has committed, and the stock
+// check then sees what it wrote. Reading the stock first would leave a window in which a
+// posting lands between the two.
+func (c *ProductUseCase) SetUnitKerja(ctx context.Context, request *model.SetProductUnitKerjaRequest) (*model.ProductResponse, error) {
+	if err := c.Validate.Struct(request); err != nil {
+		return nil, err
+	}
+
+	tx, err := c.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = tx.Rollback() // no-op once the transaction is committed
+	}()
+
+	if _, err := c.ProductRepository.FindByID(ctx, tx, request.IDProduct); err != nil {
+		return nil, notFoundOnNoRows(err, "product not found")
+	}
+
+	ids := uniqueInt64(request.IDUnitKerja)
+
+	sekarang, err := c.ProductRepository.FindUnitKerja(ctx, tx, request.IDProduct)
+	if err != nil {
+		return nil, err
+	}
+
+	sudahAda := make(map[int64]struct{}, len(sekarang))
+	for i := range sekarang {
+		sudahAda[sekarang[i].IDUnitKerja] = struct{}{}
+	}
+
+	// Only a NEW membership has to name an active unit. Echoing back a retired unit the
+	// product already sits in is how a client keeps it, not a request to add it.
+	baru := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := sudahAda[id]; !ok {
+			baru = append(baru, id)
+		}
+	}
+
+	if len(baru) > 0 {
+		aktif, err := c.UnitKerjaRepository.CountActiveByIDs(ctx, tx, baru)
+		if err != nil {
+			return nil, err
+		}
+		if aktif != int64(len(baru)) {
+			return nil, model.Invalid("id_unit_kerja harus unit kerja yang ada dan aktif")
+		}
+	}
+
+	dicabut, err := c.ProductRepository.DeleteUnitKerjaSelain(ctx, tx, request.IDProduct, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	masihAdaStok, err := c.KartuStokRepository.UnitDenganSaldoPositif(ctx, tx, request.IDProduct, dicabut)
+	if err != nil {
+		return nil, err
+	}
+	if len(masihAdaStok) > 0 {
+		return nil, model.Conflict(fmt.Sprintf(
+			"produk masih punya stok di unit kerja id %s — kosongkan dulu dengan mutasi atau pemakaian",
+			joinIDs(masihAdaStok),
+		))
+	}
+
+	actor := request.ActorID
+	if err := c.ProductRepository.InsertUnitKerja(ctx, tx, request.IDProduct, baru, &actor); err != nil {
+		return nil, invalidOnForeignKey(err, "id_unit_kerja tidak ada di tabel unit_kerja")
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	return c.detail(ctx, request.IDProduct)
+}
+
+// joinIDs renders ids as "1, 2, 3" for an error message.
+func joinIDs(ids []int64) string {
+	bagian := make([]string, len(ids))
+	for i, id := range ids {
+		bagian[i] = strconv.FormatInt(id, 10)
+	}
+
+	return strings.Join(bagian, ", ")
 }
 
 // mergeSatuan builds the rows to insert: the base unit at faktor = 1, plus whatever the
@@ -224,8 +386,8 @@ func (c *ProductUseCase) Get(ctx context.Context, request *model.GetProductReque
 	return c.detail(ctx, request.ID)
 }
 
-// detail loads a product and both children. Three queries, independent of how many rows
-// come back.
+// detail loads a product and its three children (units, prices, catalog membership).
+// Four queries, independent of how many rows come back.
 func (c *ProductUseCase) detail(ctx context.Context, id int64) (*model.ProductResponse, error) {
 	product, err := c.ProductRepository.FindByID(ctx, c.DB, id)
 	if err != nil {
@@ -244,8 +406,14 @@ func (c *ProductUseCase) detail(ctx context.Context, id int64) (*model.ProductRe
 
 	// Non-nil even when empty, so the response carries [] rather than dropping the key
 	// and implying the product was never asked about.
+	unitKerja, err := c.ProductRepository.FindUnitKerja(ctx, c.DB, id)
+	if err != nil {
+		return nil, err
+	}
+
 	product.Satuan = satuan
 	product.HargaJual = hargaJual
+	product.UnitKerja = unitKerja
 
 	return converter.ProductToResponse(product), nil
 }
@@ -754,7 +922,12 @@ func (c *ProductUseCase) POS(ctx context.Context, request *model.ListPosProductR
 
 	// A mistyped id_ruang that silently answered zero stock on every row would be an
 	// expensive bug to notice, so it is checked before anything else runs.
-	if _, err := c.RuangRepository.IDUnitKerjaByID(ctx, c.DB, request.IDRuang); err != nil {
+	//
+	// The unit it answers is also what narrows the catalog: the room's own unit, never
+	// the caller's active one, matching periksaKatalogRuang — the screen must offer
+	// exactly what the nota would then accept.
+	idUnitKerja, err := c.RuangRepository.IDUnitKerjaByID(ctx, c.DB, request.IDRuang)
+	if err != nil {
 		return nil, nil, notFoundOnNoRows(err, "ruang not found")
 	}
 
@@ -769,7 +942,7 @@ func (c *ProductUseCase) POS(ctx context.Context, request *model.ListPosProductR
 		tanggal = parsed
 	}
 
-	list, total, err := c.ProductRepository.SearchPOS(ctx, c.DB, request.Search, request.Size, request.Offset())
+	list, total, err := c.ProductRepository.SearchPOS(ctx, c.DB, request.Search, idUnitKerja, request.Size, request.Offset())
 	if err != nil {
 		return nil, nil, err
 	}

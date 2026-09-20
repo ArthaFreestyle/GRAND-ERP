@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"Arthafreestyle/ERP/internal/model"
@@ -228,6 +229,67 @@ func periksaRuangBeku(ctx context.Context, db repository.DBTX, stokOpname *repos
 // information scoping a read is supposed to withhold.
 func diLuarUnitAktif(idUnitKerjaRuang int64, aktifIDUnitKerja *int64) bool {
 	return aktifIDUnitKerja != nil && idUnitKerjaRuang != *aktifIDUnitKerja
+}
+
+// periksaKatalogRuang refuses a document line naming a product that is not in the
+// catalog of the unit_kerja the room belongs to. product_unit_kerja is what makes the
+// catalog per unit; this is the one function every document that moves goods in or
+// out of a room calls, so the rule is written once.
+//
+// The unit comes from the ROOM, never the caller's active unit_kerja — the same choice
+// nomorDokumenUntukRuang makes, and for the same reason: the room is what the document
+// actually belongs to. A global session (Aktif.IDUnitKerja == nil) is therefore held
+// to the same catalog as anyone else; SUPERADMIN scope widens who may act, not which
+// products a unit may trade.
+//
+// It answers 400, not 403: nobody's authority is in question, a line simply names
+// something this unit does not carry. An unknown id_ruang is let through (nil), and so
+// is an id naming no product — both belong to the foreign key, the division
+// periksaRuangUnitAktif already makes.
+//
+// It is a read the removal of a catalog entry can queue behind (FindDiluarKatalog reads
+// FOR SHARE), so it must run inside the document's transaction. Calling it at draft time
+// only gives the friendlier error sooner; Posting repeats it, because a product can
+// leave a catalog between typing a draft and posting it.
+func periksaKatalogRuang(ctx context.Context, db repository.DBTX, ruang *repository.RuangRepository, product *repository.ProductRepository, idRuang int64, productIDs []int64) error {
+	if len(productIDs) == 0 {
+		return nil
+	}
+
+	idUnitKerja, err := ruang.IDUnitKerjaByID(ctx, db, idRuang)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+
+		return err
+	}
+
+	diluar, err := product.FindDiluarKatalog(ctx, db, idUnitKerja, productIDs)
+	if err != nil {
+		return err
+	}
+
+	if len(diluar) > 0 {
+		return model.Invalid(fmt.Sprintf(
+			"produk %s tidak ada di katalog unit kerja ruang ini", strings.Join(diluar, ", "),
+		))
+	}
+
+	return nil
+}
+
+// idProductBaris pulls the product id out of each line of a document, whichever
+// request or entity type carries it — every document's lines say the same thing under
+// the same field name, and periksaKatalogRuang wants a plain slice.
+func idProductBaris[T any](baris []T, ambil func(*T) int64) []int64 {
+	ids := make([]int64, len(baris))
+
+	for i := range baris {
+		ids[i] = ambil(&baris[i])
+	}
+
+	return ids
 }
 
 // conflictOnTransisi maps a guarded status change that matched no row to a 409.

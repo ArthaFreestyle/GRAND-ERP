@@ -95,6 +95,7 @@ func TestPostingEnamModulKeRuangBekuDitolak409(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create unit lain: %v", err)
 	}
+	masukKatalog(t, f.product, unitLain.ID)
 	ruangTujuan, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Tujuan Mutasi", IDUnitKerja: unitLain.ID,
 	})
@@ -266,6 +267,7 @@ func TestMutasiDitolakSaatRuangTujuanBeku(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create unit lain: %v", err)
 	}
+	masukKatalog(t, f.product, unitLain.ID)
 	cabang, err := testApp.ruang.Create(ctx(), &model.CreateRuangRequest{ActorID: f.actor, 
 		NamaRuang: "Cabang", IDUnitKerja: unitLain.ID,
 	})
